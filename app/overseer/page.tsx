@@ -117,6 +117,8 @@ export default async function OverseerPage() {
           initialChurches={churches}
           initialInvites={invites}
           userEmail={user.email || ''}
+          denominationName={denominationName}
+          denominationSlug={denominationSlug || undefined}
         />
       </main>
     </div>
