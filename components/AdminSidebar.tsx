@@ -18,17 +18,21 @@ export default function AdminSidebar({ church, churchSlug }: { church: Church, c
     setIsLoggingOut(true);
 
     try {
-      const { createClient } = await import('@/lib/supabase/client');
-      const supabase = createClient();
-      await supabase.auth.signOut();
-    } catch (err) {
-      console.warn('Client sign out non-fatal:', err);
+      if (typeof window !== 'undefined' && typeof document !== 'undefined') {
+        const { createClient } = await import('@/lib/supabase/client');
+        const supabase = createClient();
+        if (supabase?.auth?.signOut) {
+          await supabase.auth.signOut();
+        }
+      }
+    } catch {
+      // Non-fatal client sign out catch
     }
 
     try {
-      await fetch('/api/auth/logout', { method: 'POST' });
-    } catch (err) {
-      console.warn('Server sign out non-fatal:', err);
+      await fetch('/api/auth/logout', { method: 'POST', cache: 'no-store' });
+    } catch {
+      // Fallback
     }
 
     window.location.href = '/';

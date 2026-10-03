@@ -45,12 +45,31 @@ export async function login(prevState: AuthState, formData: FormData): Promise<A
           const overseerUrl = context.denomination_slug ? `/d/${context.denomination_slug}/overseer` : '/overseer';
           return { success: true, redirectTo: overseerUrl };
         } else if (context?.account_type === 'pastor') {
-          const target = context.church_slug || churchSlug;
-          if (target) {
-            return { success: true, redirectTo: `/${target}/admin` };
+          const adminSupabase = await createAdminClient();
+          const { data: profile } = await adminSupabase
+            .from('admin_profiles')
+            .select('tenant_id')
+            .eq('id', authData.user.id)
+            .maybeSingle();
+
+          if (profile?.tenant_id) {
+            const { data: church } = await adminSupabase
+              .schema('church')
+              .from('churches')
+              .select('slug')
+              .eq('id', profile.tenant_id)
+              .maybeSingle();
+
+            if (church?.slug) {
+              return { success: true, redirectTo: `/${church.slug}/admin` };
+            }
           }
-        } else {
-          return { error: 'Account has no active ministry or overseer assignment. Please contact support or provision a church.' };
+
+          if (churchSlug && churchSlug !== 'admin') {
+            return { success: true, redirectTo: `/${churchSlug}/admin` };
+          }
+
+          return { success: true, redirectTo: '/signup/provision' };
         }
       }
     } catch (contextErr) {
@@ -107,7 +126,7 @@ export async function login(prevState: AuthState, formData: FormData): Promise<A
     }
 
     // 3. Get the correct slug from churches
-    let targetSlug = churchSlug;
+    let targetSlug: string | null = null;
     const tenantId = profile.tenant_id;
     const appType = profile.app_type;
     
@@ -126,6 +145,14 @@ export async function login(prevState: AuthState, formData: FormData): Promise<A
           targetSlug = church.slug;
         }
       }
+    }
+
+    if (!targetSlug && churchSlug && churchSlug !== 'admin') {
+      targetSlug = churchSlug;
+    }
+
+    if (!targetSlug) {
+      return { success: true, redirectTo: '/signup/provision' };
     }
 
     return { success: true, redirectTo: `/${targetSlug}/admin` };

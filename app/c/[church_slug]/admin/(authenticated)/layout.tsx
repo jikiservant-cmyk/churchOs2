@@ -45,7 +45,7 @@ export default async function AdminLayout({
     if (pastorChurch?.slug) {
       redirect(`/${pastorChurch.slug}/admin`);
     } else {
-      notFound();
+      redirect('/signup/provision');
     }
   }
 

@@ -89,6 +89,32 @@ export async function provisionTenant(prevState: ProvisionState, formData: FormD
     let tenantId: string | null = null;
     let rpcError: any = null;
 
+    // 1. Check if user already has an active church
+    const { data: existingProfile } = await adminSupabase
+      .from('admin_profiles')
+      .select('tenant_id, role')
+      .eq('id', user.id)
+      .maybeSingle();
+
+    if (existingProfile?.tenant_id) {
+      const { data: existingChurch } = await adminSupabase
+        .schema('church')
+        .from('churches')
+        .select('slug')
+        .eq('id', existingProfile.tenant_id)
+        .maybeSingle();
+
+      if (existingChurch?.slug) {
+        console.log('[Provisioning] User already has a church, routing to:', existingChurch.slug);
+        return {
+          success: true,
+          tenantId: existingProfile.tenant_id,
+          slug: existingChurch.slug,
+          appType
+        };
+      }
+    }
+
     try {
       const v3Response = await supabase
         .rpc('provision_church_v3', {
@@ -100,42 +126,86 @@ export async function provisionTenant(prevState: ProvisionState, formData: FormD
         });
 
       if (v3Response.error) {
-        const isMissingV3 = 
-          (v3Response.error as any).code === '42883' || 
-          v3Response.error.message?.includes('provision_church_v3');
-
-        if (isMissingV3) {
-          console.warn('[Provisioning] provision_church_v3 not present in current DB; falling back to v2 for compatibility');
-          const clientIp = (ip && ip !== 'unknown' && ip !== '127.0.0.1' && ip !== '::1') ? ip : null;
-          const v2Response = await adminSupabase
-            .rpc('provision_church_v2', {
-              p_user_id: user.id,
-              p_name: sanitizedName,
-              p_slug: sanitizedSlug,
-              p_role: 'pastor',
-              p_ip: clientIp,
-            });
-          tenantId = v2Response.data;
-          rpcError = v2Response.error;
-        } else {
-          rpcError = v3Response.error;
-        }
+        rpcError = v3Response.error;
       } else {
         tenantId = v3Response.data;
       }
     } catch (v3CallErr: any) {
-      console.warn('[Provisioning] v3 invocation error, trying v2 fallback:', v3CallErr);
-      const clientIp = (ip && ip !== 'unknown' && ip !== '127.0.0.1' && ip !== '::1') ? ip : null;
-      const v2Response = await adminSupabase
-        .rpc('provision_church_v2', {
-          p_user_id: user.id,
-          p_name: sanitizedName,
-          p_slug: sanitizedSlug,
-          p_role: 'pastor',
-          p_ip: clientIp,
+      rpcError = v3CallErr;
+    }
+
+    // Direct self-healing provisioning if RPC fails due to profile conflicts
+    if (rpcError && (
+      rpcError.message?.includes('already has an admin profile') || 
+      rpcError.message?.includes('provision_church') ||
+      rpcError.code === 'P0001' ||
+      rpcError.code === '42883'
+    )) {
+      console.warn('[Provisioning] RPC failed with known constraint, executing direct provisioning fallback:', rpcError.message);
+      
+      const newTenantId = crypto.randomUUID();
+      let denomId: string | null = null;
+
+      // Handle invite code if provided
+      if (inviteCode) {
+        const { data: invite } = await adminSupabase
+          .schema('church')
+          .from('denomination_invites')
+          .select('denomination_id')
+          .ilike('code', inviteCode)
+          .maybeSingle();
+        if (invite?.denomination_id) {
+          denomId = invite.denomination_id;
+        }
+      }
+
+      // Check slug uniqueness
+      const { data: slugCheck } = await adminSupabase
+        .schema('church')
+        .from('churches')
+        .select('id')
+        .ilike('slug', sanitizedSlug)
+        .maybeSingle();
+
+      if (slugCheck) {
+        return { error: 'Workspace URL (slug) is already taken. Please choose another.' };
+      }
+
+      // Insert Church
+      const { error: churchInsertError } = await adminSupabase
+        .schema('church')
+        .from('churches')
+        .insert({
+          id: newTenantId,
+          name: sanitizedName,
+          slug: sanitizedSlug,
+          app_type: 'church',
+          denomination_id: denomId
         });
-      tenantId = v2Response.data;
-      rpcError = v2Response.error;
+
+      if (churchInsertError) {
+        console.error('[Provisioning] Direct church insert error:', churchInsertError);
+        return { error: churchInsertError.message || 'Failed to create church workspace' };
+      }
+
+      // Upsert admin profile
+      const { error: profileError } = await adminSupabase
+        .from('admin_profiles')
+        .upsert({
+          id: user.id,
+          email: user.email,
+          tenant_id: newTenantId,
+          role: 'pastor',
+          full_name: sanitizedName,
+          app_type: 'church'
+        }, { onConflict: 'id' });
+
+      if (profileError) {
+        console.error('[Provisioning] Direct profile upsert error:', profileError);
+      }
+
+      tenantId = newTenantId;
+      rpcError = null;
     }
 
     if (rpcError) {

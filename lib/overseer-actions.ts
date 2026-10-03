@@ -65,14 +65,30 @@ export async function getOverseerDashboardData() {
       console.warn('[Overseer] invites RPC notice:', invitesError.message);
     }
 
-    const totals: OverseerTotals = totalsData?.[0] || {
-      total_churches: Array.isArray(churchesData) ? churchesData.length : 0,
-      total_members: 0,
-      total_giving: 0,
-      active_pastors: 0,
+    const rawTotal = totalsData?.[0] || {};
+    const totals: OverseerTotals = {
+      total_churches: Number(rawTotal.church_count ?? rawTotal.total_churches ?? (Array.isArray(churchesData) ? churchesData.length : 0)),
+      total_members: Number(rawTotal.member_total ?? rawTotal.total_members ?? 0),
+      total_giving: Number(rawTotal.giving_total ?? rawTotal.total_giving ?? 0),
+      active_pastors: Number(rawTotal.active_churches_30d ?? rawTotal.active_pastors ?? (Array.isArray(churchesData) ? churchesData.length : 0)),
+      denomination_name: rawTotal.denomination_name,
+      denomination_slug: rawTotal.denomination_slug,
     };
 
-    const churches: OverseerChurchItem[] = (churchesData as OverseerChurchItem[]) || [];
+    const churches: OverseerChurchItem[] = Array.isArray(churchesData)
+      ? churchesData.map((c: any) => ({
+          church_id: c.church_id || c.id,
+          name: c.church_name || c.name || 'Unnamed Parish',
+          slug: c.slug || '',
+          pastor_name: c.pastor_name || c.pastor_email?.split('@')[0] || 'Pastor',
+          pastor_email: c.pastor_email || null,
+          member_count: Number(c.member_count || 0),
+          recent_attendance: Number(c.attendance_30d ?? c.recent_attendance ?? 0),
+          total_giving: Number(c.total_giving || 0),
+          joined_at: c.joined_at || c.created_at || new Date().toISOString(),
+          status: c.status || 'active',
+        }))
+      : [];
     const invites: OverseerInvite[] = (invitesData as OverseerInvite[]) || [];
 
     return {

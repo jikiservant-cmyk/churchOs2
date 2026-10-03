@@ -36,11 +36,11 @@ const nextConfig: NextConfig = {
   async rewrites() {
     return [
       {
-        source: '/:church_slug((?!overseer|denominations|d|admin|signup|api|_next).*)',
+        source: '/:church_slug((?!overseer|denominations|d|admin|signup|api|_next|login).*)',
         destination: '/c/:church_slug',
       },
       {
-        source: '/:church_slug((?!overseer|denominations|d|admin|signup|api|_next).*)/:path*',
+        source: '/:church_slug((?!overseer|denominations|d|admin|signup|api|_next|login).*)/:path*',
         destination: '/c/:church_slug/:path*',
       }
     ]
