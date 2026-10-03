@@ -15,6 +15,7 @@ export type ProvisionState = {
 export async function provisionTenant(prevState: ProvisionState, formData: FormData): Promise<ProvisionState> {
   const name = (formData.get('name') as string || '').trim();
   const rawSlug = (formData.get('slug') as string || '').toLowerCase().trim();
+  const inviteCode = (formData.get('invite_code') as string || formData.get('inviteCode') as string || '').trim();
   const appType = 'church';
 
   // IP detection for scam prevention
@@ -83,16 +84,59 @@ export async function provisionTenant(prevState: ProvisionState, formData: FormD
 
     currentStep = 'calling-rpc';
     
-    // Use the atomic RPC to handle everything in one transaction
-    const clientIp = (ip && ip !== 'unknown' && ip !== '127.0.0.1' && ip !== '::1') ? ip : null;
-    const { data: tenantId, error: rpcError } = await adminSupabase
-      .rpc('provision_church_v2', {
-        p_user_id: user.id,
-        p_name: sanitizedName,
-        p_slug: sanitizedSlug,
-        p_role: 'pastor',
-        p_ip: clientIp
-      });
+    // Switch to public.provision_church_v3 using the authenticated user's access token.
+    // v3 takes five parameters (p_user_id, p_name, p_slug, p_role, p_invite_code) and no p_ip.
+    let tenantId: string | null = null;
+    let rpcError: any = null;
+
+    try {
+      const v3Response = await supabase
+        .rpc('provision_church_v3', {
+          p_user_id: user.id,
+          p_name: sanitizedName,
+          p_slug: sanitizedSlug,
+          p_role: 'pastor',
+          p_invite_code: inviteCode || null,
+        });
+
+      if (v3Response.error) {
+        const isMissingV3 = 
+          (v3Response.error as any).code === '42883' || 
+          v3Response.error.message?.includes('provision_church_v3');
+
+        if (isMissingV3) {
+          console.warn('[Provisioning] provision_church_v3 not present in current DB; falling back to v2 for compatibility');
+          const clientIp = (ip && ip !== 'unknown' && ip !== '127.0.0.1' && ip !== '::1') ? ip : null;
+          const v2Response = await adminSupabase
+            .rpc('provision_church_v2', {
+              p_user_id: user.id,
+              p_name: sanitizedName,
+              p_slug: sanitizedSlug,
+              p_role: 'pastor',
+              p_ip: clientIp,
+            });
+          tenantId = v2Response.data;
+          rpcError = v2Response.error;
+        } else {
+          rpcError = v3Response.error;
+        }
+      } else {
+        tenantId = v3Response.data;
+      }
+    } catch (v3CallErr: any) {
+      console.warn('[Provisioning] v3 invocation error, trying v2 fallback:', v3CallErr);
+      const clientIp = (ip && ip !== 'unknown' && ip !== '127.0.0.1' && ip !== '::1') ? ip : null;
+      const v2Response = await adminSupabase
+        .rpc('provision_church_v2', {
+          p_user_id: user.id,
+          p_name: sanitizedName,
+          p_slug: sanitizedSlug,
+          p_role: 'pastor',
+          p_ip: clientIp,
+        });
+      tenantId = v2Response.data;
+      rpcError = v2Response.error;
+    }
 
     if (rpcError) {
       const errorStr = JSON.stringify(rpcError, null, 2);

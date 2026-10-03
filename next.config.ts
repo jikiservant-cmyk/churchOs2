@@ -1,5 +1,16 @@
 import type {NextConfig} from 'next';
 
+// Origins allowed to call Server Actions and to access the dev server.
+// Covers local dev, Google Cloud Run / Studio previews, and Arena (e2b) previews.
+const allowedOrigins = [
+  'localhost:3000',
+  '127.0.0.1:3000',
+  '*.run.app',
+  '*.google.com',
+  '*.googleusercontent.com',
+  '*.e2b.app',
+];
+
 const nextConfig: NextConfig = {
   output: 'standalone',
   reactStrictMode: true,
@@ -11,23 +22,11 @@ const nextConfig: NextConfig = {
   },
   experimental: {
     serverActions: {
-      allowedOrigins: [
-        'localhost:3000',
-        '127.0.0.1:3000',
-        '*.run.app',
-        '*.google.com',
-        '*.googleusercontent.com',
-      ],
+      allowedOrigins,
     },
   },
   // @ts-ignore Next.js 15+ allowedDevOrigins
-  allowedDevOrigins: [
-    'localhost:3000',
-    '127.0.0.1:3000',
-    '*.run.app',
-    '*.google.com',
-    '*.googleusercontent.com',
-  ],
+  allowedDevOrigins: allowedOrigins,
   images: {
     remotePatterns: [
       { protocol: 'https', hostname: 'picsum.photos', port: '', pathname: '/**' },
@@ -37,11 +36,11 @@ const nextConfig: NextConfig = {
   async rewrites() {
     return [
       {
-        source: '/:church_slug',
+        source: '/:church_slug((?!overseer|denominations|d|admin|signup|api|_next).*)',
         destination: '/c/:church_slug',
       },
       {
-        source: '/:church_slug/:path*',
+        source: '/:church_slug((?!overseer|denominations|d|admin|signup|api|_next).*)/:path*',
         destination: '/c/:church_slug/:path*',
       }
     ]

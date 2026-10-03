@@ -27,28 +27,45 @@ export default async function RootLoginPage({
       const { data: { user } } = await supabase.auth.getUser();
       
       if (user) {
-        // Attempt to find their church via their profile
-        const { data: profile } = await supabase
-          .from('admin_profiles')
-          .select('role, tenant_id')
-          .eq('id', user.id)
-          .maybeSingle();
+        // Try my_login_context first
+        try {
+          const { data: contextData } = await supabase.rpc('my_login_context');
+          if (Array.isArray(contextData) && contextData.length > 0) {
+            const ctx = contextData[0];
+            if (ctx?.account_type === 'overseer') {
+              redirectTo = ctx.denomination_slug ? `/d/${ctx.denomination_slug}/overseer` : '/overseer';
+            } else if (ctx?.account_type === 'pastor' && ctx.church_slug) {
+              redirectTo = `/${ctx.church_slug}/admin`;
+            }
+          }
+        } catch {
+          // Fallback to profile table
+        }
 
-        // Verify they are a pastor
-        const churchId = profile?.tenant_id;
-        if (profile?.role === 'pastor' && churchId) {
-           const { data: church } = await supabase
-             .schema('church')
-             .from('churches')
-             .select('slug')
-             .eq('id', churchId)
-             .maybeSingle();
-             
-           if (church?.slug) {
-             redirectTo = `/${church.slug}/admin`;
-           }
-        } else if (profile && profile.role !== 'pastor') {
-           loginError = 'Access Denied: You do not have pastor permissions';
+        if (!redirectTo) {
+          // Attempt to find their church via their profile
+          const { data: profile } = await supabase
+            .from('admin_profiles')
+            .select('role, tenant_id')
+            .eq('id', user.id)
+            .maybeSingle();
+
+          if (profile?.role === 'overseer') {
+            redirectTo = '/overseer';
+          } else if (profile?.role === 'pastor' && profile?.tenant_id) {
+             const { data: church } = await supabase
+               .schema('church')
+               .from('churches')
+               .select('slug')
+               .eq('id', profile.tenant_id)
+               .maybeSingle();
+               
+             if (church?.slug) {
+               redirectTo = `/${church.slug}/admin`;
+             }
+          } else if (profile && profile.role !== 'pastor' && profile.role !== 'overseer') {
+             loginError = 'Access Denied: You do not have admin permissions';
+          }
         }
       }
     } catch (err: any) {

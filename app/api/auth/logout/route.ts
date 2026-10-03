@@ -1,10 +1,30 @@
-import { logout } from '@/lib/auth-actions';
-import { redirect } from 'next/navigation';
+import { createClient } from '@/lib/supabase/server';
+import { NextResponse } from 'next/server';
 
 export async function POST(req: Request) {
-  const formData = await req.formData();
-  await logout(formData);
-  // Expected to redirect dynamically inside the server action, but just in case:
-  const churchSlug = formData.get('churchSlug') as string;
-  redirect(`/${churchSlug}/admin/login`);
+  try {
+    if (process.env.NEXT_PUBLIC_SUPABASE_URL && process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY) {
+      const supabase = await createClient();
+      await supabase.auth.signOut();
+    }
+  } catch (err) {
+    console.error('[Logout Route] Error signing out:', err);
+  }
+
+  const url = new URL(req.url);
+  return NextResponse.redirect(new URL('/', url.origin), 303);
+}
+
+export async function GET(req: Request) {
+  try {
+    if (process.env.NEXT_PUBLIC_SUPABASE_URL && process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY) {
+      const supabase = await createClient();
+      await supabase.auth.signOut();
+    }
+  } catch (err) {
+    console.error('[Logout Route] Error signing out:', err);
+  }
+
+  const url = new URL(req.url);
+  return NextResponse.redirect(new URL('/', url.origin), 303);
 }

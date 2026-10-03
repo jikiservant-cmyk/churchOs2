@@ -38,6 +38,7 @@ export async function middleware(request: NextRequest) {
 
     // CSRF Protection for state-changing API mutations (F7 remediation)
     const PUBLIC_EXEMPT_ROUTES = new Set([
+      '/api/auth/logout',
       '/api/billing/topup',
       '/api/sms/process-queue',
       '/api/najiki/webhook',
@@ -47,20 +48,31 @@ export async function middleware(request: NextRequest) {
 
     if (url.pathname.startsWith('/api/') && ['POST', 'PUT', 'DELETE', 'PATCH'].includes(request.method)) {
       const isPublicWebhook = PUBLIC_EXEMPT_ROUTES.has(url.pathname);
-      if (!isPublicWebhook) {
+      const isAuthRoute = url.pathname.startsWith('/api/auth/');
+
+      if (!isPublicWebhook && !isAuthRoute) {
         const secFetchSite = request.headers.get('sec-fetch-site');
         const origin = request.headers.get('origin');
-        const host = request.headers.get('host');
+        const host = request.headers.get('x-forwarded-host') || request.headers.get('host');
 
-        // Block untrusted cross-site POSTs
-        if (secFetchSite === 'cross-site') {
-          return NextResponse.json({ error: 'Cross-origin request blocked' }, { status: 403 });
-        }
+        const isTrustedHost = (h: string) => {
+          return (
+            h === host ||
+            h.endsWith('.run.app') ||
+            h.endsWith('.google.com') ||
+            h.endsWith('.googleusercontent.com') ||
+            h.startsWith('localhost') ||
+            h.startsWith('127.0.0.1')
+          );
+        };
 
-        if (origin && host) {
+        if (origin) {
           try {
             const originHost = new URL(origin).host;
-            if (originHost !== host) {
+            if (!isTrustedHost(originHost)) {
+              if (secFetchSite === 'cross-site') {
+                return NextResponse.json({ error: 'Cross-origin request blocked' }, { status: 403 });
+              }
               return NextResponse.json({ error: 'Origin mismatch' }, { status: 403 });
             }
           } catch {

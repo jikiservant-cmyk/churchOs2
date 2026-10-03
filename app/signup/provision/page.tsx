@@ -1,18 +1,27 @@
 'use client';
 
-import { useActionState, useEffect, useState } from 'react';
-import { useRouter } from 'next/navigation';
+import { useActionState, useEffect, useState, Suspense } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { provisionTenant, ProvisionState } from '@/lib/provision-actions';
-import { Church, Loader2, Rocket, ArrowRight, ArrowLeft } from 'lucide-react';
+import { Loader2, Rocket, ArrowRight, Building2, Tag } from 'lucide-react';
 import Image from 'next/image';
 
 const initialState: ProvisionState = {};
 
-export default function ProvisionPage() {
+function ProvisionForm() {
   const [state, formAction, isPending] = useActionState(provisionTenant, initialState);
   const [name, setName] = useState('');
   const [slug, setSlug] = useState('');
+  const [inviteCode, setInviteCode] = useState('');
   const router = useRouter();
+  const searchParams = useSearchParams();
+
+  useEffect(() => {
+    const codeParam = searchParams.get('invite') || searchParams.get('code') || searchParams.get('invite_code');
+    if (codeParam) {
+      setInviteCode(codeParam.toUpperCase());
+    }
+  }, [searchParams]);
 
   useEffect(() => {
     if (state.success && state.slug) {
@@ -25,6 +34,100 @@ export default function ProvisionPage() {
     setSlug(val.toLowerCase().replace(/[^a-z0-9]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, ''));
   };
 
+  return (
+    <div className="relative z-10 w-full max-w-lg bg-[#F0E6D3] border border-[rgba(90,55,20,0.15)] rounded-2xl p-10 shadow-2xl transition-all duration-500">
+      <div className="text-center mb-8">
+        <div className="flex justify-center mb-4">
+          <div className="p-3 bg-[#2B1A0E] rounded-xl shadow-lg">
+            <Rocket className="h-6 w-6 text-[#F5E6CE]" />
+          </div>
+        </div>
+        <h1 style={{ fontFamily: "'Playfair Display', serif" }} className="text-3xl font-bold text-[#1E1208] mb-3">Launch Your Church</h1>
+        <p className="text-[14px] text-[#9A7E65] font-medium leading-relaxed">Let&apos;s set up your ministry portal</p>
+      </div>
+
+      {state.error && (
+        <div className="mb-6 p-4 bg-[#B5622A]/10 border border-[#B5622A]/20 rounded-xl text-[#B5622A] text-xs font-bold leading-relaxed uppercase tracking-wider">
+          {state.error}
+        </div>
+      )}
+
+      <form action={formAction} className="space-y-6">
+        <div className="space-y-4 pt-2">
+          <div className="space-y-1.5">
+            <label className="block text-[10px] font-bold text-[#C8B89A] uppercase tracking-widest">
+              Church Name
+            </label>
+            <input
+              type="text"
+              name="name"
+              value={name}
+              onChange={(e) => updateSlug(e.target.value)}
+              required
+              className="w-full px-4 py-3.5 bg-[rgba(255,220,170,0.05)] border border-[rgba(90,55,20,0.12)] rounded-xl text-[#1E1208] placeholder:text-[#C8B89A] focus:border-[#B5622A] outline-none transition-all font-medium"
+              placeholder="e.g. Grace Fellowship"
+            />
+          </div>
+
+          <div className="space-y-1.5">
+            <label className="block text-[10px] font-bold text-[#C8B89A] uppercase tracking-widest">Custom URL (Slug)</label>
+            <div className="relative">
+              <span className="absolute left-4 top-1/2 -translate-y-1/2 text-[12px] font-medium text-[#C8B89A]">/</span>
+              <input
+                type="text"
+                name="slug"
+                value={slug}
+                onChange={(e) => setSlug(e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ''))}
+                required
+                className="w-full pl-7 pr-4 py-3.5 bg-[rgba(255,220,170,0.05)] border border-[rgba(90,55,20,0.12)] rounded-xl text-[#1E1208] focus:border-[#B5622A] outline-none transition-all font-medium text-[13px]"
+              />
+            </div>
+            <p className="text-[10px] text-[#9A7E65] italic tracking-wide">This will be your workspace address</p>
+          </div>
+
+          <div className="space-y-1.5 pt-2 border-t border-[rgba(90,55,20,0.08)]">
+            <div className="flex items-center justify-between">
+              <label className="block text-[10px] font-bold text-[#C8B89A] uppercase tracking-widest">
+                Denomination Invite Code (Optional)
+              </label>
+              <span className="text-[10px] text-[#B5622A] font-bold">Network Link</span>
+            </div>
+            <div className="relative">
+              <input
+                type="text"
+                name="invite_code"
+                value={inviteCode}
+                onChange={(e) => setInviteCode(e.target.value.toUpperCase())}
+                placeholder="e.g. DENOM-2026 (or leave blank for independent)"
+                className="w-full px-4 py-3 bg-[rgba(255,220,170,0.05)] border border-[rgba(90,55,20,0.12)] rounded-xl text-[#1E1208] placeholder:text-[#C8B89A] focus:border-[#B5622A] outline-none transition-all font-mono text-[13px]"
+              />
+            </div>
+            <p className="text-[10px] text-[#9A7E65] leading-relaxed">
+              If your church is joining a denomination, enter your invite code. Otherwise leave blank for an independent church.
+            </p>
+          </div>
+        </div>
+
+        <button
+          type="submit"
+          disabled={isPending}
+          className="w-full py-4 bg-[#B5622A] text-white font-bold rounded-xl shadow-lg active:scale-[0.98] transition-all hover:bg-[#C6733B] flex justify-center items-center uppercase tracking-widest text-[12px] mt-6 gap-2"
+        >
+          {isPending ? (
+            <Loader2 className="h-4 w-4 animate-spin" />
+          ) : (
+            <>
+              Finish Setup
+              <ArrowRight className="h-4 w-4" />
+            </>
+          )}
+        </button>
+      </form>
+    </div>
+  );
+}
+
+export default function ProvisionPage() {
   return (
     <div 
       style={{ fontFamily: "'Outfit', sans-serif" }}
@@ -40,73 +143,13 @@ export default function ProvisionPage() {
       />
       <div className="absolute inset-0 bg-gradient-to-br from-[#2B1A0E]/60 to-[#1E1208]/40" />
 
-      <div className="relative z-10 w-full max-w-lg bg-[#F0E6D3] border border-[rgba(90,55,20,0.15)] rounded-2xl p-10 shadow-2xl transition-all duration-500">
-        <div className="text-center mb-8">
-          <div className="flex justify-center mb-4">
-            <div className="p-3 bg-[#2B1A0E] rounded-xl shadow-lg">
-              <Rocket className="h-6 w-6 text-[#F5E6CE]" />
-            </div>
-          </div>
-          <h1 style={{ fontFamily: "'Playfair Display', serif" }} className="text-3xl font-bold text-[#1E1208] mb-3">Launch Your Church</h1>
-          <p className="text-[14px] text-[#9A7E65] font-medium leading-relaxed">Let&apos;s set up your ministry portal</p>
+      <Suspense fallback={
+        <div className="relative z-10 p-12 bg-[#F0E6D3] rounded-2xl flex items-center justify-center">
+          <Loader2 className="h-6 w-6 animate-spin text-[#B5622A]" />
         </div>
-
-        {state.error && (
-          <div className="mb-6 p-4 bg-[#B5622A]/10 border border-[#B5622A]/20 rounded-xl text-[#B5622A] text-xs font-bold leading-relaxed uppercase tracking-wider">
-            {state.error}
-          </div>
-        )}
-
-        <form action={formAction} className="space-y-6">
-          <div className="space-y-4 pt-2">
-            <div className="space-y-1.5">
-              <label className="block text-[10px] font-bold text-[#C8B89A] uppercase tracking-widest">
-                Church Name
-              </label>
-              <input
-                type="text"
-                name="name"
-                value={name}
-                onChange={(e) => updateSlug(e.target.value)}
-                required
-                className="w-full px-4 py-3.5 bg-[rgba(255,220,170,0.05)] border border-[rgba(90,55,20,0.12)] rounded-xl text-[#1E1208] placeholder:text-[#C8B89A] focus:border-[#B5622A] outline-none transition-all font-medium"
-                placeholder="e.g. Grace Fellowship"
-              />
-            </div>
-
-            <div className="space-y-1.5">
-              <label className="block text-[10px] font-bold text-[#C8B89A] uppercase tracking-widest">Custom URL (Slug)</label>
-              <div className="relative">
-                <span className="absolute left-4 top-1/2 -translate-y-1/2 text-[12px] font-medium text-[#C8B89A]">/</span>
-                <input
-                  type="text"
-                  name="slug"
-                  value={slug}
-                  onChange={(e) => setSlug(e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ''))}
-                  required
-                  className="w-full pl-7 pr-4 py-3.5 bg-[rgba(255,220,170,0.05)] border border-[rgba(90,55,20,0.12)] rounded-xl text-[#1E1208] focus:border-[#B5622A] outline-none transition-all font-medium text-[13px]"
-                />
-              </div>
-              <p className="text-[10px] text-[#9A7E65] italic tracking-wide">This will be your workspace address</p>
-            </div>
-          </div>
-
-          <button
-            type="submit"
-            disabled={isPending}
-            className="w-full py-4 bg-[#B5622A] text-white font-bold rounded-xl shadow-lg active:scale-[0.98] transition-all hover:bg-[#C6733B] flex justify-center items-center uppercase tracking-widest text-[12px] mt-6 gap-2"
-          >
-            {isPending ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
-            ) : (
-              <>
-                Finish Setup
-                <ArrowRight className="h-4 w-4" />
-              </>
-            )}
-          </button>
-        </form>
-      </div>
+      }>
+        <ProvisionForm />
+      </Suspense>
     </div>
   );
 }

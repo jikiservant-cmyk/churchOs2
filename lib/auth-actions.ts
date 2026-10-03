@@ -35,7 +35,29 @@ export async function login(prevState: AuthState, formData: FormData): Promise<A
       return { error: authError?.message || 'Login failed' };
     }
 
-    // 2. Verify Role and find Church Slug in admin_profiles
+    // 2. Call my_login_context RPC and route based on its result
+    try {
+      const { data: contextData, error: contextError } = await supabase.rpc('my_login_context');
+      if (!contextError && Array.isArray(contextData) && contextData.length > 0) {
+        const context = contextData[0];
+
+        if (context?.account_type === 'overseer') {
+          const overseerUrl = context.denomination_slug ? `/d/${context.denomination_slug}/overseer` : '/overseer';
+          return { success: true, redirectTo: overseerUrl };
+        } else if (context?.account_type === 'pastor') {
+          const target = context.church_slug || churchSlug;
+          if (target) {
+            return { success: true, redirectTo: `/${target}/admin` };
+          }
+        } else {
+          return { error: 'Account has no active ministry or overseer assignment. Please contact support or provision a church.' };
+        }
+      }
+    } catch (contextErr) {
+      console.warn('[Auth] my_login_context RPC not available, using fallback:', contextErr);
+    }
+
+    // 3. Fallback: Verify Role and find Church Slug in admin_profiles
     let profile = null;
     let profileError = null;
 
@@ -72,7 +94,12 @@ export async function login(prevState: AuthState, formData: FormData): Promise<A
       return { error: 'Access Denied: You are not authorized to access this portal.' };
     }
 
-    // Allow strictly pastor roles for this app
+    // Handle overseer in fallback profile check
+    if (profile.role?.toLowerCase() === 'overseer') {
+      return { success: true, redirectTo: '/overseer' };
+    }
+
+    // Allow strictly pastor roles for church admin
     const authorizedRoles = ['pastor'];
     if (!authorizedRoles.includes(profile.role.toLowerCase())) {
       await supabase.auth.signOut();

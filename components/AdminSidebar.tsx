@@ -9,7 +9,30 @@ import type { Church } from '@/lib/db';
 
 export default function AdminSidebar({ church, churchSlug }: { church: Church, churchSlug: string }) {
   const [isOpen, setIsOpen] = useState(false);
+  const [isLoggingOut, setIsLoggingOut] = useState(false);
   const pathname = usePathname();
+
+  const handleSignOut = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (isLoggingOut) return;
+    setIsLoggingOut(true);
+
+    try {
+      const { createClient } = await import('@/lib/supabase/client');
+      const supabase = createClient();
+      await supabase.auth.signOut();
+    } catch (err) {
+      console.warn('Client sign out non-fatal:', err);
+    }
+
+    try {
+      await fetch('/api/auth/logout', { method: 'POST' });
+    } catch (err) {
+      console.warn('Server sign out non-fatal:', err);
+    }
+
+    window.location.href = '/';
+  };
 
   const toggleSidebar = () => setIsOpen(!isOpen);
 
@@ -97,11 +120,15 @@ export default function AdminSidebar({ church, churchSlug }: { church: Church, c
         </div>
 
         <div className="mt-8 pt-4 border-t border-[rgba(255,220,170,0.1)]">
-          <form action="/api/auth/logout" method="POST">
+          <form onSubmit={handleSignOut} action="/api/auth/logout" method="POST">
              <input type="hidden" name="churchSlug" value={churchSlug} />
-             <button type="submit" className="flex items-center gap-3 px-3.5 py-2 text-[rgba(255,235,210,0.55)] hover:text-[#B5622A] hover:bg-[rgba(255,220,170,0.08)] rounded-lg text-[13px] font-bold transition-all w-full">
+             <button 
+               type="submit" 
+               disabled={isLoggingOut}
+               className="flex items-center gap-3 px-3.5 py-2 text-[rgba(255,235,210,0.55)] hover:text-[#B5622A] hover:bg-[rgba(255,220,170,0.08)] rounded-lg text-[13px] font-bold transition-all w-full disabled:opacity-50"
+             >
                <LogOut className="w-4 h-4" />
-               Sign Out
+               {isLoggingOut ? 'Signing Out...' : 'Sign Out'}
              </button>
           </form>
         </div>
