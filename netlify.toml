@@ -1,0 +1,34 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# churchOs — Netlify deploy configuration
+#
+# Next.js 15 (App Router, server actions, middleware, API routes) is deployed
+# with the official Netlify Next.js plugin, which compiles the app into
+# Netlify Functions + static assets.
+#
+# ⚠️ Do NOT set `output: 'standalone'` in next.config.ts — it conflicts with
+# this plugin and produces a broken deploy.
+#
+# Required environment variables (Site settings → Environment variables):
+#   Build-time (NEXT_PUBLIC_* are inlined into the client bundle):
+#     NEXT_PUBLIC_SUPABASE_URL
+#     NEXT_PUBLIC_SUPABASE_ANON_KEY
+#   Runtime:
+#     SUPABASE_SERVICE_ROLE_KEY
+#     USHER_JWT_SECRET
+#     NAJIKI_API_KEY
+#     NAJIKI_API_URL
+#     NAJIKI_WEBHOOK_SECRET
+#     NAJIKI_APPLICATION_CODE   (default: "church")
+#   See .env.example for the full list. NEVER set ACTIVATION_SIMULATION in
+#   production — it is a payment bypass.
+# ─────────────────────────────────────────────────────────────────────────────
+
+[build]
+  command = "npm run build"
+
+[build.environment]
+  # Next.js 15 needs Node >= 18.18; pin the LTS line for reproducible builds.
+  NODE_VERSION = "20"
+
+[[plugins]]
+  package = "@netlify/plugin-nextjs"

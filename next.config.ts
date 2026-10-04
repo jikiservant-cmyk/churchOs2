@@ -9,10 +9,12 @@ const allowedOrigins = [
   '*.google.com',
   '*.googleusercontent.com',
   '*.e2b.app',
+  '*.netlify.app',
 ];
 
 const nextConfig: NextConfig = {
-  output: 'standalone',
+  // NOTE: no `output: 'standalone'` — the Netlify Next.js plugin
+  // (netlify.toml) manages the server output itself and conflicts with it.
   reactStrictMode: true,
   eslint: {
     ignoreDuringBuilds: true,
