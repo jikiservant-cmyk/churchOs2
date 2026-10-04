@@ -74,6 +74,38 @@ export default async function AdminLayout({
     }
   }
 
+  // App Gate: Check activation status
+  if (church.activation_status === 'pending_payment') {
+    redirect(`/${church_slug}/admin/activation`);
+  } else if (church.activation_status === 'suspended') {
+    return (
+      <div 
+        style={{ fontFamily: "'Outfit', sans-serif" }}
+        className="min-h-screen bg-[#2B1A0E] flex items-center justify-center p-6 text-center"
+      >
+        <div className="bg-[#F0E6D3] p-8 rounded-3xl border border-[#B5622A]/20 shadow-2xl max-w-md w-full">
+          <div className="w-12 h-12 bg-[#B5622A]/10 text-[#B5622A] rounded-full flex items-center justify-center mx-auto mb-4 font-bold text-xl">
+            !
+          </div>
+          <h2 style={{ fontFamily: "'Playfair Display', serif" }} className="text-2xl font-bold text-[#1E1208] mb-3">
+            Workspace Suspended
+          </h2>
+          <p className="text-[#9A7E65] text-sm leading-relaxed mb-6">
+            This church workspace ({church.name}) has been temporarily suspended. Please contact administrative support to reactivate your portal.
+          </p>
+          <form action="/api/auth/logout" method="POST">
+            <button 
+              type="submit" 
+              className="w-full py-3 bg-[#2B1A0E] text-[#F5E6CE] rounded-xl font-bold uppercase tracking-widest text-xs hover:bg-[#3D2614] transition-all"
+            >
+              Sign Out
+            </button>
+          </form>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div 
       style={{ fontFamily: "'Outfit', sans-serif" }}

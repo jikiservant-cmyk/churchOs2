@@ -6,6 +6,8 @@ export interface Church {
   slug: string;
   themeColor: string;
   logoUrl: string;
+  activation_status?: 'active' | 'pending_payment' | 'suspended';
+  activation_paid_at?: string | null;
 }
 
 export const getChurchBySlug = async (slug: string): Promise<Church | null> => {
@@ -67,6 +69,8 @@ export const getChurchBySlug = async (slug: string): Promise<Church | null> => {
           slug: data.slug,
           themeColor: (data as any).theme_color || 'bg-blue-600',
           logoUrl: (data as any).logo_url || `https://picsum.photos/seed/${data.slug}/200/200`,
+          activation_status: (data as any).activation_status || 'active',
+          activation_paid_at: (data as any).activation_paid_at || null,
         };
       } else {
         console.warn(`[getChurchBySlug] No church found for slug: ${slug}`);

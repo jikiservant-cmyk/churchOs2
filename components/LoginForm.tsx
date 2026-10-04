@@ -9,17 +9,8 @@ import { useRouter } from 'next/navigation';
 export default function LoginForm({ church, churchSlug, error: urlError }: { church: any; churchSlug: string; error?: string }) {
   const router = useRouter();
   const redirected = useRef(false);
-  const [clientError, setClientError] = useState<string | null>(null);
-  const [isSubmitting, setIsSubmitting] = useState(false);
-  const [mountData, setMountData] = useState<{
-    inIframe: boolean;
-    particles: { x: number; y: number; duration: number }[];
-  }>({
-    inIframe: false,
-    particles: []
-  });
   
-  const [state, formAction, pending] = useActionState(login, { error: urlError, success: false });
+  const [state, formAction, isPending] = useActionState(login, { error: urlError, success: false });
 
   useEffect(() => {
     if (state?.success && state?.redirectTo && !redirected.current) {
@@ -29,52 +20,7 @@ export default function LoginForm({ church, churchSlug, error: urlError }: { chu
     }
   }, [state, router]);
 
-  const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
-    e.preventDefault();
-    setClientError(null);
-    setIsSubmitting(true);
-    try {
-      const formData = new FormData(e.currentTarget);
-      const res = await login(state, formData);
-      if (res?.error) {
-        setClientError(res.error);
-      } else if (res?.success && res?.redirectTo && !redirected.current) {
-        redirected.current = true;
-        router.replace(res.redirectTo);
-        router.refresh();
-      }
-    } catch (err: any) {
-      if (err?.digest?.startsWith?.('NEXT_REDIRECT') || err?.message === 'NEXT_REDIRECT') {
-        return;
-      }
-      console.error('[LoginForm] Submission caught error:', err);
-      setClientError(err?.message || 'Login request failed. Please check your network and credentials.');
-    } finally {
-      setIsSubmitting(false);
-    }
-  };
-
-  useEffect(() => {
-    const isFrame = typeof window !== 'undefined' && window !== window.top;
-    const newParticles = Array.from({ length: 18 }).map(() => ({
-      x: Math.random() * 1000,
-      y: Math.random() * 800,
-      duration: 10 + Math.random() * 10
-    }));
-    
-    const raf = requestAnimationFrame(() => {
-      setMountData({
-        inIframe: isFrame,
-        particles: newParticles
-      });
-    });
-
-    return () => cancelAnimationFrame(raf);
-  }, []);
-
-  const displayError = clientError || state?.error;
-  const isBusy = pending || isSubmitting;
-  const isMounted = mountData.particles.length > 0;
+  const displayError = state?.error;
 
   return (
     <div 
@@ -103,7 +49,7 @@ export default function LoginForm({ church, churchSlug, error: urlError }: { chu
           </div>
         )}
 
-        <form onSubmit={handleSubmit} action={formAction} className="space-y-5">
+        <form action={formAction} className="space-y-5">
           <input type="hidden" name="churchSlug" value={churchSlug} />
           <div className="space-y-1.5">
             <label className="block text-[10px] font-bold text-[#C8B89A] uppercase tracking-widest">Email Address</label>
@@ -129,10 +75,10 @@ export default function LoginForm({ church, churchSlug, error: urlError }: { chu
           </div>
           <button
             type="submit"
-            disabled={isBusy}
+            disabled={isPending}
             className="w-full py-4 bg-[#2B1A0E] text-[#F5E6CE] font-bold rounded-xl shadow-lg active:scale-[0.98] transition-all hover:bg-[#3D2614] flex justify-center items-center uppercase tracking-widest text-[12px] mt-4"
           >
-            {isBusy ? <div className="w-5 h-5 border-2 border-[rgba(245,230,206,0.3)] border-t-[#F5E6CE] rounded-full animate-spin" /> : 'Enter Portal'}
+            {isPending ? <div className="w-5 h-5 border-2 border-[rgba(245,230,206,0.3)] border-t-[#F5E6CE] rounded-full animate-spin" /> : 'Enter Portal'}
           </button>
           <div className="text-center mt-6 pt-4 border-t border-[rgba(90,55,20,0.08)]">
             <p className="text-[11px] text-[#9A7E65] mb-3 uppercase tracking-widest font-bold opacity-60">New to the family?</p>
