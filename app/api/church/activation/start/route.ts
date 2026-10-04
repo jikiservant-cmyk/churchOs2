@@ -1,6 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
-import { startActivationPayment } from '@/lib/activation';
+import { startActivationPayment, SUPPORTED_ACTIVATION_PROVIDERS } from '@/lib/activation';
+
+export const dynamic = 'force-dynamic';
+
+const ACTIVATION_ROLES = ['pastor', 'admin'];
 
 export async function POST(req: NextRequest) {
   try {
@@ -22,9 +26,22 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'No church workspace linked to this user' }, { status: 400 });
     }
 
+    // Activation is a church-admin operation: paying for (or re-paying for) a
+    // workspace must not be possible for non-admin role holders.
+    if (!ACTIVATION_ROLES.includes(String(profile.role || '').toLowerCase())) {
+      return NextResponse.json({ error: 'Forbidden: you do not have permission to manage this workspace' }, { status: 403 });
+    }
+
     const body = await req.json().catch(() => ({}));
-    const phoneNumber = (body.phoneNumber || body.phone || '').trim();
-    const provider = (body.provider || 'najiki').trim();
+    const phoneNumber = String(body.phoneNumber || body.phone || '').trim();
+    const provider = String(body.provider || 'najiki').trim().toLowerCase();
+
+    if (!SUPPORTED_ACTIVATION_PROVIDERS.includes(provider as (typeof SUPPORTED_ACTIVATION_PROVIDERS)[number])) {
+      return NextResponse.json(
+        { error: `Unsupported payment provider: ${provider}. Supported: ${SUPPORTED_ACTIVATION_PROVIDERS.join(', ')}` },
+        { status: 400 }
+      );
+    }
 
     if (!phoneNumber) {
       return NextResponse.json({ error: 'Phone number is required for mobile money payment' }, { status: 400 });
@@ -44,6 +61,6 @@ export async function POST(req: NextRequest) {
     return NextResponse.json(result);
   } catch (err: any) {
     console.error('[API Start Activation] Unhandled error:', err);
-    return NextResponse.json({ error: err?.message || 'Internal Server Error' }, { status: 500 });
+    return NextResponse.json({ error: 'Internal Server Error' }, { status: 500 });
   }
 }

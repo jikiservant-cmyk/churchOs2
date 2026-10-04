@@ -63,13 +63,24 @@ export const getChurchBySlug = async (slug: string): Promise<Church | null> => {
       }
       
       if (data) {
+        // FAIL CLOSED on the payment gate: a missing or unrecognised
+        // activation_status must be treated as "not proven paid", never as
+        // "active". The old `|| 'active'` default let any church whose row
+        // predated the activation feature (or whose column was absent) skip
+        // the one-time activation payment entirely.
+        const rawStatus = (data as any).activation_status as string | null;
+        const activation_status: Church['activation_status'] =
+          rawStatus === 'active' || rawStatus === 'suspended'
+            ? rawStatus
+            : 'pending_payment';
+
         return {
           id: data.id,
           name: data.name || data.slug,
           slug: data.slug,
           themeColor: (data as any).theme_color || 'bg-blue-600',
           logoUrl: (data as any).logo_url || `https://picsum.photos/seed/${data.slug}/200/200`,
-          activation_status: (data as any).activation_status || 'active',
+          activation_status,
           activation_paid_at: (data as any).activation_paid_at || null,
         };
       } else {

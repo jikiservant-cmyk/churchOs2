@@ -1922,3 +1922,20 @@ DROP POLICY IF EXISTS "Service role full access on usher_sessions" ON church.ush
 CREATE POLICY "Service role full access on usher_sessions" ON church.usher_sessions FOR ALL TO service_role USING (true);
 
 
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Table grants for every table created in this file.
+--
+-- The "GRANT ALL ON ALL TABLES" statements above (around line 326) only cover
+-- tables that already existed at that point. The dashboard tables created
+-- later in this file (members, new_converts, events, attendance_logs,
+-- prayers, donations, visitors, ...) would otherwise be inaccessible to
+-- authenticated/service_role on a fresh database. Re-apply the grants now
+-- that every table exists, and extend them to future tables via default
+-- privileges.
+GRANT ALL ON ALL TABLES IN SCHEMA church TO postgres, authenticated, service_role;
+GRANT ALL ON ALL TABLES IN SCHEMA public TO postgres, authenticated, service_role;
+GRANT ALL ON ALL TABLES IN SCHEMA business TO postgres, authenticated, service_role;
+ALTER DEFAULT PRIVILEGES IN SCHEMA church GRANT ALL ON TABLES TO postgres, authenticated, service_role;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO postgres, authenticated, service_role;
+ALTER DEFAULT PRIVILEGES IN SCHEMA business GRANT ALL ON TABLES TO postgres, authenticated, service_role;

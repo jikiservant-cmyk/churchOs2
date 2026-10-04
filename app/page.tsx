@@ -34,8 +34,10 @@ export default async function RootLoginPage({
             const ctx = contextData[0];
             if (ctx?.account_type === 'overseer') {
               redirectTo = ctx.denomination_slug ? `/d/${ctx.denomination_slug}/overseer` : '/overseer';
-            } else if (ctx?.account_type === 'pastor' && ctx.church_slug) {
-              redirectTo = `/${ctx.church_slug}/admin`;
+            } else if (ctx?.account_type === 'pastor') {
+              // Pastor context: go to the church, or to provisioning when no
+              // church exists yet (account created, workspace not launched).
+              redirectTo = ctx.church_slug ? `/${ctx.church_slug}/admin` : '/signup/provision';
             }
           }
         } catch {
@@ -52,16 +54,20 @@ export default async function RootLoginPage({
 
           if (profile?.role === 'overseer') {
             redirectTo = '/overseer';
-          } else if (profile?.role === 'pastor' && profile?.tenant_id) {
+          } else if (profile?.role === 'pastor' || profile?.role === 'admin') {
              const { data: church } = await supabase
                .schema('church')
                .from('churches')
                .select('slug')
                .eq('id', profile.tenant_id)
                .maybeSingle();
-               
+
              if (church?.slug) {
                redirectTo = `/${church.slug}/admin`;
+             } else if (profile?.tenant_id) {
+               // Dangling tenant: profile links to a church row that no
+               // longer exists — send them back to provisioning.
+               redirectTo = '/signup/provision';
              }
           } else if (profile && profile.role !== 'pastor' && profile.role !== 'overseer') {
              loginError = 'Access Denied: You do not have admin permissions';

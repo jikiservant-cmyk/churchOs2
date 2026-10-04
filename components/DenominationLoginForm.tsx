@@ -32,7 +32,10 @@ export default function DenominationLoginForm({ slug, branding }: DenominationLo
       const formData = new FormData();
       formData.set('email', email);
       formData.set('password', password);
-      formData.set('churchSlug', slug);
+      // NOTE: intentionally no churchSlug field. Login destinations are
+      // derived from the database (my_login_context / admin_profiles);
+      // passing the denomination slug here used to route pastors without a
+      // provisioned church to /<denomination-slug>/admin (a dead 404 URL).
 
       const res = await login({}, formData);
 

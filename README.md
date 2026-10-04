@@ -59,6 +59,38 @@ Open Supabase Dashboard → SQL Editor and run each file in order:
 004_cron_jobs.sql             ← Requires pg_cron extension enabled first
 ```
 
+### 4b — Church activation + denomination migrations (this repo, `migrations/`)
+
+```
+# EXISTING database (005–008 already applied):
+009_church_activation.sql     ← activation tables/columns (idempotent, no-op if 008 ran)
+010_denomination_support.sql  ← denominations, invites, my_login_context, provision_church_v3, overseer_* RPCs
+
+# FRESH database (run supabase-schema.sql first, then):
+005_consecutive_event_flags.sql
+006_expected_days_and_auto_close.sql
+007_tenant_scoped_codes.sql
+009_church_activation.sql     ← MUST run before 008 on a fresh DB: 008 VALIDATEs
+                                ← constraints on church.activation_payments, which
+                                ← 009 creates
+010_denomination_support.sql
+008_atomic_church_activation.sql
+```
+
+Notes:
+- `009` grandfather-sets churches that exist before the migration to
+  `activation_status = 'active'` (they operated without the payment gate).
+  Churches created **after** the migration start as `pending_payment` and must
+  complete the one-time UGX 17,000 activation payment before the dashboard
+  unlocks.
+- Overseer accounts: create the `church.denominations` row, the
+  `church.denominations_admins` link for the overseer's Supabase user, and the
+  `admin_profiles` row with `role = 'overseer'` (the enum now includes it).
+- The `/api/church/activation/simulate` endpoint is **disabled by default**.
+  Set `ACTIVATION_SIMULATION=true` only in throwaway sandboxes where you need
+  to exercise the activation flow without real money. Never set it in
+  production.
+
 **Before running 002:** Check no passkeys are already hashed:
 ```sql
 SELECT id, slug, passkey FROM church.churches LIMIT 10;

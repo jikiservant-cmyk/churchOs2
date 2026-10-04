@@ -57,12 +57,20 @@ export async function initiateNajikiPayment(formData: FormData) {
 
     const { data: profile } = await supabase
       .from('admin_profiles')
-      .select('tenant_id')
+      .select('tenant_id, role')
       .eq('id', user.id)
       .maybeSingle();
 
     if (!profile || profile.tenant_id !== churchId) {
       return { error: 'Access denied: cannot initiate payment for another church' };
+    }
+
+    // Charging the church wallet is an admin operation. A non-admin role
+    // holder linked to the tenant (e.g. a staff account) must not be able to
+    // spend the church's money.
+    const role = String(profile.role ?? '').toLowerCase();
+    if (role !== 'pastor' && role !== 'admin') {
+      return { error: 'Access denied: only church admins can top up the wallet' };
     }
 
     // Fail fast with the exact variable names that are missing.

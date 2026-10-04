@@ -2,6 +2,7 @@ import { createClient } from '@/lib/supabase/server';
 import { redirect } from 'next/navigation';
 import { getOverseerDashboardData } from '@/lib/overseer-actions';
 import { getMyLoginContext } from '@/lib/denomination';
+import { requireOverseer } from '@/lib/overseer-gate';
 import OverseerDashboardClient from '@/components/overseer/OverseerDashboardClient';
 import { Building2, Shield, LogOut, ExternalLink, RefreshCw } from 'lucide-react';
 import Link from 'next/link';
@@ -11,6 +12,18 @@ export default async function OverseerPage() {
   const { data: { user }, error: authError } = await supabase.auth.getUser();
 
   if (authError || !user) {
+    redirect('/admin/login?error=Please%20sign%20in%20to%20access%20the%20Overseer%20Portal');
+  }
+
+  // FAIL CLOSED: only accounts the database identifies as overseer may use
+  // this portal. Previously, when the context RPC was unavailable the page
+  // rendered for ANY signed-in user (pastors, staff, …) and fired the
+  // overseer_* data queries with their session.
+  const gate = await requireOverseer();
+  if (!gate.allowed) {
+    if (gate.reason === 'not_overseer') {
+      redirect('/?error=Access%20Denied');
+    }
     redirect('/admin/login?error=Please%20sign%20in%20to%20access%20the%20Overseer%20Portal');
   }
 

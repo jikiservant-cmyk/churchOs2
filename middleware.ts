@@ -89,7 +89,13 @@ export async function middleware(request: NextRequest) {
     
     // Check if we are in an admin route: /c/[slug]/admin/... or /[slug]/admin/...
     const isAdminRoute = pathParts.includes('admin') && !url.pathname.includes('/admin/login');
-    if (isAdminRoute) {
+    // The denomination/overseer portal is an authenticated surface too — the
+    // pages themselves do the role check, but unauthenticated visitors get a
+    // clean redirect here instead of a page render.
+    const isOverseerRoute =
+      url.pathname === '/overseer' ||
+      (/^\/d\/[^/]+\/overseer\/?$/i.test(url.pathname));
+    if (isAdminRoute || isOverseerRoute) {
       if (!user) {
         return NextResponse.redirect(new URL(`/?error=Session Expired`, request.url));
       }

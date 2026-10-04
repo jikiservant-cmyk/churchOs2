@@ -33,14 +33,28 @@ describe('Denomination RPC & Helper Suite', () => {
       assert.equal(result.valid, true);
     });
 
-    it('rejects payload containing legacy p_ip parameter', () => {
+    it('accepts a valid p_ip (stored for the per-IP scam guard)', () => {
+      const payloadWithIp = {
+        p_user_id: 'usr_abc_123',
+        p_name: 'Grace Cathedral',
+        p_slug: 'grace-cathedral',
+        p_role: 'pastor',
+        p_invite_code: 'GRACE-2026',
+        p_ip: '197.232.1.1',
+      };
+
+      const result = validateProvisionV3Payload(payloadWithIp);
+      assert.equal(result.valid, true);
+    });
+
+    it('rejects a malformed p_ip', () => {
       const invalidPayload = {
         p_user_id: 'usr_abc_123',
         p_name: 'Grace Cathedral',
         p_slug: 'grace-cathedral',
         p_role: 'pastor',
         p_invite_code: 'GRACE-2026',
-        p_ip: '127.0.0.1',
+        p_ip: 'not-an-ip',
       };
 
       const result = validateProvisionV3Payload(invalidPayload);

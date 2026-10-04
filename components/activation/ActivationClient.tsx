@@ -23,13 +23,20 @@ interface ActivationClientProps {
   churchSlug: string;
   churchId: string;
   userEmail: string;
+  /**
+   * Server-decided: whether the deployment has opted into payment simulation
+   * (ACTIVATION_SIMULATION=true). The simulate button is a payment bypass and
+   * is NEVER rendered in a production deployment.
+   */
+  allowSimulation?: boolean;
 }
 
 export default function ActivationClient({
   churchName,
   churchSlug,
   churchId,
-  userEmail
+  userEmail,
+  allowSimulation = false
 }: ActivationClientProps) {
   const router = useRouter();
   const [phoneNumber, setPhoneNumber] = useState('');
@@ -398,20 +405,24 @@ export default function ActivationClient({
                   </div>
 
                   <div className="space-y-2">
-                    {/* Instant verification simulator for rapid testing */}
-                    <button
-                      type="button"
-                      onClick={handleSimulatePayment}
-                      disabled={isSimulating}
-                      className="w-full py-2.5 px-4 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold uppercase tracking-wider transition-all flex items-center justify-center space-x-2 shadow"
-                    >
-                      {isSimulating ? (
-                        <RotateCw className="w-3.5 h-3.5 animate-spin" />
-                      ) : (
-                        <CheckCircle2 className="w-3.5 h-3.5" />
-                      )}
-                      <span>Simulate Mobile Money PIN Approval</span>
-                    </button>
+                    {/* Instant verification simulator — TESTING ONLY.
+                        Rendered solely when the server has opted into
+                        ACTIVATION_SIMULATION=true; never in production. */}
+                    {allowSimulation && (
+                      <button
+                        type="button"
+                        onClick={handleSimulatePayment}
+                        disabled={isSimulating}
+                        className="w-full py-2.5 px-4 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold uppercase tracking-wider transition-all flex items-center justify-center space-x-2 shadow"
+                      >
+                        {isSimulating ? (
+                          <RotateCw className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                          <CheckCircle2 className="w-3.5 h-3.5" />
+                        )}
+                        <span>Simulate Mobile Money PIN Approval (Test Mode)</span>
+                      </button>
+                    )}
 
                     <button
                       type="button"
