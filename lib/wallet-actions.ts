@@ -2,6 +2,7 @@
 
 import { createClient, createAdminClient } from '@/lib/supabase/server';
 import { revalidatePath } from 'next/cache';
+import { isChurchAdminRole } from './roles';
 import { normalizeUgPhone } from './utils';
 import crypto from 'crypto';
 import {
@@ -69,7 +70,7 @@ export async function initiateNajikiPayment(formData: FormData) {
     // holder linked to the tenant (e.g. a staff account) must not be able to
     // spend the church's money.
     const role = String(profile.role ?? '').toLowerCase();
-    if (role !== 'pastor' && role !== 'admin') {
+    if (!isChurchAdminRole(role)) {
       return { error: 'Access denied: only church admins can top up the wallet' };
     }
 

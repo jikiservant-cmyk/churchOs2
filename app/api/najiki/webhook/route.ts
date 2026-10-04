@@ -72,7 +72,9 @@ async function handlePost(request: Request) {
 
   if (!secret) {
     console.error('[Najiki Webhook] NAJIKI_WEBHOOK_SECRET / NAJIKI_API_KEY not set — rejecting webhook');
-    return NextResponse.json({ error: 'Webhook secret unconfigured' }, { status: 500 });
+    // 503 (not 500): config is missing, the service is not crashed — the
+    // provider retries and uptime monitors shouldn't treat this as an outage.
+    return NextResponse.json({ error: 'Webhook secret unconfigured' }, { status: 503 });
   }
 
   const verification = verifyNajikiWebhook({ rawBody, headers: request.headers, secret });

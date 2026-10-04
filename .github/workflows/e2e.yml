@@ -1,0 +1,44 @@
+# Runs the full end-to-end suite (32 scenarios) on every push and PR.
+#
+# No secrets required: the suite spins up an embedded Postgres (via the
+# `embedded-postgres` npm package), applies supabase-schema.sql + all
+# migrations, mocks the Supabase REST/Auth API and the Na'jiki payment
+# gateway, and drives the real Next.js server with real browser-like HTTP.
+#
+# The production build runs first so type errors (Next type-checks app/ and
+# tests/) fail the pipeline before the ~2-minute E2E run.
+name: E2E
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-e2e:
+    name: Build + E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          # Node 22.18+ runs TypeScript test files natively (type stripping);
+          # matches the version the suite was developed against.
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Production build (same as Netlify deploy)
+        run: npm run build
+
+      - name: E2E suite (embedded Postgres + mocked Na'jiki gateway)
+        run: npm run test:e2e

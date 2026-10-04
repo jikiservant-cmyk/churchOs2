@@ -846,6 +846,15 @@ export async function runE2E(): Promise<E2EReport> {
       assert.equal(JSON.parse(status.text).isActive, true)
     })
 
+    await scenario('health: /api/health reports ok for uptime monitors (anon)', async () => {
+      const anon = new E2EClient(`http://127.0.0.1:${nextPort}`)
+      const res = await anon.get('/api/health')
+      assert.equal(res.status, 200, `expected 200, got ${res.status}: ${res.text}`)
+      const body = JSON.parse(res.text)
+      assert.equal(body.status, 'ok')
+      assert.equal(body.db, 'ok')
+    })
+
     // ═══════════════════════════════════════════════════════════════════════
     // S9. OVERSEER FLOW
     // ═══════════════════════════════════════════════════════════════════════

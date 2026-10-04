@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { confirmActivationPayment, ACTIVATION_FEE_UGX, isSimulationEnabled } from '@/lib/activation';
+import { isChurchAdminRole } from '@/lib/roles';
 
 export const dynamic = 'force-dynamic';
 
@@ -45,7 +46,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'No church found' }, { status: 400 });
     }
 
-    if (!['pastor', 'admin'].includes(String(profile.role || '').toLowerCase())) {
+    if (!isChurchAdminRole(String(profile.role || '').toLowerCase())) {
       return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
     }
 

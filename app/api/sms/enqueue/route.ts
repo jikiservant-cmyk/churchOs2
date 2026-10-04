@@ -15,6 +15,7 @@
 
 import { NextResponse } from 'next/server';
 import { createClient as createServerClient } from '@/lib/supabase/server';
+import { isChurchAdminRole } from '@/lib/roles';
 import { enqueueBroadcast, processQueueBatch } from '@/lib/queue-actions';
 import { normalizeUgPhone } from '@/lib/utils';
 
@@ -47,7 +48,7 @@ export async function POST(req: Request) {
       .eq('tenant_id', churchId)
       .maybeSingle();
 
-    if (!adminProfile || !['pastor', 'admin'].includes(adminProfile.role)) {
+    if (!adminProfile || !isChurchAdminRole(adminProfile.role)) {
       return NextResponse.json(
         { error: 'Access denied: only pastors or administrators can enqueue broadcasts.' },
         { status: 403 },

@@ -2,6 +2,7 @@ import { createClient } from '@/lib/supabase/server';
 import LoginForm from '@/components/LoginForm';
 import { getChurchBySlug } from '@/lib/db';
 import { redirect } from 'next/navigation';
+import { isChurchAdminRole } from '@/lib/roles';
 import { Suspense } from 'react';
 
 export const dynamic = 'force-dynamic';
@@ -48,7 +49,7 @@ export default async function AdminLoginPage({
 
           if (profile?.role === 'overseer') {
             redirectTo = '/overseer';
-          } else if (profile?.role === 'pastor' || profile?.role === 'admin') {
+            } else if (isChurchAdminRole(profile?.role)) {
              const { data: church } = await supabase
                .schema('church')
                .from('churches')

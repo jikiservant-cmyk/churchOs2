@@ -8,6 +8,7 @@ import { ChurchEvent, AttendanceLog, AttendanceFlag, AttendanceFlagStatus } from
 import { membersExpectedAtEvent } from './attendance-streaks';
 import { SignJWT, jwtVerify } from 'jose';
 import { sendSingleSMS } from './sms-actions';
+import { isChurchAdminRole } from './roles';
 
 import crypto from 'crypto';
 
@@ -250,7 +251,7 @@ export async function createEvent(formData: FormData, churchId: string, churchSl
     .eq('id', user.id)
     .maybeSingle();
 
-  if (!profile || profile.tenant_id !== churchId || !['pastor', 'admin'].includes(profile.role)) {
+  if (!profile || profile.tenant_id !== churchId || !isChurchAdminRole(profile.role)) {
     return { error: 'Unauthorized: only pastors or administrators have permission to manage events for this church.' };
   }
 
@@ -387,7 +388,7 @@ export async function updateChurchPasskey(churchId: string, newPasskey: string, 
       .eq('tenant_id', churchId)
       .maybeSingle();
 
-    if (!profile || !['pastor', 'admin'].includes(profile.role)) {
+    if (!profile || !isChurchAdminRole(profile.role)) {
       return { error: 'Access denied: Only pastors or administrators can rotate the usher passkey.' };
     }
 

@@ -3,10 +3,9 @@ import { createClient } from '@/lib/supabase/server';
 import { redirect, notFound } from 'next/navigation';
 import ActivationClient from '@/components/activation/ActivationClient';
 import { isSimulationEnabled } from '@/lib/activation';
+import { isChurchAdminRole } from '@/lib/roles';
 
 export const dynamic = 'force-dynamic';
-
-const ACTIVATION_ROLES = ['pastor', 'admin'];
 
 export default async function ChurchActivationPage({
   params,
@@ -39,7 +38,7 @@ export default async function ChurchActivationPage({
     redirect('/?error=Access Denied');
   }
 
-  if (!ACTIVATION_ROLES.includes(String(profile.role || '').toLowerCase())) {
+  if (!isChurchAdminRole(String(profile.role || '').toLowerCase())) {
     redirect('/?error=Access Denied');
   }
 

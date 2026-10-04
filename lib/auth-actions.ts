@@ -4,6 +4,7 @@ import { createClient, createAdminClient } from '@/lib/supabase/server';
 import { redirect } from 'next/navigation';
 import { headers } from 'next/headers';
 import { recordAuthAttempt, clientIpFromHeaders, isLoopbackIp } from '@/lib/auth-rate-limit';
+import { isChurchAdminRole } from '@/lib/roles';
 
 export type AuthState = {
   error?: string;
@@ -123,7 +124,7 @@ async function resolveLoginDestination(
     return { redirectTo: '/overseer' };
   }
 
-  if (role !== 'pastor' && role !== 'admin') {
+  if (!isChurchAdminRole(role)) {
     return { error: `Access Denied: Role '${profile.role}' does not have admin access.` };
   }
 

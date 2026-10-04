@@ -23,7 +23,10 @@ export async function POST(request: Request) {
 
   if (!secret) {
     console.error('[topup webhook] Missing LIVEPAY_WEBHOOK_SECRET / WEBHOOK_SECRET — rejecting webhook');
-    return NextResponse.json({ error: 'Webhook secret not configured' }, { status: 500 });
+    // 503 (not 500): the service is healthy but cannot accept webhooks until
+    // the secret is configured — the provider will retry, and uptime
+    // monitors must not flag this as a crash.
+    return NextResponse.json({ error: 'Webhook secret not configured' }, { status: 503 });
   }
 
   const incomingSig =

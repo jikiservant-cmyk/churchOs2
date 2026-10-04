@@ -1,10 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { startActivationPayment, SUPPORTED_ACTIVATION_PROVIDERS } from '@/lib/activation';
+import { isChurchAdminRole } from '@/lib/roles';
 
 export const dynamic = 'force-dynamic';
-
-const ACTIVATION_ROLES = ['pastor', 'admin'];
 
 export async function POST(req: NextRequest) {
   try {
@@ -28,7 +27,7 @@ export async function POST(req: NextRequest) {
 
     // Activation is a church-admin operation: paying for (or re-paying for) a
     // workspace must not be possible for non-admin role holders.
-    if (!ACTIVATION_ROLES.includes(String(profile.role || '').toLowerCase())) {
+    if (!isChurchAdminRole(String(profile.role || '').toLowerCase())) {
       return NextResponse.json({ error: 'Forbidden: you do not have permission to manage this workspace' }, { status: 403 });
     }
 

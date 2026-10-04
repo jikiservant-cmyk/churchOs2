@@ -1,5 +1,6 @@
 import { getChurchBySlug } from '@/lib/db';
 import { createClient } from '@/lib/supabase/server';
+import { isChurchAdminRole } from '@/lib/roles';
 import { redirect, notFound } from 'next/navigation';
 import Link from 'next/link';
 import AdminSidebar from '@/components/AdminSidebar';
@@ -28,8 +29,11 @@ export default async function AdminLayout({
     .eq('id', user.id)
     .maybeSingle();
 
-  // Role and Tenant Check (fail closed if no tenant_id assigned)
-  if (!profile || profile.role !== 'pastor' || !profile.tenant_id) {
+  // Role and Tenant Check (fail closed if no tenant_id assigned).
+  // Church-admin = pastor | admin (see lib/roles.ts) — this gate previously
+  // only accepted 'pastor', which locked church admins out of their own
+  // dashboard while the wallet/SMS/payment routes accepted them.
+  if (!profile || !isChurchAdminRole(profile.role) || !profile.tenant_id) {
     redirect(`/?error=Access Denied`);
   }
 

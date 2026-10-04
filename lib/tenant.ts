@@ -1,10 +1,11 @@
 import { getChurchBySlug } from '@/lib/db';
 import { createClient } from '@/lib/supabase/server';
 import { redirect, notFound } from 'next/navigation';
+import { CHURCH_ADMIN_ROLES } from '@/lib/roles';
 
 export async function requireTenant(
   churchSlug: string,
-  allowedRoles: ('pastor' | 'admin' | 'staff')[] = ['pastor', 'admin']
+  allowedRoles: readonly ('pastor' | 'admin' | 'staff')[] = CHURCH_ADMIN_ROLES
 ) {
   const church = await getChurchBySlug(churchSlug);
   if (!church) {
@@ -77,7 +78,7 @@ export async function assertChurchAdminAuth(
 
 export async function assertTenantRole(
   churchSlugOrId: string,
-  allowedRoles: ('pastor' | 'admin' | 'staff')[] = ['pastor', 'admin']
+  allowedRoles: readonly ('pastor' | 'admin' | 'staff')[] = CHURCH_ADMIN_ROLES
 ) {
   const supabase = await createClient();
   const { data: { user }, error: authError } = await supabase.auth.getUser();
