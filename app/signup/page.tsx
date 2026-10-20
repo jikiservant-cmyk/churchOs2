@@ -19,6 +19,8 @@ export default function SignupPage() {
     }
   }, [state, router]);
 
+  const showNotice = !isPending && !state.error && state.success && !state.redirectTo;
+
   return (
     <div 
       style={{ fontFamily: "'Outfit', sans-serif" }}
@@ -48,6 +50,12 @@ export default function SignupPage() {
         {state.error && (
           <div className="mb-6 p-4 bg-[#B5622A]/10 border border-[#B5622A]/20 rounded-xl text-[#B5622A] text-xs font-bold leading-relaxed uppercase tracking-wider">
             {state.error}
+          </div>
+        )}
+
+        {showNotice && (
+          <div className="mb-6 p-4 bg-emerald-50 border border-emerald-200 rounded-xl text-emerald-700 text-xs font-medium leading-relaxed">
+            {state.notice}
           </div>
         )}
 

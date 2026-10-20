@@ -1,5 +1,6 @@
 import { createClient } from '@/lib/supabase/server';
 import { NextResponse } from 'next/server';
+import { isChurchAdminRole } from '@/lib/roles';
 import { sendSingleSMS } from '@/lib/sms-actions';
 import { normalizeUgPhone } from '@/lib/utils';
 
@@ -35,7 +36,7 @@ export async function POST(req: Request) {
           .eq('tenant_id', churchId)
           .maybeSingle();
 
-        if (!adminProfile || !['pastor', 'admin'].includes(adminProfile.role)) {
+        if (!adminProfile || !isChurchAdminRole(adminProfile.role)) {
           sendUpdate({ type: 'fatal', error: 'Forbidden: Insufficient privileges to broadcast SMS' });
           controller.close();
           return;

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { v4 as uuidv4 } from 'uuid';
 import { createClient, createAdminClient } from '@/lib/supabase/server';
+import { isChurchAdminRole } from '@/lib/roles';
 import { normalizeUgPhone } from '@/lib/utils';
 
 export async function POST(req: NextRequest) {
@@ -47,7 +48,7 @@ export async function POST(req: NextRequest) {
       .eq('id', user.id)
       .maybeSingle();
 
-    if (!adminProfile?.tenant_id || !['pastor', 'admin'].includes(adminProfile.role)) {
+    if (!adminProfile?.tenant_id || !isChurchAdminRole(adminProfile.role)) {
       return NextResponse.json({ error: 'Forbidden: Pastor or Admin privileges required' }, { status: 403 });
     }
 

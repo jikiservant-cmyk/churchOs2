@@ -41,17 +41,25 @@ export function normalizeInviteCode(code?: string | null): string {
   return code.trim().toUpperCase();
 }
 
+const PUBLIC_IP_RE = /^(\d{1,3}\.){3}\d{1,3}$/;
+const IPV6_RE = /^[0-9a-fA-F:]{2,45}$/;
+
 /**
  * Validates the provision_church_v3 parameter requirements:
- * Exactly five parameters, no p_ip, p_user_id, p_name, p_slug, p_role, p_invite_code.
+ * p_user_id, p_name, p_slug, p_role are required; p_invite_code and p_ip are
+ * optional. `p_ip` is the client IP recorded on the church row so the
+ * one-church-per-IP scam guard has data to match against — it is only stored,
+ * never trusted for authorization.
  */
 export function validateProvisionV3Payload(payload: Record<string, any>): { valid: boolean; error?: string } {
   if (!payload || typeof payload !== 'object') {
     return { valid: false, error: 'Payload must be an object' };
   }
 
-  if ('p_ip' in payload) {
-    return { valid: false, error: 'provision_church_v3 must not contain p_ip parameter' };
+  if (payload.p_ip !== undefined && payload.p_ip !== null && payload.p_ip !== '') {
+    if (typeof payload.p_ip !== 'string' || !(PUBLIC_IP_RE.test(payload.p_ip) || IPV6_RE.test(payload.p_ip))) {
+      return { valid: false, error: 'p_ip must be a valid IPv4 or IPv6 address' };
+    }
   }
 
   if (!payload.p_user_id) {

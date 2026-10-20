@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { createClient as createSupabaseServerClient } from '@/lib/supabase/server';
+import { isChurchAdminRole } from '@/lib/roles';
 import { normalizeUgPhone } from '@/lib/utils';
 import { sendSingleSMS } from '@/lib/sms-actions';
 
@@ -27,7 +28,7 @@ export async function POST(req: Request) {
       .eq('tenant_id', churchId)
       .maybeSingle();
 
-    if (!adminProfile || !['pastor', 'admin'].includes(adminProfile.role)) {
+    if (!adminProfile || !isChurchAdminRole(adminProfile.role)) {
       console.error(`[SMS API] Multi-tenancy / role check failed. User ${user.id} attempted to send for church ${churchId}`);
       return NextResponse.json({ error: 'Access denied: You must be a pastor or admin for this church.' }, { status: 403 });
     }

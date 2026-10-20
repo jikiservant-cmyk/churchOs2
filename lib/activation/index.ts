@@ -4,6 +4,24 @@ import { createNajikiPayment, getNajikiConfig, NajikiConfigError, NajikiApiError
 export const ACTIVATION_FEE_UGX = 17000;
 export const ACTIVATION_CURRENCY = 'UGX';
 
+/**
+ * The simulation endpoint confirms an activation payment without any real
+ * provider money moving. It MUST stay off in production; the only way to
+ * switch it on is an explicit deployment opt-in via ACTIVATION_SIMULATION.
+ */
+export function isSimulationEnabled(): boolean {
+  return (process.env.ACTIVATION_SIMULATION ?? '').trim().toLowerCase() === 'true';
+}
+
+/**
+ * Providers the activation flow can actually dispatch to. The client is NOT
+ * allowed to pick an arbitrary provider string: it is stored on the ledger
+ * row and the confirmation RPC refuses any later callback whose provider does
+ * not match — a mismatched provider would silently brick a paid activation.
+ */
+export const SUPPORTED_ACTIVATION_PROVIDERS = ['najiki'] as const;
+export type ActivationProvider = (typeof SUPPORTED_ACTIVATION_PROVIDERS)[number];
+
 export interface ActivationStatusResult {
   churchId: string;
   churchName: string;
@@ -26,7 +44,15 @@ export interface ActivationStatusResult {
 
 function getAdminClient() {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL || '';
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || '';
+  // Fail fast: the service-role key is mandatory for this flow. Silently
+  // falling back to the anon key produces opaque RLS failures deep in the
+  // payment path (and, worse, reads that look authoritative but aren't).
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+
+  if (!url || !key) {
+    throw new Error('Activation flow is not configured: SUPABASE_SERVICE_ROLE_KEY / NEXT_PUBLIC_SUPABASE_URL missing');
+  }
+
   return createSupabaseClient(url, key);
 }
 
@@ -60,14 +86,17 @@ export async function getChurchActivationStatus(churchId: string): Promise<Activ
       .limit(1)
       .maybeSingle();
 
-    const activationStatus = (church.activation_status || 'pending_payment') as 'active' | 'pending_payment' | 'suspended';
+    // Fail closed: a missing/blank status means "not proven paid".
+    const rawStatus = (church as any).activation_status as string | null;
+    const activationStatus: ActivationStatusResult['activationStatus'] =
+      rawStatus === 'active' || rawStatus === 'suspended' ? rawStatus : 'pending_payment';
 
     return {
       churchId: church.id,
       churchName: church.name,
       churchSlug: church.slug,
       activationStatus,
-      activationPaidAt: church.activation_paid_at,
+      activationPaidAt: (church as any).activation_paid_at ?? null,
       isActive: activationStatus === 'active',
       latestPayment: latestPayment ? {
         id: latestPayment.id,
@@ -103,6 +132,8 @@ export async function startActivationPayment({
 }): Promise<{
   success: boolean;
   alreadyActive?: boolean;
+  /** True when an earlier pending attempt is reused instead of a new push. */
+  reusedExistingPending?: boolean;
   merchantReference?: string;
   providerTransactionId?: string;
   instructions?: string;
@@ -112,7 +143,16 @@ export async function startActivationPayment({
     return { success: false, error: 'Unauthorized: church context required' };
   }
 
-  const supabase = getAdminClient();
+  if (!SUPPORTED_ACTIVATION_PROVIDERS.includes(provider as ActivationProvider)) {
+    return { success: false, error: `Unsupported payment provider: ${provider}` };
+  }
+
+  let supabase;
+  try {
+    supabase = getAdminClient();
+  } catch (err: any) {
+    return { success: false, error: err?.message || 'Activation flow is not configured' };
+  }
 
   // 1. Verify church exists and check if already active
   const { data: church, error: churchError } = await supabase
@@ -134,6 +174,39 @@ export async function startActivationPayment({
     };
   }
 
+  if (church.activation_status === 'suspended') {
+    // A suspended workspace must not be self-service re-payable; that is a
+    // support decision. Collecting money here would pay for nothing.
+    return {
+      success: false,
+      error: 'This workspace is suspended. Please contact administrative support before making a payment.'
+    };
+  }
+
+  // 1.5 Reuse an in-flight attempt. The UI polls this endpoint after a push;
+  // a double-click (or retrying on a slow network) previously created a NEW
+  // ledger row and a NEW MoMo push, and a user who approved both was charged
+  // twice with no refund path.
+  const { data: existingPending } = await supabase
+    .schema('church')
+    .from('activation_payments')
+    .select('id, merchant_reference, provider_transaction_id, created_at')
+    .eq('church_id', churchId)
+    .eq('status', 'pending')
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (existingPending) {
+    return {
+      success: true,
+      reusedExistingPending: true,
+      merchantReference: existingPending.merchant_reference,
+      providerTransactionId: existingPending.provider_transaction_id || undefined,
+      instructions: `An approval prompt is already on its way. Please approve UGX 17,000 once on ${existingPending.merchant_reference} — do not start a second payment.`
+    };
+  }
+
   // 2. Generate unique merchant reference
   const randomSuffix = Math.random().toString(36).substring(2, 7).toUpperCase();
   const timestamp = Date.now().toString(36).toUpperCase();
@@ -145,6 +218,10 @@ export async function startActivationPayment({
     cleanPhone = '256' + cleanPhone.substring(1);
   } else if (!cleanPhone.startsWith('256') && cleanPhone.length === 9) {
     cleanPhone = '256' + cleanPhone;
+  }
+
+  if (!/^\d{8,15}$/.test(cleanPhone)) {
+    return { success: false, error: 'Please enter a valid mobile money phone number' };
   }
 
   // 3. Record pending payment attempt in database ledger
@@ -176,7 +253,7 @@ export async function startActivationPayment({
     return { success: false, error: 'Failed to record payment attempt in ledger' };
   }
 
-  // 4. Dispatch payment via Na'jiki / LivePay API client
+  // 4. Dispatch payment via Na'jiki API client
   let providerTxId: string | null = null;
   let instructions = `Payment prompt sent to ${cleanPhone}. Please approve the request of UGX 17,000 on your mobile handset.`;
 
@@ -218,7 +295,17 @@ export async function startActivationPayment({
       .eq('id', paymentRow.id);
 
     if (err instanceof NajikiConfigError) {
-      instructions = `Payment request logged for ${cleanPhone}. (Na'jiki API Key not yet set in environment — use simulation button to complete testing).`;
+      instructions = `Payment request logged for ${cleanPhone}. (Na'jiki API Key not yet set in environment — the payment cannot be dispatched until the gateway is configured.)`;
+    } else if (err instanceof NajikiApiError && err.isClientError) {
+      // A rejected payload is a permanent failure for THIS attempt: don't
+      // leave the user polling a push that will never happen.
+      await supabase
+        .schema('church')
+        .from('activation_payments')
+        .update({ status: 'failed' })
+        .eq('id', paymentRow.id)
+        .eq('status', 'pending');
+      return { success: false, error: err.message };
     }
   }
 
@@ -259,7 +346,16 @@ export async function confirmActivationPayment({
     return { success: false, error: 'Missing merchant reference' };
   }
 
-  const supabase = getAdminClient();
+  let supabase;
+  try {
+    supabase = getAdminClient();
+  } catch (err: any) {
+    return { success: false, error: err?.message || 'Activation flow is not configured' };
+  }
+
+  const normalizedStatus = String(status ?? '').trim().toUpperCase();
+  const SUCCESS_STATUSES = ['SUCCESS', 'COMPLETED', 'PAID', 'CONFIRMED'];
+  const isSuccessful = SUCCESS_STATUSES.includes(normalizedStatus);
 
   // Attempt 1: Execute atomic PostgreSQL transaction RPC v2
   try {
@@ -269,7 +365,7 @@ export async function confirmActivationPayment({
       p_provider_transaction_id: providerTransactionId ? providerTransactionId.trim() : null,
       p_paid_amount: Number(paidAmount),
       p_currency: (currency || 'UGX').trim().toUpperCase(),
-      p_provider_status: (status || 'SUCCESS').trim().toUpperCase()
+      p_provider_status: normalizedStatus
     });
 
     if (!rpcError && rpcResult) {
@@ -295,7 +391,15 @@ export async function confirmActivationPayment({
     console.warn('[Activation] RPC v2 execution exception, falling back:', rpcEx);
   }
 
-  // Attempt 2: Direct fallback logic
+  // Attempt 2: Direct fallback logic (used only when the RPC is unavailable,
+  // e.g. migration 008 has not been applied yet).
+  //
+  // Security properties preserved here:
+  //  - the payment row is only ever updated FROM a non-terminal status
+  //    (pending/failed), so a racing duplicate cannot double-process;
+  //  - a mismatched amount/currency or an unknown status leaves the row
+  //    untouched (a correct provider callback can still reconcile it) — the
+  //    old code marked these 'failed', permanently bricking a valid payment.
   const { data: payment, error: fetchError } = await supabase
     .schema('church')
     .from('activation_payments')
@@ -318,22 +422,25 @@ export async function confirmActivationPayment({
     };
   }
 
-  // Status verification
-  const isSuccessful = ['SUCCESS', 'COMPLETED', 'PAID', 'CONFIRMED'].includes((status || '').toUpperCase());
-
   if (!isSuccessful) {
-    console.warn('[Activation] Payment marked as failed by provider:', merchantReference, status);
+    // Blank/unknown statuses: do not mutate the ledger, do not claim failure.
+    if (!normalizedStatus) {
+      console.warn('[Activation] Callback without a provider status; no state change:', merchantReference);
+      return { success: false, error: 'Callback did not include a provider status' };
+    }
+    console.warn('[Activation] Payment marked as failed by provider:', merchantReference, normalizedStatus);
     await supabase
       .schema('church')
       .from('activation_payments')
       .update({
         status: 'failed',
-        failure_reason: `Provider reported status: ${status}`,
+        failure_reason: `Provider reported status: ${normalizedStatus}`,
         provider_transaction_id: providerTransactionId || payment.provider_transaction_id
       })
-      .eq('id', payment.id);
+      .eq('id', payment.id)
+      .in('status', ['pending', 'failed']);
 
-    return { success: false, error: `Payment failed with status: ${status}` };
+    return { success: false, error: `Payment failed with status: ${normalizedStatus}` };
   }
 
   // Exact amount & currency validation
@@ -343,23 +450,15 @@ export async function confirmActivationPayment({
       received: { amount: paidAmount, currency }
     });
 
-    await supabase
-      .schema('church')
-      .from('activation_payments')
-      .update({
-        status: 'failed',
-        failure_reason: `Amount mismatch: expected UGX ${ACTIVATION_FEE_UGX}, received ${currency} ${paidAmount}`,
-        provider_transaction_id: providerTransactionId || payment.provider_transaction_id
-      })
-      .eq('id', payment.id);
-
+    // Leave the row pending so a correct provider confirmation can reconcile
+    // it. (The atomic RPC behaves the same way.)
     return { success: false, error: 'Reconciliation error: payment amount mismatch' };
   }
 
-  // Verification Success
+  // Verification Success — conditional transition, single row.
   const now = new Date().toISOString();
 
-  const { error: updatePaymentError } = await supabase
+  const { data: updatedPayment, error: updatePaymentError } = await supabase
     .schema('church')
     .from('activation_payments')
     .update({
@@ -367,23 +466,47 @@ export async function confirmActivationPayment({
       verified_at: now,
       provider_transaction_id: providerTransactionId || payment.provider_transaction_id
     })
-    .eq('id', payment.id);
+    .eq('id', payment.id)
+    .in('status', ['pending', 'failed'])
+    .select('id, status')
+    .maybeSingle();
 
   if (updatePaymentError) {
     console.error('[Activation] Failed to update payment record:', updatePaymentError);
     return { success: false, error: 'Database update failed' };
   }
 
-  const { error: updateChurchError } = await supabase
+  if (!updatedPayment || updatedPayment.status !== 'paid') {
+    // A concurrent callback already moved this row. If it is paid now, we are
+    // idempotent-duplicate; otherwise report the current state.
+    const { data: current } = await supabase
+      .schema('church')
+      .from('activation_payments')
+      .select('status, church_id')
+      .eq('id', payment.id)
+      .maybeSingle();
+
+    if (current?.status === 'paid') {
+      return { success: true, alreadyProcessed: true, churchId: current.church_id, activated: true };
+    }
+    return { success: false, error: 'Payment could not be transitioned to paid' };
+  }
+
+  // The RPC only activates from 'pending_payment' (a suspended church stays
+  // suspended after paying); mirror that here.
+  const { data: churchRow, error: updateChurchError } = await supabase
     .schema('church')
     .from('churches')
     .update({
       activation_status: 'active',
       activation_paid_at: now
     })
-    .eq('id', payment.church_id);
+    .eq('id', payment.church_id)
+    .in('activation_status', ['pending_payment', 'active'])
+    .select('id, activation_status')
+    .maybeSingle();
 
-  if (updateChurchError) {
+  if (updateChurchError || !churchRow) {
     console.error('[Activation] Failed to activate church:', updateChurchError);
     return { success: false, error: 'Failed to update church activation status' };
   }
@@ -393,6 +516,6 @@ export async function confirmActivationPayment({
   return {
     success: true,
     churchId: payment.church_id,
-    activated: true
+    activated: churchRow.activation_status === 'active'
   };
 }
