@@ -1,4 +1,4 @@
-import { createClient } from '@/lib/supabase/server';
+import { createClient, createAdminClient } from '@/lib/supabase/server';
 import LoginForm from '@/components/LoginForm';
 import { getChurchBySlug } from '@/lib/db';
 import { redirect } from 'next/navigation';
@@ -43,8 +43,9 @@ export default async function RootLoginPage({
         }
 
         if (!redirectTo) {
-          // Attempt to find their church via their profile
-          const { data: profile } = await supabase
+          // Attempt to find their church via their profile using createAdminClient to avoid RLS false negatives
+          const adminSupabase = await createAdminClient();
+          const { data: profile } = await adminSupabase
             .from('admin_profiles')
             .select('role, tenant_id')
             .eq('id', user.id)
@@ -53,7 +54,7 @@ export default async function RootLoginPage({
           if (profile?.role === 'overseer') {
             redirectTo = '/overseer';
           } else if (profile?.role === 'pastor' && profile?.tenant_id) {
-             const { data: church } = await supabase
+             const { data: church } = await adminSupabase
                .schema('church')
                .from('churches')
                .select('slug')
@@ -62,7 +63,11 @@ export default async function RootLoginPage({
                
              if (church?.slug) {
                redirectTo = `/${church.slug}/admin`;
+             } else {
+               redirectTo = '/signup/provision';
              }
+          } else if (!profile || !profile.tenant_id) {
+             redirectTo = '/signup/provision';
           } else if (profile && profile.role !== 'pastor' && profile.role !== 'overseer') {
              loginError = 'Access Denied: You do not have admin permissions';
           }

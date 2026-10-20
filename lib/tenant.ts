@@ -1,5 +1,5 @@
 import { getChurchBySlug } from '@/lib/db';
-import { createClient } from '@/lib/supabase/server';
+import { createClient, createAdminClient } from '@/lib/supabase/server';
 import { redirect, notFound } from 'next/navigation';
 
 export async function requireTenant(
@@ -18,18 +18,23 @@ export async function requireTenant(
     redirect(`/?error=Session Expired`);
   }
 
-  const { data: profile } = await supabase
+  const adminSupabase = await createAdminClient();
+  const { data: profile } = await adminSupabase
     .from('admin_profiles')
     .select('role, tenant_id')
     .eq('id', user.id)
     .maybeSingle();
 
-  if (!profile || !profile.tenant_id || !allowedRoles.includes(profile.role)) {
+  if (!profile || !profile.tenant_id) {
+    redirect('/signup/provision');
+  }
+
+  if (!allowedRoles.includes(profile.role)) {
     redirect(`/?error=Access Denied`);
   }
 
   if (profile.tenant_id !== church.id) {
-    const { data: correctChurch } = await supabase
+    const { data: correctChurch } = await adminSupabase
       .schema('church')
       .from('churches')
       .select('slug')

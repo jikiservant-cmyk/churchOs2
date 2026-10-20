@@ -77,11 +77,13 @@ export async function login(prevState: AuthState, formData: FormData): Promise<A
     }
 
     // 3. Fallback: Verify Role and find Church Slug in admin_profiles
+    // Use admin client to reliably bypass RLS restrictions on admin_profiles
+    const adminSupabase = await createAdminClient();
     let profile = null;
     let profileError = null;
 
     // Attempt 1: Fetch by ID
-    const { data: idData, error: idError } = await supabase
+    const { data: idData, error: idError } = await adminSupabase
       .from('admin_profiles')
       .select('role, tenant_id, email, app_type')
       .eq('id', authData.user.id)
@@ -94,8 +96,8 @@ export async function login(prevState: AuthState, formData: FormData): Promise<A
     }
 
     // Attempt 2: Fallback to Email
-    if (!profile && !profileError) {
-      const { data: emailData, error: emailError } = await supabase
+    if (!profile) {
+      const { data: emailData, error: emailError } = await adminSupabase
         .from('admin_profiles')
         .select('role, tenant_id, email, app_type')
         .eq('email', email)
@@ -108,9 +110,10 @@ export async function login(prevState: AuthState, formData: FormData): Promise<A
       }
     }
 
-    if (profileError || !profile) {
-      await supabase.auth.signOut();
-      return { error: 'Access Denied: You are not authorized to access this portal.' };
+    // If no profile or no tenant_id exists yet, the authenticated user has not provisioned their church workspace.
+    // Send them to /signup/provision instead of kicking them out with Access Denied!
+    if (!profile || !profile.tenant_id) {
+      return { success: true, redirectTo: '/signup/provision' };
     }
 
     // Handle overseer in fallback profile check

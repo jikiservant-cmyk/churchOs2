@@ -11,14 +11,22 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
-    const { data: profile } = await supabase
+    const adminSupabase = await createAdminClient();
+    let { data: profile } = await adminSupabase
       .from('admin_profiles')
       .select('tenant_id')
       .eq('id', user.id)
       .maybeSingle();
 
-    if (!profile?.tenant_id) {
-      return NextResponse.json({ error: 'No church found' }, { status: 400 });
+    if (!profile?.tenant_id && user.email) {
+      const { data: emailProfile } = await adminSupabase
+        .from('admin_profiles')
+        .select('tenant_id')
+        .eq('email', user.email)
+        .maybeSingle();
+      if (emailProfile?.tenant_id) {
+        profile = emailProfile;
+      }
     }
 
     const body = await req.json().catch(() => ({}));
@@ -28,11 +36,20 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Missing merchantReference' }, { status: 400 });
     }
 
+    const { data: payment } = await supabase
+      .schema('church')
+      .from('activation_payments')
+      .select('amount, currency')
+      .eq('merchant_reference', merchantReference)
+      .maybeSingle();
+
+    const paidAmount = payment?.amount ? Number(payment.amount) : ACTIVATION_FEE_UGX;
+
     const outcome = await confirmActivationPayment({
       merchantReference,
       providerTransactionId: `SIM-${Date.now()}`,
-      paidAmount: ACTIVATION_FEE_UGX,
-      currency: 'UGX',
+      paidAmount,
+      currency: payment?.currency || 'UGX',
       status: 'SUCCESS'
     });
 

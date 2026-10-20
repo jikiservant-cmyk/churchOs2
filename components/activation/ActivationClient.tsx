@@ -2,20 +2,21 @@
 
 import { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
-import Image from 'next/image';
-import { 
-  ShieldCheck, 
-  Sparkles, 
-  Smartphone, 
-  CheckCircle2, 
-  AlertCircle, 
-  ArrowRight, 
-  RotateCw,
-  LogOut,
-  Lock,
+import {
+  X,
   Users,
+  CalendarDays,
+  ChartNoAxesColumnIncreasing,
   MessageSquare,
-  BarChart3
+  LockKeyhole,
+  Church,
+  Smartphone,
+  CheckCircle2,
+  AlertCircle,
+  Loader2,
+  ArrowRight,
+  RefreshCw,
+  ShieldCheck
 } from 'lucide-react';
 
 interface ActivationClientProps {
@@ -25,6 +26,47 @@ interface ActivationClientProps {
   userEmail: string;
 }
 
+const plans = {
+  standard: { 
+    name: 'Lifetime Setup', 
+    price: 17000, 
+    period: 'one-time', 
+    tag: 'One-time parish activation' 
+  },
+  bundle: { 
+    name: 'Setup + SMS Pack', 
+    price: 50000, 
+    period: 'bundle', 
+    tag: 'Includes 1,000 pastoral SMS' 
+  },
+};
+
+const features = [
+  {
+    icon: Users,
+    title: 'Flock & Member Registry',
+    description: 'Keep member records, cell groups,\nand new converts organized in one place.',
+  },
+  {
+    icon: CalendarDays,
+    title: 'Sunday Attendance & Alerts',
+    description: 'Track Sunday service attendance streaks\nand automatically flag missed services.',
+  },
+  {
+    icon: MessageSquare,
+    title: 'Pastoral SMS Broadcasts',
+    description: 'Send service reminders and prayer messages\ndirectly to MTN and Airtel handsets.',
+  },
+  {
+    icon: ChartNoAxesColumnIncreasing,
+    title: 'Mobile Money Tithes & Giving',
+    description: 'Enable congregation members to give tithes\nand offerings securely via MoMo.',
+  },
+];
+
+const money = (amount: number) =>
+  `UGX ${amount.toLocaleString('en-US')}`;
+
 export default function ActivationClient({
   churchName,
   churchSlug,
@@ -32,6 +74,8 @@ export default function ActivationClient({
   userEmail
 }: ActivationClientProps) {
   const router = useRouter();
+  const [selected, setSelected] = useState<'standard' | 'bundle'>('standard');
+  const [showCheckoutModal, setShowCheckoutModal] = useState(false);
   const [phoneNumber, setPhoneNumber] = useState('');
   const [network, setNetwork] = useState<'mtn' | 'airtel'>('mtn');
   const [isLoading, setIsLoading] = useState(false);
@@ -41,8 +85,10 @@ export default function ActivationClient({
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isSuccess, setIsSuccess] = useState(false);
   const [isSimulating, setIsSimulating] = useState(false);
-  
+  const [isCheckingStatus, setIsCheckingStatus] = useState(false);
+
   const pollIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const plan = plans[selected];
 
   // Poll status endpoint while waiting for mobile money push confirmation
   useEffect(() => {
@@ -50,7 +96,7 @@ export default function ActivationClient({
 
     const checkStatus = async () => {
       try {
-        const res = await fetch('/api/church/activation/status', { cache: 'no-store' });
+        const res = await fetch(`/api/church/activation/status?church_slug=${encodeURIComponent(churchSlug)}&church_id=${encodeURIComponent(churchId)}`, { cache: 'no-store' });
         if (res.ok) {
           const data = await res.json();
           if (data.isActive || data.activationStatus === 'active') {
@@ -72,7 +118,7 @@ export default function ActivationClient({
     return () => {
       if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
     };
-  }, [isPolling, churchSlug, router]);
+  }, [isPolling, churchSlug, churchId, router]);
 
   const handleStartPayment = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -86,7 +132,11 @@ export default function ActivationClient({
         body: JSON.stringify({
           phoneNumber,
           provider: 'najiki',
-          network
+          network,
+          amount: plan.price,
+          plan: selected,
+          churchId,
+          churchSlug
         })
       });
 
@@ -145,7 +195,31 @@ export default function ActivationClient({
     }
   };
 
-  const handleSignOut = async () => {
+  // Check existing payment status
+  const handleCheckStatus = async () => {
+    setIsCheckingStatus(true);
+    try {
+      const res = await fetch(`/api/church/activation/status?church_slug=${encodeURIComponent(churchSlug)}&church_id=${encodeURIComponent(churchId)}`, { cache: 'no-store' });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.isActive || data.activationStatus === 'active') {
+          setIsSuccess(true);
+          setTimeout(() => {
+            router.replace(`/${churchSlug}/admin`);
+            router.refresh();
+          }, 1200);
+          return;
+        }
+      }
+      alert('No verified payment detected yet. Please complete the mobile money approval on your phone.');
+    } catch {
+      alert('Could not verify status at this moment. Please try again.');
+    } finally {
+      setIsCheckingStatus(false);
+    }
+  };
+
+  const handleSignOutOrClose = async () => {
     try {
       await fetch('/api/auth/logout', { method: 'POST' });
     } catch {
@@ -155,289 +229,334 @@ export default function ActivationClient({
   };
 
   return (
-    <div 
-      style={{ fontFamily: "'Outfit', sans-serif" }}
-      className="min-h-screen bg-[#2B1A0E] text-[#1E1208] relative overflow-hidden flex flex-col justify-between"
-    >
-      {/* Background Graphic */}
-      <Image
-        src="https://images.unsplash.com/photo-1438232992991-995b7058bbb3?q=80&w=2073&auto=format&fit=crop"
-        alt="background"
-        fill
-        className="object-cover opacity-15"
-        priority
-        referrerPolicy="no-referrer"
-      />
-      <div className="absolute inset-0 bg-gradient-to-br from-[#2B1A0E]/80 via-[#2B1A0E]/60 to-[#1E1208]/90" />
+    <main className="min-h-screen bg-[#f5f5f7] flex items-center justify-center p-0 sm:p-6 font-sans">
+      <section className="relative w-full max-w-[480px] min-h-screen sm:min-h-0 sm:rounded-[36px] bg-white px-6 sm:px-10 pt-7 pb-8 text-[#111827] shadow-[0_10px_60px_rgba(0,0,0,0.07)]">
 
-      {/* Top Header Nav */}
-      <header className="relative z-10 px-6 py-5 flex items-center justify-between border-b border-[rgba(240,230,211,0.08)]">
-        <div className="flex items-center space-x-3">
-          <div className="w-9 h-9 bg-[#B5622A] rounded-xl flex items-center justify-center text-[#F0E6D3] font-bold shadow-md">
-            ✝
+        {/* Top navigation */}
+        <header className="flex items-center justify-between">
+          <button
+            aria-label="Close paywall"
+            className="text-gray-900 hover:opacity-50 transition p-1 cursor-pointer"
+            onClick={handleSignOutOrClose}
+          >
+            <X size={25} strokeWidth={1.8} />
+          </button>
+
+          <button 
+            onClick={handleCheckStatus}
+            disabled={isCheckingStatus}
+            className="text-sm font-medium text-[#718096] hover:text-black transition flex items-center gap-1.5 cursor-pointer"
+          >
+            {isCheckingStatus ? (
+              <Loader2 size={13} className="animate-spin" />
+            ) : (
+              <RefreshCw size={13} />
+            )}
+            <span>Check Status</span>
+          </button>
+        </header>
+
+        {/* Church mark */}
+        <div className="flex flex-col items-center mt-7">
+          <div className="w-[104px] h-[104px] rounded-[27px] bg-gradient-to-br from-white via-[#f5f6f8] to-[#e6e8eb] shadow-[0_8px_24px_rgba(0,0,0,0.07)] flex items-center justify-center">
+            <Church size={52} strokeWidth={1.25} className="text-[#89929e]" />
           </div>
-          <div>
-            <h1 style={{ fontFamily: "'Playfair Display', serif" }} className="text-lg font-bold text-[#F0E6D3]">
-              pastorOs
-            </h1>
-            <p className="text-[11px] text-[#C8B89A] font-medium">{churchName}</p>
-          </div>
+
+          <p className="mt-6 text-[12px] tracking-[4px] font-semibold text-[#7b8798] uppercase">
+            PARISH WORKSPACE SETUP
+          </p>
+
+          <h1 className="mt-4 text-[30px] sm:text-[34px] leading-[1.15] tracking-[-1.5px] font-semibold text-center text-[#111827]">
+            Empower Your Ministry,
+            <br />
+            Shepherd Your Flock
+          </h1>
+
+          <p className="mt-4 text-[15px] sm:text-[16px] leading-relaxed text-center text-[#7b8798] max-w-[340px]">
+            Activate <strong className="text-[#111827] font-semibold">{churchName}</strong> with tools built for Ugandan churches to track attendance, send pastoral SMS, and receive Mobile Money tithes.
+          </p>
         </div>
 
-        <button
-          onClick={handleSignOut}
-          className="flex items-center space-x-1.5 px-3.5 py-2 bg-[rgba(240,230,211,0.08)] hover:bg-[rgba(240,230,211,0.15)] text-[#C8B89A] hover:text-[#F0E6D3] rounded-xl text-xs font-semibold transition-all border border-[rgba(240,230,211,0.1)]"
-        >
-          <LogOut className="w-3.5 h-3.5" />
-          <span>Sign Out</span>
-        </button>
-      </header>
+        {/* Benefits tailored to pastorOs */}
+        <div className="mt-8 space-y-5">
+          {features.map(({ icon: Icon, title, description }) => (
+            <div key={title} className="flex items-start gap-4">
+              <div className="shrink-0 w-[52px] h-[52px] rounded-[18px] bg-[#f5f6f8] flex items-center justify-center">
+                <Icon size={25} strokeWidth={2.1} className="text-[#111827]" />
+              </div>
 
-      {/* Main Content Area */}
-      <main className="relative z-10 flex-1 max-w-4xl mx-auto w-full px-4 py-8 md:py-12 flex flex-col items-center justify-center">
-        
-        {/* Success Screen */}
-        {isSuccess ? (
-          <div className="bg-[#F0E6D3] rounded-3xl p-8 md:p-12 text-center shadow-2xl border border-[#B5622A]/20 max-w-lg w-full animate-in fade-in duration-500">
-            <div className="w-16 h-16 bg-emerald-100 text-emerald-700 rounded-2xl flex items-center justify-center mx-auto mb-6 shadow-inner">
-              <CheckCircle2 className="w-10 h-10" />
-            </div>
-            <h2 style={{ fontFamily: "'Playfair Display', serif" }} className="text-3xl font-bold text-[#1E1208] mb-3">
-              Workspace Activated!
-            </h2>
-            <p className="text-sm text-[#9A7E65] mb-6 leading-relaxed">
-              Your one-time fee of UGX 17,000 has been verified. Welcome to your full <strong>{churchName}</strong> pastorOs management portal.
-            </p>
-            <div className="flex items-center justify-center space-x-2 text-xs font-bold text-[#B5622A] uppercase tracking-widest">
-              <RotateCw className="w-4 h-4 animate-spin" />
-              <span>Redirecting to your dashboard...</span>
-            </div>
-          </div>
-        ) : (
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 w-full items-stretch">
-            
-            {/* Left Column: Value Prop & Pricing Summary */}
-            <div className="lg:col-span-6 bg-[#F0E6D3] rounded-3xl p-8 shadow-xl border border-[rgba(90,55,20,0.12)] flex flex-col justify-between">
-              <div>
-                <div className="inline-flex items-center space-x-2 px-3 py-1 bg-[#B5622A]/10 border border-[#B5622A]/20 rounded-full text-[#B5622A] text-xs font-bold tracking-wider uppercase mb-4">
-                  <Sparkles className="w-3.5 h-3.5" />
-                  <span>One-Time Church Activation</span>
-                </div>
-
-                <h2 style={{ fontFamily: "'Playfair Display', serif" }} className="text-2xl md:text-3xl font-bold text-[#1E1208] mb-3">
-                  Activate {churchName}
+              <div className="pt-0.5 min-w-0">
+                <h2 className="text-[16px] font-semibold tracking-[-0.3px] text-[#111827]">
+                  {title}
                 </h2>
-                
-                <p className="text-sm text-[#9A7E65] leading-relaxed mb-6 font-medium">
-                  Unlock the complete church operating suite for your ministry with a single, one-time activation fee.
+                <p className="mt-1 text-[14px] leading-[1.5] whitespace-pre-line text-[#788598]">
+                  {description}
                 </p>
-
-                {/* Features List */}
-                <div className="space-y-3.5 mb-8">
-                  <div className="flex items-start space-x-3">
-                    <div className="p-1.5 bg-[#2B1A0E] text-[#F5E6CE] rounded-lg mt-0.5">
-                      <Users className="w-3.5 h-3.5" />
-                    </div>
-                    <div>
-                      <h4 className="text-xs font-bold text-[#1E1208]">Congregation & Member Directory</h4>
-                      <p className="text-[11px] text-[#9A7E65]">Unlimited member records, cell groups, and visitors.</p>
-                    </div>
-                  </div>
-
-                  <div className="flex items-start space-x-3">
-                    <div className="p-1.5 bg-[#2B1A0E] text-[#F5E6CE] rounded-lg mt-0.5">
-                      <BarChart3 className="w-3.5 h-3.5" />
-                    </div>
-                    <div>
-                      <h4 className="text-xs font-bold text-[#1E1208]">Attendance & Service Analytics</h4>
-                      <p className="text-[11px] text-[#9A7E65]">QR code roll call, headcounts, and growth reports.</p>
-                    </div>
-                  </div>
-
-                  <div className="flex items-start space-x-3">
-                    <div className="p-1.5 bg-[#2B1A0E] text-[#F5E6CE] rounded-lg mt-0.5">
-                      <MessageSquare className="w-3.5 h-3.5" />
-                    </div>
-                    <div>
-                      <h4 className="text-xs font-bold text-[#1E1208]">Instant SMS & Pastoral Broadcasts</h4>
-                      <p className="text-[11px] text-[#9A7E65]">Direct mobile messaging and prayer follow-ups.</p>
-                    </div>
-                  </div>
-                </div>
               </div>
+            </div>
+          ))}
+        </div>
 
-              {/* Price Banner */}
-              <div className="p-4 bg-[rgba(181,98,42,0.08)] border border-[rgba(181,98,42,0.18)] rounded-2xl flex items-center justify-between">
-                <div>
-                  <p className="text-[10px] font-bold text-[#9A7E65] uppercase tracking-wider">One-Time Lifetime Fee</p>
-                  <p className="text-2xl font-extrabold text-[#B5622A]">UGX 17,000</p>
-                </div>
-                <div className="text-right">
-                  <span className="text-[10px] font-semibold bg-[#2B1A0E] text-[#F5E6CE] px-2.5 py-1 rounded-lg">
-                    Per Church
+        {/* Pricing options matching real activation tiers */}
+        <div className="grid grid-cols-2 gap-3 mt-8">
+          {(Object.entries(plans) as [('standard' | 'bundle'), typeof plans.standard][]).map(([key, item]) => {
+            const active = selected === key;
+
+            return (
+              <button
+                key={key}
+                type="button"
+                onClick={() => setSelected(key)}
+                aria-pressed={active}
+                className={`relative text-left rounded-[20px] border p-4 pt-5 min-w-0 transition-all duration-200 cursor-pointer ${
+                  active
+                    ? 'bg-[#191919] border-[#191919] text-white shadow-md'
+                    : 'bg-white border-[#d9dce2] text-[#111827] hover:border-gray-500'
+                }`}
+              >
+                {key === 'bundle' && (
+                  <span className="absolute -top-[14px] left-1/2 -translate-x-1/2 whitespace-nowrap rounded-full border border-[#edf0f4] bg-[#f8faff] px-2.5 py-0.5 text-[10px] font-semibold text-[#4b5563]">
+                    Recommended
                   </span>
-                </div>
+                )}
+
+                <span className="flex items-center justify-between gap-1 text-[13px] font-medium">
+                  {item.name}
+                  <span className={`w-4 h-4 rounded-full border flex items-center justify-center shrink-0 ${
+                    active ? 'border-white' : 'border-[#b9c0cb]'
+                  }`}>
+                    {active && (
+                      <span className="w-2.5 h-2.5 rounded-full bg-white" />
+                    )}
+                  </span>
+                </span>
+
+                <span className="block mt-2 text-[20px] sm:text-[22px] tracking-[-0.7px] font-semibold whitespace-nowrap">
+                  {money(item.price)}
+                </span>
+
+                <span className={`block mt-1 text-[11px] font-medium ${
+                  active ? 'text-gray-300' : 'text-[#7b8798]'
+                }`}>
+                  {item.tag}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+
+        {/* Main action */}
+        <button
+          onClick={() => {
+            setShowCheckoutModal(true);
+            setErrorMessage(null);
+          }}
+          className="mt-6 w-full min-h-[56px] rounded-[17px] bg-[#191919] text-white text-[16px] font-medium hover:bg-black active:scale-[0.99] transition-all cursor-pointer flex items-center justify-center gap-2 shadow-lg"
+        >
+          <span>Continue with {plan.name}</span>
+          <ArrowRight size={18} />
+        </button>
+
+        {/* Reassurance */}
+        <div className="mt-5 flex flex-wrap items-center justify-center gap-x-3 gap-y-1 text-[12px] text-[#8490a1]">
+          <span>One-time setup fee</span>
+          <span>·</span>
+          <span>No monthly charges</span>
+          <span>·</span>
+          <span className="flex items-center gap-1.5">
+            <LockKeyhole size={13} />
+            Secure MoMo
+          </span>
+        </div>
+
+      </section>
+
+      {/* Mobile Money Checkout Modal Sheet */}
+      {showCheckoutModal && (
+        <div 
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in duration-200"
+          onClick={() => {
+            if (!isLoading && !isPolling) setShowCheckoutModal(false);
+          }}
+        >
+          <div 
+            className="w-full max-w-[440px] bg-white rounded-[32px] p-7 sm:p-8 shadow-2xl text-[#111827] animate-in zoom-in-95 duration-200 relative"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Modal Header */}
+            <div className="flex items-center justify-between pb-4 border-b border-[#f0f2f5] mb-5">
+              <div>
+                <h3 className="text-xl font-semibold tracking-tight text-[#111827]">
+                  Mobile Money Checkout
+                </h3>
+                <p className="text-xs text-[#788598] mt-0.5">
+                  {plan.name} &bull; {money(plan.price)}
+                </p>
               </div>
+              <button 
+                onClick={() => setShowCheckoutModal(false)}
+                disabled={isLoading || isPolling}
+                className="p-1.5 text-gray-400 hover:text-black rounded-full hover:bg-gray-100 transition-colors disabled:opacity-40 cursor-pointer"
+              >
+                <X size={20} />
+              </button>
             </div>
 
-            {/* Right Column: Mobile Money Payment Form */}
-            <div className="lg:col-span-6 bg-[#F0E6D3] rounded-3xl p-8 shadow-xl border border-[rgba(90,55,20,0.12)] flex flex-col justify-between">
-              
-              {!isPolling ? (
+            {isSuccess ? (
+              /* Success confirmation state */
+              <div className="text-center py-6 space-y-4">
+                <div className="w-16 h-16 bg-emerald-100 text-emerald-600 rounded-full flex items-center justify-center mx-auto shadow-sm">
+                  <CheckCircle2 size={36} />
+                </div>
+                <h4 className="text-2xl font-semibold text-[#111827]">
+                  Workspace Activated!
+                </h4>
+                <p className="text-sm text-[#788598]">
+                  Your parish operating dashboard for <strong>{churchName}</strong> is now open. Redirecting...
+                </p>
+                <div className="flex items-center justify-center gap-2 text-xs font-semibold text-[#111827] pt-2">
+                  <Loader2 size={16} className="animate-spin" />
+                  <span>Loading dashboard...</span>
+                </div>
+              </div>
+            ) : isPolling ? (
+              /* Polling / Handset Approval State */
+              <div className="text-center py-4 space-y-5">
+                <div className="relative w-16 h-16 mx-auto flex items-center justify-center">
+                  <div className="absolute inset-0 rounded-full bg-emerald-500/20 animate-ping" />
+                  <div className="relative w-14 h-14 bg-[#191919] text-white rounded-2xl flex items-center justify-center shadow-lg">
+                    <Smartphone size={28} className="animate-pulse" />
+                  </div>
+                </div>
+
                 <div>
-                  <h3 style={{ fontFamily: "'Playfair Display', serif" }} className="text-xl font-bold text-[#1E1208] mb-2">
-                    Mobile Money Checkout
-                  </h3>
-                  <p className="text-xs text-[#9A7E65] mb-6">
-                    Enter the MTN or Airtel mobile money number registered for payment approval.
+                  <h4 className="text-lg font-semibold text-[#111827]">
+                    Prompt Sent to Handset
+                  </h4>
+                  <p className="text-xs text-[#788598] mt-1.5 leading-relaxed">
+                    {instructions || `Please enter your Mobile Money PIN on ${phoneNumber} to complete the payment of ${money(plan.price)}.`}
                   </p>
-
-                  {errorMessage && (
-                    <div className="mb-5 p-3.5 bg-red-50 border border-red-200 text-red-700 rounded-xl text-xs font-medium flex items-start space-x-2">
-                      <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
-                      <span>{errorMessage}</span>
-                    </div>
-                  )}
-
-                  <form onSubmit={handleStartPayment} className="space-y-4">
-                    {/* Network Selector */}
-                    <div className="space-y-1.5">
-                      <label className="block text-[10px] font-bold text-[#9A7E65] uppercase tracking-widest">
-                        Select Provider
-                      </label>
-                      <div className="grid grid-cols-2 gap-2">
-                        <button
-                          type="button"
-                          onClick={() => setNetwork('mtn')}
-                          className={`py-2.5 px-3 rounded-xl border text-xs font-bold transition-all flex items-center justify-center space-x-2 ${
-                            network === 'mtn'
-                              ? 'bg-[#FFCC00]/20 border-[#FFCC00] text-[#1E1208] shadow-sm'
-                              : 'bg-white/60 border-[rgba(90,55,20,0.1)] text-[#9A7E65]'
-                          }`}
-                        >
-                          <span className="w-2.5 h-2.5 rounded-full bg-[#FFCC00]"></span>
-                          <span>MTN MoMo</span>
-                        </button>
-
-                        <button
-                          type="button"
-                          onClick={() => setNetwork('airtel')}
-                          className={`py-2.5 px-3 rounded-xl border text-xs font-bold transition-all flex items-center justify-center space-x-2 ${
-                            network === 'airtel'
-                              ? 'bg-[#E60000]/15 border-[#E60000] text-[#1E1208] shadow-sm'
-                              : 'bg-white/60 border-[rgba(90,55,20,0.1)] text-[#9A7E65]'
-                          }`}
-                        >
-                          <span className="w-2.5 h-2.5 rounded-full bg-[#E60000]"></span>
-                          <span>Airtel Money</span>
-                        </button>
-                      </div>
-                    </div>
-
-                    {/* Phone Number Input */}
-                    <div className="space-y-1.5">
-                      <label className="block text-[10px] font-bold text-[#9A7E65] uppercase tracking-widest">
-                        Mobile Money Phone Number
-                      </label>
-                      <div className="relative">
-                        <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none">
-                          <Smartphone className="w-4 h-4 text-[#9A7E65]" />
-                        </div>
-                        <input
-                          type="tel"
-                          required
-                          value={phoneNumber}
-                          onChange={(e) => setPhoneNumber(e.target.value)}
-                          placeholder="e.g. 0771234567 or 25677..."
-                          className="w-full pl-10 pr-4 py-3.5 bg-white border border-[rgba(90,55,20,0.15)] rounded-xl text-[#1E1208] placeholder:text-[#C8B89A] focus:border-[#B5622A] outline-none text-sm font-medium"
-                        />
-                      </div>
-                    </div>
-
-                    <button
-                      type="submit"
-                      disabled={isLoading || !phoneNumber.trim()}
-                      className="w-full py-4 bg-[#2B1A0E] text-[#F5E6CE] font-bold rounded-xl shadow-lg active:scale-[0.98] transition-all hover:bg-[#3D2614] flex justify-center items-center uppercase tracking-widest text-[12px] mt-4 disabled:opacity-50"
-                    >
-                      {isLoading ? (
-                        <div className="flex items-center space-x-2">
-                          <div className="w-4 h-4 border-2 border-[rgba(245,230,206,0.3)] border-t-[#F5E6CE] rounded-full animate-spin" />
-                          <span>Sending Push Request...</span>
-                        </div>
-                      ) : (
-                        <div className="flex items-center space-x-2">
-                          <span>Pay UGX 17,000 to Activate</span>
-                          <ArrowRight className="w-4 h-4" />
-                        </div>
-                      )}
-                    </button>
-                  </form>
                 </div>
-              ) : (
-                /* Polling / Waiting for Mobile Money PIN confirmation */
-                <div className="text-center py-4 flex flex-col justify-between h-full">
-                  <div>
-                    <div className="relative w-16 h-16 mx-auto mb-5 flex items-center justify-center">
-                      <div className="absolute inset-0 rounded-full bg-[#B5622A]/20 animate-ping" />
-                      <div className="relative w-12 h-12 bg-[#2B1A0E] text-[#F5E6CE] rounded-full flex items-center justify-center shadow-lg">
-                        <Smartphone className="w-6 h-6 animate-pulse" />
-                      </div>
-                    </div>
 
-                    <h3 style={{ fontFamily: "'Playfair Display', serif" }} className="text-xl font-bold text-[#1E1208] mb-2">
-                      Prompt Sent to Handset
-                    </h3>
-
-                    <p className="text-xs text-[#9A7E65] leading-relaxed mb-4">
-                      {instructions || 'Please enter your Mobile Money PIN on your phone to approve UGX 17,000.'}
-                    </p>
-
-                    <div className="p-3 bg-white/70 border border-[rgba(90,55,20,0.1)] rounded-xl text-[11px] text-[#9A7E65] mb-6">
-                      <span className="font-bold text-[#1E1208]">Merchant Ref:</span> {merchantRef}
-                    </div>
+                {merchantRef && (
+                  <div className="p-3 bg-[#f5f6f8] rounded-xl text-xs text-[#788598]">
+                    Ref: <span className="font-mono text-[#111827] font-semibold">{merchantRef}</span>
                   </div>
+                )}
 
-                  <div className="space-y-2">
-                    {/* Instant verification simulator for rapid testing */}
-                    <button
-                      type="button"
-                      onClick={handleSimulatePayment}
-                      disabled={isSimulating}
-                      className="w-full py-2.5 px-4 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold uppercase tracking-wider transition-all flex items-center justify-center space-x-2 shadow"
-                    >
-                      {isSimulating ? (
-                        <RotateCw className="w-3.5 h-3.5 animate-spin" />
-                      ) : (
-                        <CheckCircle2 className="w-3.5 h-3.5" />
-                      )}
-                      <span>Simulate Mobile Money PIN Approval</span>
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() => setIsPolling(false)}
-                      className="text-xs text-[#9A7E65] hover:text-[#1E1208] font-bold underline transition-colors"
-                    >
-                      Change Number or Retry
-                    </button>
-                  </div>
+                <div className="flex items-center justify-center gap-2 text-xs text-[#788598]">
+                  <Loader2 size={14} className="animate-spin text-[#191919]" />
+                  <span>Waiting for PIN confirmation...</span>
                 </div>
-              )}
 
-              <div className="pt-4 border-t border-[rgba(90,55,20,0.08)] text-center text-[10px] text-[#9A7E65] font-medium flex items-center justify-center space-x-1">
-                <Lock className="w-3 h-3" />
-                <span>Protected by 256-bit bank grade encryption & LivePay</span>
+                <div className="space-y-2 pt-2">
+                  <button
+                    type="button"
+                    onClick={handleSimulatePayment}
+                    disabled={isSimulating}
+                    className="w-full py-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-[15px] font-medium text-xs tracking-wider uppercase transition-all shadow flex items-center justify-center gap-2 cursor-pointer"
+                  >
+                    {isSimulating ? <Loader2 size={14} className="animate-spin" /> : <CheckCircle2 size={14} />}
+                    <span>Simulate PIN Approval (Instant Test)</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setIsPolling(false)}
+                    className="text-xs text-[#788598] hover:text-black transition-colors cursor-pointer"
+                  >
+                    Change Number or Cancel
+                  </button>
+                </div>
               </div>
-            </div>
+            ) : (
+              /* Form to start payment */
+              <form onSubmit={handleStartPayment} className="space-y-4">
+                {errorMessage && (
+                  <div className="p-3 bg-red-50 border border-red-100 text-red-600 rounded-xl text-xs flex items-start gap-2">
+                    <AlertCircle size={15} className="shrink-0 mt-0.5" />
+                    <span>{errorMessage}</span>
+                  </div>
+                )}
 
+                {/* Network Selection */}
+                <div>
+                  <label className="block text-[11px] font-medium text-[#788598] uppercase tracking-wider mb-1.5">
+                    Select Network
+                  </label>
+                  <div className="grid grid-cols-2 gap-2.5">
+                    <button
+                      type="button"
+                      onClick={() => setNetwork('mtn')}
+                      className={`py-3 px-3 rounded-xl border text-xs font-medium transition-all flex items-center justify-center gap-2 cursor-pointer ${
+                        network === 'mtn'
+                          ? 'bg-[#191919] border-[#191919] text-white shadow-sm'
+                          : 'bg-[#f8f9fb] border-[#e5e7eb] text-[#111827] hover:border-gray-400'
+                      }`}
+                    >
+                      <span className="w-2.5 h-2.5 rounded-full bg-[#FFCC00]"></span>
+                      <span>MTN MoMo</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setNetwork('airtel')}
+                      className={`py-3 px-3 rounded-xl border text-xs font-medium transition-all flex items-center justify-center gap-2 cursor-pointer ${
+                        network === 'airtel'
+                          ? 'bg-[#191919] border-[#191919] text-white shadow-sm'
+                          : 'bg-[#f8f9fb] border-[#e5e7eb] text-[#111827] hover:border-gray-400'
+                      }`}
+                    >
+                      <span className="w-2.5 h-2.5 rounded-full bg-[#E60000]"></span>
+                      <span>Airtel Money</span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* Phone Number Input */}
+                <div>
+                  <label className="block text-[11px] font-medium text-[#788598] uppercase tracking-wider mb-1.5">
+                    Mobile Money Number
+                  </label>
+                  <div className="relative">
+                    <Smartphone size={16} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-gray-400" />
+                    <input
+                      type="tel"
+                      required
+                      value={phoneNumber}
+                      onChange={(e) => setPhoneNumber(e.target.value)}
+                      placeholder="e.g. 0772 123 456 or 2567..."
+                      className="w-full pl-10 pr-3.5 py-3 bg-[#f8f9fb] border border-[#e5e7eb] rounded-xl text-sm text-[#111827] focus:outline-none focus:border-black focus:bg-white transition-all font-medium"
+                    />
+                  </div>
+                  <p className="text-[11px] text-[#788598] mt-1">
+                    Enter the phone number that will approve the PIN prompt on MTN or Airtel.
+                  </p>
+                </div>
+
+                {/* Submit Action */}
+                <button
+                  type="submit"
+                  disabled={isLoading || !phoneNumber.trim()}
+                  className="mt-2 w-full min-h-[50px] rounded-[15px] bg-[#191919] text-white text-[15px] font-medium hover:bg-black active:scale-[0.99] transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 cursor-pointer shadow-md"
+                >
+                  {isLoading ? (
+                    <>
+                      <Loader2 size={16} className="animate-spin" />
+                      <span>Sending PIN Prompt...</span>
+                    </>
+                  ) : (
+                    <>
+                      <span>Pay {money(plan.price)}</span>
+                      <ArrowRight size={16} />
+                    </>
+                  )}
+                </button>
+              </form>
+            )}
           </div>
-        )}
-      </main>
-
-      {/* Footer */}
-      <footer className="relative z-10 py-4 text-center text-[11px] text-[#C8B89A] border-t border-[rgba(240,230,211,0.06)]">
-        &copy; {new Date().getFullYear()} pastorOs &bull; Church Operating System
-      </footer>
-    </div>
+        </div>
+      )}
+    </main>
   );
 }

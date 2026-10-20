@@ -1,5 +1,5 @@
 import { getChurchBySlug } from '@/lib/db';
-import { createClient } from '@/lib/supabase/server';
+import { createClient, createAdminClient } from '@/lib/supabase/server';
 import { redirect, notFound } from 'next/navigation';
 import Link from 'next/link';
 import AdminSidebar from '@/components/AdminSidebar';
@@ -21,21 +21,32 @@ export default async function AdminLayout({
     redirect(`/?error=Session Expired`);
   }
 
-  // Role Check
-  const { data: profile } = await supabase
+  // Role Check using admin client to reliably bypass RLS restrictions
+  const adminSupabase = await createAdminClient();
+  const { data: profile } = await adminSupabase
     .from('admin_profiles')
     .select('role, tenant_id')
     .eq('id', user.id)
     .maybeSingle();
 
-  // Role and Tenant Check (fail closed if no tenant_id assigned)
-  if (!profile || profile.role !== 'pastor' || !profile.tenant_id) {
+  // If authenticated user has no profile or no tenant_id yet, route to workspace provisioning
+  if (!profile || !profile.tenant_id) {
+    redirect('/signup/provision');
+  }
+
+  // Route overseer accounts to overseer dashboard
+  if (profile.role === 'overseer') {
+    redirect('/overseer');
+  }
+
+  // Deny access only if the role is non-pastor and non-overseer
+  if (profile.role !== 'pastor') {
     redirect(`/?error=Access Denied`);
   }
 
   // If church was not found by the slug in the URL, recover using the pastor's tenant_id
   if (!church) {
-    const { data: pastorChurch } = await supabase
+    const { data: pastorChurch } = await adminSupabase
       .schema('church')
       .from('churches')
       .select('*')
@@ -51,7 +62,7 @@ export default async function AdminLayout({
 
   // Church Mismatch Check
   if (church.id !== profile.tenant_id) {
-    const { data: correctChurch } = await supabase
+    const { data: correctChurch } = await adminSupabase
       .schema('church')
       .from('churches')
       .select('slug')

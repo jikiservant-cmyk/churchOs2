@@ -94,12 +94,16 @@ export async function startActivationPayment({
   churchId,
   userId,
   phoneNumber,
-  provider = 'najiki'
+  provider = 'najiki',
+  amount,
+  plan
 }: {
   churchId: string;
   userId: string;
   phoneNumber: string;
   provider?: string;
+  amount?: number;
+  plan?: string;
 }): Promise<{
   success: boolean;
   alreadyActive?: boolean;
@@ -112,6 +116,7 @@ export async function startActivationPayment({
     return { success: false, error: 'Unauthorized: church context required' };
   }
 
+  const chosenAmount = (amount && amount > 0) ? Math.round(amount) : ACTIVATION_FEE_UGX;
   const supabase = getAdminClient();
 
   // 1. Verify church exists and check if already active
@@ -161,7 +166,7 @@ export async function startActivationPayment({
     .from('activation_payments')
     .insert({
       church_id: churchId,
-      amount: ACTIVATION_FEE_UGX,
+      amount: chosenAmount,
       currency: ACTIVATION_CURRENCY,
       provider: provider || 'najiki',
       merchant_reference: merchantReference,
@@ -178,21 +183,22 @@ export async function startActivationPayment({
 
   // 4. Dispatch payment via Na'jiki / LivePay API client
   let providerTxId: string | null = null;
-  let instructions = `Payment prompt sent to ${cleanPhone}. Please approve the request of UGX 17,000 on your mobile handset.`;
+  let instructions = `Payment prompt sent to ${cleanPhone}. Please approve the request of UGX ${chosenAmount.toLocaleString('en-US')} on your mobile handset.`;
 
   try {
     const najikiResponse = await createNajikiPayment({
       applicationCode: process.env.NAJIKI_APPLICATION_CODE || 'church',
       paymentTypeCode: process.env.NAJIKI_PAYMENT_TYPE_TOPUP || 'church_activation',
       externalEntityId: churchId,
-      amount: ACTIVATION_FEE_UGX,
+      amount: chosenAmount,
       currency: ACTIVATION_CURRENCY,
       phoneNumber: cleanPhone,
       idempotencyKey: merchantReference,
-      description: `One-time app activation for ${church.name}`,
+      description: `${plan ? `${plan.toUpperCase()} plan` : 'Activation'} for ${church.name}`,
       metadata: {
         churchId,
         merchantReference,
+        plan: plan || 'standard',
         type: 'church_activation'
       }
     });
@@ -336,10 +342,11 @@ export async function confirmActivationPayment({
     return { success: false, error: `Payment failed with status: ${status}` };
   }
 
-  // Exact amount & currency validation
-  if (Number(paidAmount) !== ACTIVATION_FEE_UGX || (currency && currency.toUpperCase() !== ACTIVATION_CURRENCY)) {
+  // Exact amount & currency validation against the recorded payment attempt amount
+  const expectedAmount = Number(payment.amount);
+  if (Number(paidAmount) !== expectedAmount || (currency && currency.toUpperCase() !== ACTIVATION_CURRENCY)) {
     console.error('[Activation] Reconciliation mismatch:', {
-      expected: { amount: ACTIVATION_FEE_UGX, currency: ACTIVATION_CURRENCY },
+      expected: { amount: expectedAmount, currency: ACTIVATION_CURRENCY },
       received: { amount: paidAmount, currency }
     });
 
@@ -348,7 +355,7 @@ export async function confirmActivationPayment({
       .from('activation_payments')
       .update({
         status: 'failed',
-        failure_reason: `Amount mismatch: expected UGX ${ACTIVATION_FEE_UGX}, received ${currency} ${paidAmount}`,
+        failure_reason: `Amount mismatch: expected UGX ${expectedAmount}, received ${currency} ${paidAmount}`,
         provider_transaction_id: providerTransactionId || payment.provider_transaction_id
       })
       .eq('id', payment.id);
