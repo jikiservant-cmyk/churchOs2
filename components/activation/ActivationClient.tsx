@@ -229,8 +229,74 @@ export default function ActivationClient({
   };
 
   return (
-    <main className="min-h-screen bg-[#f5f5f7] flex items-center justify-center p-0 sm:p-6 font-sans">
-      <section className="relative w-full max-w-[480px] min-h-screen sm:min-h-0 sm:rounded-[36px] bg-white px-6 sm:px-10 pt-7 pb-8 text-[#111827] shadow-[0_10px_60px_rgba(0,0,0,0.07)]">
+    <main className="min-h-screen relative flex items-center justify-center p-0 sm:p-6 font-sans overflow-x-hidden bg-[#0b0f17]/30">
+      {/* Subtle blurred workspace backdrop showing pastor operating portal */}
+      <div 
+        aria-hidden="true" 
+        className="fixed inset-0 z-0 pointer-events-none select-none opacity-45 filter blur-[10px] scale-[1.03]"
+      >
+        <div className="h-full w-full bg-[#f8fafc] flex">
+          {/* Mock Church Sidebar */}
+          <div className="hidden md:flex w-64 border-r border-slate-200/80 bg-white/90 flex-col p-6 space-y-6">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-slate-900 flex items-center justify-center text-white font-bold shadow-sm">
+                <Church size={20} />
+              </div>
+              <div>
+                <p className="font-bold text-slate-800 text-sm leading-tight truncate max-w-[150px]">{churchName}</p>
+                <p className="text-[11px] text-slate-400 font-medium">Parish OS</p>
+              </div>
+            </div>
+            <div className="space-y-2 pt-4">
+              <div className="h-9 rounded-xl bg-slate-200/80 w-full" />
+              <div className="h-9 rounded-xl bg-slate-100/60 w-full" />
+              <div className="h-9 rounded-xl bg-slate-100/60 w-full" />
+              <div className="h-9 rounded-xl bg-slate-100/60 w-full" />
+            </div>
+          </div>
+          {/* Mock Dashboard Area */}
+          <div className="flex-1 p-8 space-y-6">
+            <div className="flex items-center justify-between pb-4 border-b border-slate-200/70">
+              <div className="space-y-2">
+                <div className="h-7 w-48 bg-slate-300/80 rounded-lg" />
+                <div className="h-4 w-72 bg-slate-200/60 rounded" />
+              </div>
+              <div className="h-10 w-32 bg-slate-200/80 rounded-xl" />
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+              <div className="h-32 bg-white/80 rounded-2xl border border-slate-200/60 p-5 space-y-3">
+                <div className="h-4 w-24 bg-slate-200/70 rounded" />
+                <div className="h-8 w-20 bg-slate-300/80 rounded" />
+              </div>
+              <div className="h-32 bg-white/80 rounded-2xl border border-slate-200/60 p-5 space-y-3">
+                <div className="h-4 w-24 bg-slate-200/70 rounded" />
+                <div className="h-8 w-20 bg-slate-300/80 rounded" />
+              </div>
+              <div className="h-32 bg-white/80 rounded-2xl border border-slate-200/60 p-5 space-y-3">
+                <div className="h-4 w-24 bg-slate-200/70 rounded" />
+                <div className="h-8 w-20 bg-slate-300/80 rounded" />
+              </div>
+            </div>
+            <div className="h-72 bg-white/80 rounded-2xl border border-slate-200/60 p-6 space-y-4">
+              <div className="h-5 w-40 bg-slate-200/70 rounded" />
+              <div className="space-y-2 pt-2">
+                <div className="h-10 bg-slate-100/70 rounded-lg w-full" />
+                <div className="h-10 bg-slate-100/70 rounded-lg w-full" />
+                <div className="h-10 bg-slate-100/70 rounded-lg w-full" />
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Dark frosted transparent backdrop overlay */}
+      <div 
+        aria-hidden="true" 
+        className="fixed inset-0 z-0 bg-neutral-950/45 backdrop-blur-md pointer-events-none" 
+      />
+
+      {/* Translucent Frosted Glass Paywall Card */}
+      <section className="relative z-10 w-full max-w-[480px] min-h-screen sm:min-h-0 sm:my-8 sm:rounded-[36px] bg-white/80 sm:bg-white/75 backdrop-blur-2xl border border-white/60 px-6 sm:px-10 pt-7 pb-8 text-[#111827] shadow-[0_25px_70px_rgba(0,0,0,0.32)]">
 
         {/* Top navigation */}
         <header className="flex items-center justify-between">
@@ -258,7 +324,7 @@ export default function ActivationClient({
 
         {/* Church mark */}
         <div className="flex flex-col items-center mt-7">
-          <div className="w-[104px] h-[104px] rounded-[27px] bg-gradient-to-br from-white via-[#f5f6f8] to-[#e6e8eb] shadow-[0_8px_24px_rgba(0,0,0,0.07)] flex items-center justify-center">
+          <div className="w-[104px] h-[104px] rounded-[27px] bg-gradient-to-br from-white/95 via-[#f5f6f8]/85 to-[#e6e8eb]/75 border border-white/80 shadow-[0_8px_24px_rgba(0,0,0,0.08)] backdrop-blur-sm flex items-center justify-center">
             <Church size={52} strokeWidth={1.25} className="text-[#89929e]" />
           </div>
 
@@ -281,7 +347,7 @@ export default function ActivationClient({
         <div className="mt-8 space-y-5">
           {features.map(({ icon: Icon, title, description }) => (
             <div key={title} className="flex items-start gap-4">
-              <div className="shrink-0 w-[52px] h-[52px] rounded-[18px] bg-[#f5f6f8] flex items-center justify-center">
+              <div className="shrink-0 w-[52px] h-[52px] rounded-[18px] bg-white/70 border border-black/[0.05] shadow-xs backdrop-blur-sm flex items-center justify-center">
                 <Icon size={25} strokeWidth={2.1} className="text-[#111827]" />
               </div>
 
@@ -308,14 +374,14 @@ export default function ActivationClient({
                 type="button"
                 onClick={() => setSelected(key)}
                 aria-pressed={active}
-                className={`relative text-left rounded-[20px] border p-4 pt-5 min-w-0 transition-all duration-200 cursor-pointer ${
+                className={`relative text-left rounded-[20px] border p-4 pt-5 min-w-0 transition-all duration-200 cursor-pointer backdrop-blur-md ${
                   active
-                    ? 'bg-[#191919] border-[#191919] text-white shadow-md'
-                    : 'bg-white border-[#d9dce2] text-[#111827] hover:border-gray-500'
+                    ? 'bg-[#191919]/95 border-[#191919] text-white shadow-xl'
+                    : 'bg-white/60 border-[#d9dce2]/70 text-[#111827] hover:border-gray-500 hover:bg-white/80'
                 }`}
               >
                 {key === 'bundle' && (
-                  <span className="absolute -top-[14px] left-1/2 -translate-x-1/2 whitespace-nowrap rounded-full border border-[#edf0f4] bg-[#f8faff] px-2.5 py-0.5 text-[10px] font-semibold text-[#4b5563]">
+                  <span className="absolute -top-[14px] left-1/2 -translate-x-1/2 whitespace-nowrap rounded-full border border-white/60 bg-white/95 px-2.5 py-0.5 text-[10px] font-semibold text-[#4b5563] shadow-xs">
                     Recommended
                   </span>
                 )}
@@ -351,7 +417,7 @@ export default function ActivationClient({
             setShowCheckoutModal(true);
             setErrorMessage(null);
           }}
-          className="mt-6 w-full min-h-[56px] rounded-[17px] bg-[#191919] text-white text-[16px] font-medium hover:bg-black active:scale-[0.99] transition-all cursor-pointer flex items-center justify-center gap-2 shadow-lg"
+          className="mt-6 w-full min-h-[56px] rounded-[17px] bg-[#191919] text-white text-[16px] font-medium hover:bg-black active:scale-[0.99] transition-all cursor-pointer flex items-center justify-center gap-2 shadow-xl"
         >
           <span>Continue with {plan.name}</span>
           <ArrowRight size={18} />
@@ -380,7 +446,7 @@ export default function ActivationClient({
           }}
         >
           <div 
-            className="w-full max-w-[440px] bg-white rounded-[32px] p-7 sm:p-8 shadow-2xl text-[#111827] animate-in zoom-in-95 duration-200 relative"
+            className="w-full max-w-[440px] bg-white/90 sm:bg-white/85 backdrop-blur-2xl border border-white/60 rounded-[32px] p-7 sm:p-8 shadow-2xl text-[#111827] animate-in zoom-in-95 duration-200 relative"
             onClick={(e) => e.stopPropagation()}
           >
             {/* Modal Header */}

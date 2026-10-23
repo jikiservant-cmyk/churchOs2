@@ -43,7 +43,8 @@ export async function middleware(request: NextRequest) {
       '/api/sms/process-queue',
       '/api/najiki/webhook',
       '/api/webhooks/najiki',
-      '/api/relworx/webhook'
+      '/api/relworx/webhook',
+      '/api/church/activation/webhook'
     ]);
 
     if (url.pathname.startsWith('/api/') && ['POST', 'PUT', 'DELETE', 'PATCH'].includes(request.method)) {
