@@ -8,6 +8,7 @@ import { ChurchEvent, AttendanceLog, AttendanceFlag, AttendanceFlagStatus } from
 import { membersExpectedAtEvent } from './attendance-streaks';
 import { SignJWT, jwtVerify } from 'jose';
 import { sendSingleSMS } from './sms-actions';
+import { CHURCH_ADMIN_ROLES, hasAllowedRole } from './auth-security';
 
 import crypto from 'crypto';
 
@@ -289,7 +290,7 @@ export async function createEvent(formData: FormData, churchId: string, churchSl
 export async function updateEventStatus(eventId: string, status: 'upcoming' | 'active' | 'completed', churchSlug: string) {
   try {
     // 1. Authorize caller first (ensures event belongs to church and caller has admin/usher rights)
-    const { scopedDb, churchId } = await checkAuthorization(churchSlug, eventId);
+    const { scopedDb, churchId } = await checkAuthorization(churchSlug, eventId, ['pastor', 'admin']);
     
     // Auto-mark absentees when an event is finalized
     if (status === 'completed') {
@@ -436,34 +437,23 @@ export async function updateChurchPasskey(churchId: string, newPasskey: string, 
 
 export async function getEventAttendanceData(churchSlug: string, eventId: string) {
   try {
-    const supabase = await createClient();
-
-    // Fetch church first so we have the ID for the members query
-    const { data: church } = await supabase
-      .schema('church')
-      .from('churches')
-      .select('id, passkey, name')
-      .eq('slug', churchSlug)
-      .single();
-
-    if (!church) return { error: 'Church not found.' };
-
-    // Now run event and attendance queries in parallel using the resolved church ID
-    const [eventResult, logsResult, membersResult] = await Promise.all([
-      supabase.schema('church').from('events').select('*').eq('id', eventId).single(),
-      supabase.schema('church').from('attendance_logs').select('member_id').eq('event_id', eventId).in('attendance_status', ['present', 'late']),
-      supabase.schema('church').from('members').select('id, full_name, phone_number').eq('church_id', church.id).order('full_name')
+    // This is a remotely callable server action: authorize before any privileged
+    // read, and bind every returned row to the event's verified tenant.
+    const { scopedDb, churchId } = await checkAuthorization(churchSlug, eventId);
+    const [churchResult, eventResult, logsResult, membersResult] = await Promise.all([
+      scopedDb.admin.schema('church').from('churches').select('id, name, slug').eq('id', churchId).single(),
+      scopedDb.church('events').select('id, church_id, name, service_type, event_date, start_time, location, status').eq('id', eventId).eq('church_id', churchId).single(),
+      scopedDb.church('attendance_logs').select('member_id').eq('event_id', eventId).eq('church_id', churchId).in('attendance_status', ['present', 'late']),
+      scopedDb.church('members').select('id, full_name, phone_number').eq('church_id', churchId).order('full_name'),
     ]);
 
-    const { data: event } = eventResult;
-    const { data: logs } = logsResult;
-    const { data: members } = membersResult;
+    if (!churchResult.data || !eventResult.data) return { error: 'Church or event not found.' };
 
-    return { 
-      church, 
-      event, 
-      members: members || [], 
-      attendedMemberIds: logs?.map(l => l.member_id) || [] 
+    return {
+      church: churchResult.data,
+      event: eventResult.data,
+      members: membersResult.data || [],
+      attendedMemberIds: logsResult.data?.map((log: { member_id: string }) => log.member_id) || [],
     };
   } catch (error) {
     console.error('[getEventAttendanceData] Error:', error);
@@ -620,11 +610,11 @@ export async function runInactivityDetection(churchId: string, churchSlug: strin
 
   const { data: profile } = await supabase
     .from('admin_profiles')
-    .select('tenant_id')
+    .select('tenant_id, role')
     .eq('id', user.id)
     .maybeSingle();
 
-  if (!profile || profile.tenant_id !== churchId) {
+  if (!profile || profile.tenant_id !== churchId || !hasAllowedRole(profile.role, CHURCH_ADMIN_ROLES)) {
     return { error: 'Access denied' };
   }
 
@@ -659,11 +649,11 @@ export async function getAttendanceFlags(churchId: string) {
 
   const { data: profile } = await supabase
     .from('admin_profiles')
-    .select('tenant_id')
+    .select('tenant_id, role')
     .eq('id', user.id)
     .maybeSingle();
 
-  if (!profile || profile.tenant_id !== churchId) {
+  if (!profile || profile.tenant_id !== churchId || !hasAllowedRole(profile.role, CHURCH_ADMIN_ROLES)) {
     return { error: 'Access denied' };
   }
 
@@ -692,11 +682,11 @@ export async function updateAttendanceFlagStatus(flagId: string, status: Attenda
 
   const { data: profile } = await supabase
     .from('admin_profiles')
-    .select('tenant_id')
+    .select('tenant_id, role')
     .eq('id', user.id)
     .maybeSingle();
 
-  if (!profile || !profile.tenant_id) {
+  if (!profile || !profile.tenant_id || !hasAllowedRole(profile.role, CHURCH_ADMIN_ROLES)) {
     return { error: 'Access denied' };
   }
 
@@ -724,11 +714,11 @@ export async function sendMissedYouMessages(churchId: string, churchSlug: string
 
     const { data: profile } = await supabase
       .from('admin_profiles')
-      .select('tenant_id')
+      .select('tenant_id, role')
       .eq('id', user.id)
       .maybeSingle();
 
-    if (!profile || profile.tenant_id !== churchId) {
+    if (!profile || profile.tenant_id !== churchId || !hasAllowedRole(profile.role, CHURCH_ADMIN_ROLES)) {
       return { error: 'Access denied' };
     }
 

@@ -39,8 +39,8 @@ export default async function AdminLayout({
     redirect('/overseer');
   }
 
-  // Deny access only if the role is non-pastor and non-overseer
-  if (profile.role !== 'pastor') {
+  // Only church administrators and pastors may enter the church admin portal.
+  if (!['pastor', 'admin'].includes(profile.role)) {
     redirect(`/?error=Access Denied`);
   }
 

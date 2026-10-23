@@ -3,6 +3,15 @@
 import { createClient } from './supabase/server';
 import { revalidatePath } from 'next/cache';
 
+async function isAuthorizedOverseer(supabase: Awaited<ReturnType<typeof createClient>>, userId: string) {
+  const { data: profile, error } = await supabase
+    .from('admin_profiles')
+    .select('role')
+    .eq('id', userId)
+    .maybeSingle();
+  return !error && profile?.role === 'overseer';
+}
+
 export interface OverseerChurchItem {
   church_id: string;
   name: string;
@@ -44,6 +53,9 @@ export async function getOverseerDashboardData() {
 
   if (authError || !user) {
     return { error: 'Authentication required' };
+  }
+  if (!await isAuthorizedOverseer(supabase, user.id)) {
+    return { error: 'Forbidden: overseer access required' };
   }
 
   try {
@@ -119,6 +131,9 @@ export async function createOverseerInvite(formData: FormData) {
   if (authError || !user) {
     return { error: 'Authentication required' };
   }
+  if (!await isAuthorizedOverseer(supabase, user.id)) {
+    return { error: 'Forbidden: overseer access required' };
+  }
 
   try {
     const params: Record<string, any> = {};
@@ -152,6 +167,9 @@ export async function revokeOverseerInvite(inviteIdentifier: string) {
 
   if (authError || !user) {
     return { error: 'Authentication required' };
+  }
+  if (!await isAuthorizedOverseer(supabase, user.id)) {
+    return { error: 'Forbidden: overseer access required' };
   }
 
   try {
@@ -190,6 +208,9 @@ export async function detachOverseerChurch(churchId: string) {
 
   if (authError || !user) {
     return { error: 'Authentication required' };
+  }
+  if (!await isAuthorizedOverseer(supabase, user.id)) {
+    return { error: 'Forbidden: overseer access required' };
   }
 
   try {

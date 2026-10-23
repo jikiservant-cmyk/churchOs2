@@ -53,7 +53,7 @@ export default async function RootLoginPage({
 
           if (profile?.role === 'overseer') {
             redirectTo = '/overseer';
-          } else if (profile?.role === 'pastor' && profile?.tenant_id) {
+          } else if (['pastor', 'admin'].includes(profile?.role || '') && profile?.tenant_id) {
              const { data: church } = await adminSupabase
                .schema('church')
                .from('churches')
@@ -68,7 +68,7 @@ export default async function RootLoginPage({
              }
           } else if (!profile || !profile.tenant_id) {
              redirectTo = '/signup/provision';
-          } else if (profile && profile.role !== 'pastor' && profile.role !== 'overseer') {
+          } else if (profile && !['pastor', 'admin', 'overseer'].includes(profile.role)) {
              loginError = 'Access Denied: You do not have admin permissions';
           }
         }

@@ -1,12 +1,36 @@
 import { createServerClient } from '@supabase/ssr';
 import { NextResponse, type NextRequest } from 'next/server';
+import { isSameOriginRequest } from '@/lib/auth-security';
+
+const SERVER_TO_SERVER_ENDPOINTS = new Set([
+  '/api/sms/process-queue',
+  '/api/najiki/webhook',
+  '/api/webhooks/najiki',
+]);
+const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
 export async function proxy(request: NextRequest) {
-  let supabaseResponse = NextResponse.next({
-    request,
-  });
+  let supabaseResponse = NextResponse.next({ request });
+  const url = new URL(request.url);
+  const isApiMutation = url.pathname.startsWith('/api/') && MUTATING_METHODS.has(request.method);
+  const isTrustedServerEndpoint = SERVER_TO_SERVER_ENDPOINTS.has(url.pathname);
 
-  // Skip Supabase auth check if env vars are missing (for local dev without Supabase)
+  // Cookie-authenticated API mutations must prove they came from this exact
+  // origin. Missing Origin and Origin: null are rejected, not treated as safe.
+  // The exempt endpoints have their own server-secret/signature verification.
+  if (isApiMutation && !isTrustedServerEndpoint) {
+    const origin = request.headers.get('origin');
+    const fetchSite = request.headers.get('sec-fetch-site');
+    if (!isSameOriginRequest(request.url, origin) || fetchSite === 'cross-site') {
+      return NextResponse.json({ error: 'Cross-origin request blocked' }, { status: 403 });
+    }
+  }
+
+  // Server-to-server endpoints authenticate their own shared secret/signature
+  // and must not depend on a browser Supabase session refresh.
+  if (isTrustedServerEndpoint) return supabaseResponse;
+
+  // Skip Supabase auth check if env vars are missing (for local dev without Supabase).
   if (!process.env.NEXT_PUBLIC_SUPABASE_URL || !process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY) {
     return supabaseResponse;
   }
@@ -20,85 +44,35 @@ export async function proxy(request: NextRequest) {
           return request.cookies.getAll();
         },
         setAll(cookiesToSet) {
-          cookiesToSet.forEach(({ name, value, options }) => request.cookies.set(name, value));
-          supabaseResponse = NextResponse.next({
-            request,
-          });
+          cookiesToSet.forEach(({ name, value }) => request.cookies.set(name, value));
+          supabaseResponse = NextResponse.next({ request });
           cookiesToSet.forEach(({ name, value, options }) =>
             supabaseResponse.cookies.set(name, value, { ...options, sameSite: 'none', secure: true })
           );
         },
       },
-    }
+    },
   );
 
-  // Refresh session if expired
+  const isAdminRoute = url.pathname.split('/').includes('admin') && !url.pathname.includes('/admin/login');
+
   try {
-    const url = new URL(request.url);
+    const { data: { user }, error } = await supabase.auth.getUser();
+    if (error) throw error;
 
-    // CSRF Protection for state-changing API mutations (F7 remediation)
-    const PUBLIC_EXEMPT_ROUTES = new Set([
-      '/api/auth/logout',
-      '/api/sms/process-queue',
-      '/api/najiki/webhook',
-      '/api/webhooks/najiki',
-    ]);
-
-    if (url.pathname.startsWith('/api/') && ['POST', 'PUT', 'DELETE', 'PATCH'].includes(request.method)) {
-      const isPublicWebhook = PUBLIC_EXEMPT_ROUTES.has(url.pathname);
-      const isAuthRoute = url.pathname.startsWith('/api/auth/');
-
-      if (!isPublicWebhook && !isAuthRoute) {
-        const secFetchSite = request.headers.get('sec-fetch-site');
-        const origin = request.headers.get('origin');
-        const host = request.headers.get('x-forwarded-host') || request.headers.get('host');
-
-        const isTrustedHost = (h: string) => {
-          return (
-            h === host ||
-            h.endsWith('.run.app') ||
-            h.endsWith('.google.com') ||
-            h.endsWith('.googleusercontent.com') ||
-            h.startsWith('localhost') ||
-            h.startsWith('127.0.0.1')
-          );
-        };
-
-        if (origin) {
-          try {
-            const originHost = new URL(origin).host;
-            if (!isTrustedHost(originHost)) {
-              if (secFetchSite === 'cross-site') {
-                return NextResponse.json({ error: 'Cross-origin request blocked' }, { status: 403 });
-              }
-              return NextResponse.json({ error: 'Origin mismatch' }, { status: 403 });
-            }
-          } catch {
-            return NextResponse.json({ error: 'Invalid origin header' }, { status: 403 });
-          }
-        }
-      }
+    if (isAdminRoute && !user) {
+      return NextResponse.redirect(new URL('/?error=Session%20Expired', request.url));
     }
-
-    const { data: { user } } = await supabase.auth.getUser();
-
-    // Protective Routing for Admin
-    const pathParts = url.pathname.split('/');
-    
-    // Check if we are in an admin route: /c/[slug]/admin/... or /[slug]/admin/...
-    const isAdminRoute = pathParts.includes('admin') && !url.pathname.includes('/admin/login');
+  } catch (error) {
+    console.error('Proxy auth verification failed:', error);
+    // Fail closed for protected pages and cookie-authenticated mutations when
+    // Supabase cannot validate the session. Public reads may still render.
     if (isAdminRoute) {
-      if (!user) {
-        return NextResponse.redirect(new URL(`/?error=Session Expired`, request.url));
-      }
-      
-      // We can't easily check the DB in middleware without a performance hit, 
-      // but we can at least ensure the user exists.
-      // The Layout will still do the fine-grained role/church check, 
-      // but the middleware will catch the most common "unauthenticated" case.
+      return NextResponse.redirect(new URL('/?error=Session%20Expired', request.url));
     }
-  } catch (e) {
-    console.error("Middleware Auth Error:", e);
+    if (isApiMutation) {
+      return NextResponse.json({ error: 'Authentication service unavailable' }, { status: 503 });
+    }
   }
 
   return supabaseResponse;

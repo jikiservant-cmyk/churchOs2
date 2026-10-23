@@ -122,7 +122,7 @@ export async function login(prevState: AuthState, formData: FormData): Promise<A
     }
 
     // Allow strictly pastor roles for church admin
-    const authorizedRoles = ['pastor'];
+    const authorizedRoles = ['pastor', 'admin'];
     if (!authorizedRoles.includes(profile.role.toLowerCase())) {
       await supabase.auth.signOut();
       return { error: `Access Denied: Role '${profile.role}' does not have admin access.` };
@@ -134,7 +134,7 @@ export async function login(prevState: AuthState, formData: FormData): Promise<A
     const appType = profile.app_type;
     
     if (tenantId) {
-      if (appType === 'church' || (!appType && profile.role === 'pastor')) {
+      if (appType === 'church' || (!appType && ['pastor', 'admin'].includes(profile.role))) {
         // Use Admin Client to query church schema, bypassing RLS!
         const adminSupabase = await createAdminClient();
         const { data: church } = await adminSupabase

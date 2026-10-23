@@ -17,6 +17,28 @@ export async function joinDenominationWithInvite(inviteCode: string, churchSlug?
     return { error: 'Authentication required. Please sign in.' };
   }
 
+  const { data: profile } = await supabase
+    .from('admin_profiles')
+    .select('tenant_id, role')
+    .eq('id', user.id)
+    .maybeSingle();
+  if (!profile?.tenant_id || !['pastor', 'admin'].includes(profile.role)) {
+    return { error: 'Forbidden: only church pastors or administrators can change denomination membership.' };
+  }
+
+  if (churchSlug) {
+    const canonicalSlug = churchSlug.toLowerCase().trim();
+    const { data: church } = await supabase
+      .schema('church')
+      .from('churches')
+      .select('id')
+      .eq('slug', canonicalSlug)
+      .maybeSingle();
+    if (!church || church.id !== profile.tenant_id) {
+      return { error: 'Access denied for this church workspace.' };
+    }
+  }
+
   try {
     const { data: denominationId, error } = await supabase.rpc(
       'join_denomination_with_invite',

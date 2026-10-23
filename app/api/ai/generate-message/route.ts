@@ -1,6 +1,7 @@
 import { GoogleGenAI } from '@google/genai';
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
+import { CHURCH_ADMIN_ROLES, hasAllowedRole } from '@/lib/auth-security';
 
 export async function POST(req: Request) {
   try {
@@ -17,7 +18,7 @@ export async function POST(req: Request) {
       .eq('id', user.id)
       .maybeSingle();
 
-    if (!profile?.tenant_id) {
+    if (!profile?.tenant_id || !hasAllowedRole(profile.role, CHURCH_ADMIN_ROLES)) {
       return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
     }
 
