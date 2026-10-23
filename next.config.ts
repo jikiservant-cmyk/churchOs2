@@ -14,9 +14,6 @@ const allowedOrigins = [
 const nextConfig: NextConfig = {
   output: 'standalone',
   reactStrictMode: true,
-  eslint: {
-    ignoreDuringBuilds: true,
-  },
   typescript: {
     ignoreBuildErrors: false,
   },
@@ -44,12 +41,6 @@ const nextConfig: NextConfig = {
         destination: '/c/:church_slug/:path*',
       }
     ]
-  },
-  webpack: (config, {dev}) => {
-    if (dev && process.env.DISABLE_HMR === 'true') {
-      config.watchOptions = { ignored: /.*/ };
-    }
-    return config;
   },
 };
 

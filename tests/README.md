@@ -1,32 +1,36 @@
-# tests/
+# Tests and checks
 
-Contract tests for the church app → Na'jiki Finance integration.
+Run the complete local application gate with:
 
 ```bash
-npm test                    # runs everything in this directory
-node --test tests/najiki-contract.test.ts   # just the Na'jiki suite
+npm ci
+npm run check       # typecheck, lint, tests, production-dependency audit, and build
 ```
 
-No test framework, no config: Node's built-in runner (`node --test`) plus type
-stripping, the same approach `najiki-finance2` uses for its own unit tests.
+`npm test` uses Node's built-in test runner and type stripping. No separate test
+framework is required.
 
-## What is covered
+## Automated coverage
 
-| File | What it proves |
+| File | What it covers |
 | --- | --- |
-| `najiki-contract.test.ts` | Every payload churchOs sends is accepted by Na'jiki's **own** validator, unmodified; Na'jiki's error bodies are surfaced; idempotency works in both directions; inbound webhooks signed by Na'jiki's **own** signer verify (and tampered/replayed ones do not). |
-| `helpers/mock-najiki-server.ts` | A faithful re-implementation of Na'jiki's partner endpoints (`POST /api/messaging/send`, `POST /api/payments`, `GET /api/payments/:reference`), including auth resolution order, idempotency semantics, and the exact response/error bodies. |
-| `fixtures/najiki/` | Verbatim copies of Na'jiki's `money.ts`, `schemas.ts` and `notification-signature.ts`, so the tests validate against Na'jiki's real contract rather than a paraphrase. See `fixtures/najiki/README.md` for provenance and refresh instructions. |
+| `activation.test.ts` | Activation fee/currency, missing references, and the fail-closed ledger lookup path against a mocked Supabase HTTP API. |
+| `activation-webhook.test.ts` | Activation webhook authentication fails closed without a configured secret, accepts a valid signature, and rejects unsigned requests. |
+| `africastalking-sdk.test.ts` | Smoke-tests the Africa's Talking SDK import and SMS API surface without credentials or network access. |
+| `attendance-streaks.test.ts` | Consecutive attendance-miss calculations and attendance flag lifecycle rules. |
+| `denomination.test.ts` | Invite code normalization, provisioning payload validation, login-context mapping, and denomination query helpers. |
+| `najiki-contract.test.ts` | Church → Na'jiki payloads validated by Na'jiki's own Zod schemas; error forwarding; idempotency; signed webhook verification and replay/tamper rejection. |
+| `sql/attendance_streaks.test.sql` | Runs the real attendance migrations and PostgreSQL functions against a scratch database with behavior assertions. CI runs this against PostgreSQL 16. |
 
-## What is deliberately not simulated
+The Na'jiki contract suite uses `helpers/mock-najiki-server.ts` for partner
+endpoints and verbatim validator/signature fixtures in `fixtures/najiki/`. See
+the fixture README for provenance and refresh instructions.
 
-The mock does not implement rate limiting, the LivePay provider call, wallet
-crediting, or the outbound webhook fan-out. Those are Na'jiki-internal
-behaviours; what matters for this app is the request/response boundary, and that
-is enforced by Na'jiki's real Zod schema.
+## Deliberate test boundaries
 
-Supabase-dependent behaviour (the ledger writes inside the server actions and
-the webhook route) is not covered here — it needs a live database. The pieces
-that carry the contract (payload shape, headers, signature verification,
-reconciliation keys, receipt-SMS sequencing) are pure functions in
-`lib/najiki/` and are covered.
+The Na'jiki mock does not implement its rate limiting, LivePay provider call,
+wallet crediting, or webhook fan-out. Supabase-dependent payment settlement,
+RLS policies, the full set of server actions/API routes, and real SMS/payment
+provider behavior still require staging integration tests with a non-production
+database and provider sandbox credentials. No live service credentials are
+needed for the unit/contract suite.

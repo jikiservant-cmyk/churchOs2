@@ -225,7 +225,7 @@ export default function ActivationClient({
     } catch {
       // Fallback
     }
-    window.location.href = '/';
+    router.replace('/');
   };
 
   return (

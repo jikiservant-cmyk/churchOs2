@@ -1,5 +1,4 @@
 import { normalizeUgPhone } from '@/lib/utils';
-// @ts-ignore
 import Africastalking from 'africastalking';
 import { createAdminClient } from '@/lib/supabase/server';
 import {
@@ -175,7 +174,7 @@ export async function sendSingleSMS({
       let recipients = messageData?.Recipients || [];
 
       if (recipients.length === 0) {
-        const errorMessage = messageData?.Message || response.Message || '';
+        const errorMessage = messageData?.Message || '';
         if (errorMessage.includes('InvalidSenderId') && payload.from) {
           delete payload.from;
           response = await sms.send(payload);
@@ -185,7 +184,7 @@ export async function sendSingleSMS({
       }
 
       if (recipients.length === 0) {
-        const errorMessage = messageData?.Message || response.Message || 'Zero recipients returned from provider';
+        const errorMessage = messageData?.Message || 'Zero recipients returned from provider';
         throw new Error(`Africa's Talking API rejection: ${errorMessage}`);
       }
 

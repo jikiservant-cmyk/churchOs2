@@ -1,25 +1,22 @@
-import { NextRequest, NextResponse } from 'next/server';
+import { NextResponse } from 'next/server';
 import { confirmActivationPayment } from '@/lib/activation';
-import { verifyNajikiWebhook } from '@/lib/najiki/webhook';
+import { verifyActivationWebhook } from '@/lib/activation/webhook-security';
 
-export async function POST(req: NextRequest) {
+export async function POST(req: Request) {
   try {
     const rawBody = await req.text();
     const headers = req.headers;
 
-    // 1. Signature Verification (if secret configured)
-    const webhookSecret = process.env.NAJIKI_WEBHOOK_SECRET || process.env.LIVEPAY_WEBHOOK_SECRET;
-    if (webhookSecret) {
-      const verification = verifyNajikiWebhook({
-        rawBody,
-        headers,
-        secret: webhookSecret,
-      });
+    // Activation must never be driven by an unauthenticated public request.
+    const verification = verifyActivationWebhook({
+      rawBody,
+      headers,
+      secret: process.env.NAJIKI_WEBHOOK_SECRET || process.env.NAJIKI_API_KEY || process.env.LIVEPAY_WEBHOOK_SECRET,
+    });
 
-      if (!verification.ok) {
-        console.warn('[Activation Webhook] Invalid signature received:', verification.reason);
-        return NextResponse.json({ error: 'Invalid webhook signature' }, { status: 401 });
-      }
+    if (!verification.ok) {
+      console.warn('[Activation Webhook] Rejected notification:', verification.error);
+      return NextResponse.json({ error: verification.error }, { status: verification.status });
     }
 
     let payload: any = {};
