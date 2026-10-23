@@ -155,20 +155,24 @@ export async function initiateNajikiPayment(formData: FormData) {
     // `paymentIntentId`), so our own reference has to travel inside `metadata`
     // for the settlement webhook to find this row again. See
     // lib/najiki/webhook.ts → transactionLookupCandidates().
-    const paymentRequest = buildChurchTopupPayment({
-      churchId,
-      tenantCode,
-      churchSlug: churchData?.slug,
-      reference,
-      idempotencyKey,
-      amount,
-      phoneNumber: formattedPhone,
-    });
-
-    console.log('[Najiki] Sending request to /api/payments:', JSON.stringify({ ...paymentRequest, phoneNumber: 'REDACTED' }));
-
     let result;
     try {
+      const paymentRequest = buildChurchTopupPayment({
+        churchId,
+        tenantCode,
+        churchSlug: churchData?.slug,
+        reference,
+        idempotencyKey,
+        amount,
+        phoneNumber: formattedPhone,
+      });
+
+      // Avoid logging donor/member PII or opaque reconciliation metadata.
+      console.log('[Najiki] Requesting payment through /api/payments:', {
+        paymentTypeCode: paymentRequest.paymentTypeCode,
+        currency: paymentRequest.currency,
+        amount: paymentRequest.amount,
+      });
       result = await createNajikiPayment(paymentRequest);
     } catch (err: any) {
       // Surface Na'jiki's own error text — a rejected payload must never look
@@ -297,18 +301,17 @@ export async function initiateDonationPayment(params: {
       return { error: 'Unable to initiate payment record' };
     }
 
-    const paymentRequest = buildChurchDonationPayment({
-      churchId,
-      tenantCode,
-      churchName: church.name,
-      reference,
-      idempotencyKey,
-      amount,
-      phoneNumber: formatPhoneForNajiki(cleanPhone),
-      category,
-    });
-
     try {
+      const paymentRequest = buildChurchDonationPayment({
+        churchId,
+        tenantCode,
+        churchName: church.name,
+        reference,
+        idempotencyKey,
+        amount,
+        phoneNumber: formatPhoneForNajiki(cleanPhone),
+        category,
+      });
       const result = await createNajikiPayment(paymentRequest);
       await supabaseAdmin
         .from('wallet_transactions')

@@ -239,8 +239,8 @@ async function handlePaymentNotification(payload: any) {
     await db.from('wallet_transactions').update({ reference }).eq('id', tx.id);
   }
 
-  // Tenant guard. Na'jiki puts tenantCode in the *metadata* we sent, not at the
-  // top level of the notification.
+  // Prefer Na'jiki's resolved top-level tenantCode; fall back to our metadata
+  // for compatibility with older notifications.
   const tenantCode = notificationTenantCode(notification);
   if (tenantCode) {
     const { data: tenant } = await db

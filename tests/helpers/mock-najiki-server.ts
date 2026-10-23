@@ -25,6 +25,7 @@ import {
   CreatePaymentRequestSchema,
   type CreatePaymentRequest,
 } from '../fixtures/najiki/schemas.ts'
+import { SmsInputSchema } from '../fixtures/najiki/sms-policy.ts'
 
 export interface MockApplication {
   id: string
@@ -69,6 +70,11 @@ export interface RecordedRequest {
 
 const TEST_API_KEY = 'njk_test_church_api_key_0001'
 const TEST_WEBHOOK_SECRET = 'njk_whsec_test_church_secret_0001'
+
+/** Prisma's generated CUID-shaped identifier (the partner API treats it as opaque). */
+function generatePaymentId(): string {
+  return `c${randomBytes(12).toString('hex')}`
+}
 
 /** Same shape as Na'jiki's generateReference(). */
 function generateReference(appCode: string, typeCode?: string): string {
@@ -207,20 +213,16 @@ export class MockNajikiServer {
     headers: Record<string, string>,
     rawBody: Record<string, unknown>
   ) {
-    const { to, message, applicationCode, from, senderId, apiKey: bodyApiKey } = rawBody ?? {}
-
-    const idempotencyKey = (
-      headers['idempotency-key'] ??
-      (rawBody as Record<string, unknown>).idempotencyKey ??
-      ''
-    )
-      .toString()
-      .trim()
-      .slice(0, 255) || null
-
-    if (!to || !message) {
-      return this.json(res, 400, { error: 'Recipient (to) and message content are required' })
+    const idempotencyHeader = headers['idempotency-key']?.trim()
+    const parsed = SmsInputSchema.safeParse(rawBody)
+    if (
+      !parsed.success ||
+      (idempotencyHeader && (idempotencyHeader.length < 8 || idempotencyHeader.length > 255))
+    ) {
+      return this.json(res, 400, { error: 'Invalid SMS payload or idempotency key' })
     }
+    const { to, message, applicationCode, from, senderId, apiKey: bodyApiKey } = parsed.data
+    const idempotencyKey = idempotencyHeader || parsed.data.idempotencyKey || null
 
     const authHeader = headers['authorization']
     let apiKey = ''
@@ -331,6 +333,11 @@ export class MockNajikiServer {
       })
     }
 
+    // najiki-finance2 upserts unrecognized payment types scoped to the app.
+    if (!this.paymentTypes.some((type) => type.applicationId === application.id && type.code === body.paymentTypeCode)) {
+      this.paymentTypes.push({ applicationId: application.id, code: body.paymentTypeCode })
+    }
+
     if (body.tenantCode) {
       const tenant = this.tenants.find(
         (t) => t.applicationId === application.id && t.code === body.tenantCode && t.isActive
@@ -341,7 +348,7 @@ export class MockNajikiServer {
     }
 
     const payment: MockPayment = {
-      id: `pay_${randomBytes(8).toString('hex')}`,
+      id: generatePaymentId(),
       reference: generateReference(body.applicationCode, body.paymentTypeCode),
       // Na'jiki creates the intent, then calls the provider; LivePay returns
       // 'processing' until the member approves on their handset.

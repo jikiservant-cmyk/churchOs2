@@ -22,9 +22,9 @@
  *       ONLY this header (a bare `x-api-key` is a 401 there); `/api/messaging/send`
  *       additionally accepts `x-api-key` or a body `apiKey`, but the Bearer
  *       header is what both endpoints document.
- * Idempotency: `Idempotency-Key` request header (≤255 chars), or the
- *       `idempotencyKey` body field. Na'jiki dedupes payments per
- *       (application, idempotencyKey) and SMS per (application, idempotencyKey).
+ * Idempotency: payments require the `idempotencyKey` body field; SMS accepts
+ *       the `Idempotency-Key` header or its body alias (≤255 trimmed chars).
+ *       Na'jiki dedupes both per (application, idempotencyKey).
  */
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -53,7 +53,7 @@ export const NAJIKI_DEFAULT_APPLICATION_CODE = 'church'
 /** Money is always UGX in churchOs; Na'jiki defaults to UGX as well. */
 export const NAJIKI_DEFAULT_CURRENCY = 'UGX'
 
-/** Na'jiki truncates idempotency keys to 255 chars — do the same, explicitly. */
+/** Na'jiki's SMS Idempotency-Key header is limited to 255 trimmed characters. */
 export const NAJIKI_MAX_IDEMPOTENCY_KEY_LENGTH = 255
 
 export interface NajikiConfig {
@@ -148,19 +148,57 @@ export function najikiApplicationCode(): string {
 }
 
 /**
- * The `paymentTypeCode` to send for a given product.
- *
- * Na'jiki resolves this against `payment_types` scoped to the application. The
- * seeded church application only has `tithe` and `offering`, so an operator who
- * wants `topup`/`donation` recorded must create those rows in Na'jiki's Setup
- * screen — or point these env vars at codes that already exist. An unknown code
- * is NOT rejected (Na'jiki stores `paymentTypeId: null`), it just means the
- * payment is not categorised on their side.
+ * Payment types with special routing semantics in najiki-finance2.
+ * Source: src/lib/constants.ts at the pinned contract revision.
+ * These codes use Na'jiki's platform credentials/wallet, not a tenant wallet.
  */
-export function najikiPaymentTypeCode(kind: 'topup' | 'donation'): string {
-  const envName =
-    kind === 'topup' ? 'NAJIKI_PAYMENT_TYPE_TOPUP' : 'NAJIKI_PAYMENT_TYPE_DONATION'
-  return (process.env[envName] ?? '').trim() || kind
+export const NAJIKI_PLATFORM_PAYMENT_TYPE_CODES = [
+  'SMS',
+  'BUY_SMS',
+  'SMS_TOPUP',
+  'ACTIVATION',
+  'ACCOUNT_ACTIVATION',
+  'SUBSCRIPTION',
+  'MONTHLY_SUBSCRIPTION',
+  'PLATFORM_FEE',
+] as const
+
+const platformPaymentTypeCodeSet: ReadonlySet<string> = new Set(
+  NAJIKI_PLATFORM_PAYMENT_TYPE_CODES
+)
+
+export type NajikiPaymentPurpose = 'topup' | 'donation' | 'activation'
+
+const DEFAULT_PAYMENT_TYPE_CODES: Record<NajikiPaymentPurpose, string> = {
+  topup: 'BUY_SMS',
+  donation: 'donation',
+  activation: 'ACCOUNT_ACTIVATION',
+}
+
+/**
+ * Resolve a payment type against Na'jiki's real contract. Payment types are
+ * application-scoped and auto-registered by the gateway when unknown, so they
+ * do not need to be created manually first. Their codes still have semantics:
+ * SMS-credit purchases and activation fees must use a Na'jiki platform-fee code
+ * so they do not route to or credit the church tenant; donations must remain
+ * ordinary tenant collections.
+ */
+export function najikiPaymentTypeCode(kind: NajikiPaymentPurpose): string {
+  const envName = `NAJIKI_PAYMENT_TYPE_${kind.toUpperCase()}`
+  const code = (process.env[envName] ?? '').trim() || DEFAULT_PAYMENT_TYPE_CODES[kind]
+  const isPlatformType = platformPaymentTypeCodeSet.has(code.toUpperCase())
+
+  if ((kind === 'topup' || kind === 'activation') && !isPlatformType) {
+    throw new Error(
+      `${envName} must be a Na'jiki platform-fee payment type ` +
+        `(${[...NAJIKI_PLATFORM_PAYMENT_TYPE_CODES].join(', ')}); received "${code}"`
+    )
+  }
+  if (kind === 'donation' && isPlatformType) {
+    throw new Error(`${envName} must be a tenant collection type, not a Na'jiki platform-fee type`)
+  }
+
+  return code
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -215,11 +253,7 @@ export class NajikiApiError extends Error {
 // ─────────────────────────────────────────────────────────────────────────────
 
 export interface NajikiRequestOptions {
-  /**
-   * Idempotency key, sent as the `Idempotency-Key` header. Na'jiki also reads
-   * an `idempotencyKey` body field; the header is the documented standard and
-   * is what we send.
-   */
+  /** Optional SMS idempotency header. Payments use their required body field instead. */
   idempotencyKey?: string | null
   /** Overrides the configured timeout. */
   timeoutMs?: number
@@ -231,7 +265,7 @@ function normaliseIdempotencyKey(key: string | null | undefined): string | null 
   if (!key) return null
   const trimmed = String(key).trim()
   if (!trimmed) return null
-  return trimmed.slice(0, NAJIKI_MAX_IDEMPOTENCY_KEY_LENGTH)
+  return trimmed
 }
 
 /**
@@ -377,7 +411,6 @@ export interface NajikiCreatePaymentRequest {
   idempotencyKey: string
   description?: string
   metadata?: Record<string, unknown>
-  providerCode?: string
 }
 
 /** The 200 body Na'jiki returns from POST /api/payments. */
@@ -427,11 +460,12 @@ export async function createNajikiPayment(
 
   if (request.tenantCode) payload.tenantCode = request.tenantCode
   if (request.description) payload.description = request.description
-  if (request.providerCode) payload.providerCode = request.providerCode
 
+  // The payment endpoint's idempotency source is the required body field;
+  // it does not read Idempotency-Key (unlike the SMS endpoint).
   return najikiRequest<NajikiCreatePaymentResponse>('/api/payments', payload, {
     ...options,
-    idempotencyKey: request.idempotencyKey ?? options.idempotencyKey,
+    idempotencyKey: undefined,
   })
 }
 
@@ -475,8 +509,8 @@ export interface ChurchTopupPaymentInput {
 /**
  * Admin "buy SMS credits" top-up.
  *
- * `paymentTypeCode` is NOT one of Na'jiki's PLATFORM_FEE_TYPES, so the intent is
- * treated as a normal tenant payment rather than a platform fee.
+ * `paymentTypeCode` is one of Na'jiki's PLATFORM_FEE_TYPES, so this purchase
+ * uses platform credentials/wallet instead of the church tenant's collection.
  */
 export function buildChurchTopupPayment(
   input: ChurchTopupPaymentInput
@@ -496,9 +530,9 @@ export function buildChurchTopupPayment(
       tenantCode: input.tenantCode,
       product: 'sms_topup',
       source: 'admin-dashboard',
-      // Our ledger reference — Na'jiki echoes metadata back verbatim in the
-      // settlement webhook, and it generates its own `reference`, so this is
-      // the only reliable way to reconcile the notification to this row.
+      // Our ledger reference — Na'jiki returns caller metadata alongside its
+      // own metadata, and it generates its own `reference`, so this is the
+      // reliable reconciliation key for the settlement webhook.
       churchReference: input.reference,
       idempotencyKey: input.idempotencyKey,
     },

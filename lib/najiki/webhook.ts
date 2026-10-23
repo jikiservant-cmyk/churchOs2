@@ -86,6 +86,11 @@ export function verifyNajikiWebhook(input: {
     return { ok: false, reason: 'Webhook secret is not configured' }
   }
 
+  const markerHeader = readHeader(headers, NAJIKI_MARKER_HEADER)
+  if (markerHeader?.trim().toLowerCase() !== 'true') {
+    return { ok: false, reason: `Missing or invalid ${NAJIKI_MARKER_HEADER} header` }
+  }
+
   const timestampHeader = readHeader(headers, NAJIKI_TIMESTAMP_HEADER)
   const signatureHeader = readHeader(headers, NAJIKI_SIGNATURE_HEADER)
 
@@ -115,8 +120,8 @@ export function verifyNajikiWebhook(input: {
   if (!v || !/^[0-9a-f]+$/i.test(v)) {
     return { ok: false, reason: 'Malformed X-Najiki-Signature' }
   }
-  // The timestamp in the header must be the one that was signed.
-  if (t !== undefined && Number(t) !== timestamp) {
+  // The timestamp in the signature is mandatory and must match the signed header.
+  if (t === undefined || !/^\d+$/.test(t) || Number(t) !== timestamp) {
     return { ok: false, reason: 'Signature timestamp does not match the header' }
   }
 
@@ -154,7 +159,12 @@ export interface NajikiPaymentNotification {
   failureReason: string | null
   /** churchOs' church id, echoed back opaquely. */
   externalEntityId: string | null
-  /** Opaque passthrough of whatever metadata we sent with the payment. */
+  /** Resolved tenant and payment-type fields included by current Na'jiki. */
+  tenantId: string | null
+  tenantCode: string | null
+  paymentType: string | null
+  paymentTypeCode: string | null
+  /** Metadata echo, including gateway-owned values such as credentialSource. */
   metadata: Record<string, unknown>
 }
 
@@ -204,6 +214,10 @@ export function parsePaymentNotification(
     providerPaymentId: str(p.providerPaymentId),
     failureReason: str(p.failureReason),
     externalEntityId: str(p.externalEntityId),
+    tenantId: str(p.tenantId),
+    tenantCode: str(p.tenantCode),
+    paymentType: str(p.paymentType),
+    paymentTypeCode: str(p.paymentTypeCode),
     metadata,
   }
 }
@@ -272,15 +286,13 @@ export function transactionLookupCandidates(
 }
 
 /**
- * The tenant code we sent in `metadata`. Na'jiki does not put `tenantCode` at
- * the top level of the notification, so reading it from the top level (as the
- * church app used to) always yielded undefined and silently disabled the
- * tenant-mismatch guard.
+ * Prefer Na'jiki's resolved top-level tenant code; retain the request metadata
+ * fallback for older notifications and records without a resolved tenant.
  */
 export function notificationTenantCode(
   notification: NajikiPaymentNotification
 ): string | null {
-  return str(notification.metadata.tenantCode)
+  return notification.tenantCode ?? str(notification.metadata.tenantCode)
 }
 
 /** The church id we sent as `externalEntityId`, when present. */

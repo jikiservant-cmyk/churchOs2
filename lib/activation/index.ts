@@ -1,6 +1,6 @@
 import { createClient as createSupabaseClient } from '@supabase/supabase-js';
 import { randomUUID } from 'crypto';
-import { createNajikiPayment } from '../najiki/client.ts';
+import { createNajikiPayment, najikiApplicationCode, najikiPaymentTypeCode } from '../najiki/client.ts';
 
 export const ACTIVATION_FEE_UGX = 17000;
 export const ACTIVATION_CURRENCY = 'UGX';
@@ -197,9 +197,9 @@ export async function startActivationPayment({
 
   try {
     const najikiResponse = await createNajikiPayment({
-      applicationCode: process.env.NAJIKI_APPLICATION_CODE || 'church',
+      applicationCode: najikiApplicationCode(),
       tenantCode,
-      paymentTypeCode: process.env.NAJIKI_PAYMENT_TYPE_ACTIVATION || process.env.NAJIKI_PAYMENT_TYPE_TOPUP || 'topup',
+      paymentTypeCode: najikiPaymentTypeCode('activation'),
       externalEntityId: churchId,
       amount: chosenAmount,
       currency: ACTIVATION_CURRENCY,
