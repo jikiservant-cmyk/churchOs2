@@ -1,9 +1,9 @@
 import { getChurchBySlug } from '@/lib/db';
 import { createAdminClient, createClient } from '@/lib/supabase/server';
 import { notFound } from 'next/navigation';
-import JoinDenominationCard from '@/components/settings/JoinDenominationCard';
-import { Settings, Church as ChurchIcon, Shield, Radio, Calendar, KeyRound, ExternalLink } from 'lucide-react';
 import Link from 'next/link';
+import JoinDenominationCard from '@/components/settings/JoinDenominationCard';
+import { Calendar, Church as ChurchIcon, ExternalLink, Settings, Shield } from 'lucide-react';
 
 export default async function SettingsPage({
   params,
@@ -12,229 +12,190 @@ export default async function SettingsPage({
 }) {
   const { church_slug } = await params;
   const church = await getChurchBySlug(church_slug);
+  if (!church) notFound();
 
-  if (!church) {
-    notFound();
-  }
+  const [supabase, adminDb] = await Promise.all([createClient(), createAdminClient()]);
+  const [{ data: churchRow }, { data: { user } }] = await Promise.all([
+    adminDb
+      .schema('church')
+      .from('churches')
+      .select('denomination_id, meeting_days, attendance_flag_threshold')
+      .eq('id', church.id)
+      .maybeSingle(),
+    supabase.auth.getUser(),
+  ]);
 
-  const supabase = await createClient();
-  const adminDb = await createAdminClient();
-
-  // Query church details from church schema
-  const { data: churchRow } = await adminDb
-    .schema('church')
-    .from('churches')
-    .select('*')
-    .eq('id', church.id)
-    .maybeSingle();
-
-  // Check denomination link
-  const denominationId = (churchRow as any)?.denomination_id || null;
+  const denominationId = churchRow?.denomination_id ?? null;
   let denominationName: string | null = null;
   let denominationSlug: string | null = null;
 
   if (denominationId) {
-    // Attempt to query denomination info if available
-    try {
-      const { data: denomRow } = await adminDb
-        .from('denominations')
-        .select('name, slug')
-        .eq('id', denominationId)
-        .maybeSingle();
-
-      if (denomRow) {
-        denominationName = denomRow.name;
-        denominationSlug = denomRow.slug;
-      }
-    } catch {
-      // Ignored if table not directly queryable
-    }
+    const { data: denomination } = await adminDb
+      .from('denominations')
+      .select('name, slug')
+      .eq('id', denominationId)
+      .maybeSingle();
+    denominationName = denomination?.name ?? null;
+    denominationSlug = denomination?.slug ?? null;
   }
 
-  // Get active session user
-  const { data: { user } } = await supabase.auth.getUser();
-
-  const meetingDaysNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-  const configuredMeetingDays: number[] = (churchRow as any)?.meeting_days || [7]; // 7 is Sunday in ISO
-  const attendanceThreshold = (churchRow as any)?.attendance_flag_threshold ?? 3;
+  const configuredMeetingDays: number[] = churchRow?.meeting_days ?? [7];
+  const attendanceThreshold = churchRow?.attendance_flag_threshold ?? 3;
+  const meetingDays = [
+    { label: 'Mon', iso: 1 },
+    { label: 'Tue', iso: 2 },
+    { label: 'Wed', iso: 3 },
+    { label: 'Thu', iso: 4 },
+    { label: 'Fri', iso: 5 },
+    { label: 'Sat', iso: 6 },
+    { label: 'Sun', iso: 7 },
+  ];
 
   return (
-    <div className="space-y-8 max-w-5xl" style={{ fontFamily: "'Outfit', sans-serif" }}>
-      {/* Header */}
-      <div>
-        <div className="flex items-center gap-2.5 text-[#B5622A] text-xs font-bold uppercase tracking-wider mb-2">
-          <Settings className="w-4 h-4" />
+    <div className="mx-auto max-w-7xl space-y-6" style={{ fontFamily: "'Outfit', sans-serif" }}>
+      <header className="mb-2">
+        <div className="mb-2 flex items-center gap-2.5 text-xs font-bold uppercase tracking-wider text-[#B5622A]">
+          <Settings className="h-4 w-4" />
           <span>Administration</span>
         </div>
-        <h1 
-          style={{ fontFamily: "'Playfair Display', serif" }} 
-          className="text-3xl font-bold text-[#1E1208]"
-        >
-          Workspace Settings
+        <h1 style={{ fontFamily: "'Playfair Display', serif" }} className="text-3xl font-bold text-[#1E1208]">
+          Settings
         </h1>
-        <p className="text-sm text-[#9A7E65] mt-1">
-          Configure your ministry workspace, denomination network affiliation, and communication parameters.
+        <p className="mt-1.5 text-[13px] font-medium text-[#9A7E65]">
+          Manage your church workspace, denomination affiliation, and ministry preferences.
         </p>
-      </div>
+      </header>
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Left Column (2 Cols): Core Settings */}
-        <div className="lg:col-span-2 space-y-6">
-          {/* Denomination Affiliation Component */}
-          <JoinDenominationCard
-            churchSlug={church_slug}
-            churchId={church.id}
-            denominationName={denominationName}
-            denominationSlug={denominationSlug}
-            isLinked={Boolean(denominationId)}
-          />
+      <JoinDenominationCard
+        churchSlug={church_slug}
+        denominationName={denominationName}
+        denominationSlug={denominationSlug}
+        isLinked={Boolean(denominationId)}
+      />
 
-          {/* Ministry Profile Card */}
-          <div className="bg-[#F0E6D3] rounded-2xl border border-[rgba(90,55,20,0.13)] p-6 shadow-sm">
-            <div className="flex items-center gap-3 mb-5 pb-4 border-b border-[rgba(90,55,20,0.08)]">
-              <div className="p-2.5 bg-[#2B1A0E] text-[#F5E6CE] rounded-xl">
-                <ChurchIcon className="w-5 h-5 text-[#B5622A]" />
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
+        <div className="space-y-6 lg:col-span-2">
+          <section className="rounded-2xl border border-[rgba(90,55,20,0.13)] bg-[#F0E6D3] p-6 shadow-sm">
+            <div className="mb-5 flex items-center gap-3 border-b border-[rgba(90,55,20,0.08)] pb-4">
+              <div className="rounded-xl bg-[#2B1A0E] p-2.5 text-[#F5E6CE]">
+                <ChurchIcon className="h-4 w-4 text-[#B5622A]" />
               </div>
               <div>
                 <h2 className="text-base font-bold text-[#1E1208]">Ministry Identity</h2>
-                <p className="text-xs text-[#9A7E65]">Public church profile and routing address</p>
+                <p className="text-[12px] text-[#9A7E65]">Your public church profile and workspace address.</p>
               </div>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
               <div>
-                <label className="block text-[11px] font-bold text-[#9A7E65] uppercase tracking-wider mb-1">
-                  Church Name
-                </label>
-                <div className="px-4 py-3 bg-white/70 border border-[rgba(90,55,20,0.12)] rounded-xl text-sm font-semibold text-[#1E1208]">
+                <span className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-[#9A7E65]">Church name</span>
+                <div className="rounded-xl border border-[rgba(90,55,20,0.1)] bg-white/60 px-4 py-3 text-sm font-semibold text-[#1E1208]">
                   {church.name}
                 </div>
               </div>
-
               <div>
-                <label className="block text-[11px] font-bold text-[#9A7E65] uppercase tracking-wider mb-1">
-                  Workspace Slug
-                </label>
-                <div className="px-4 py-3 bg-white/70 border border-[rgba(90,55,20,0.12)] rounded-xl text-sm font-mono text-[#B5622A]">
+                <span className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-[#9A7E65]">Workspace slug</span>
+                <div className="rounded-xl border border-[rgba(90,55,20,0.1)] bg-white/60 px-4 py-3 font-mono text-sm text-[#B5622A]">
                   /{church.slug}
                 </div>
               </div>
-
               <div className="md:col-span-2">
-                <label className="block text-[11px] font-bold text-[#9A7E65] uppercase tracking-wider mb-1">
-                  Public Portal Link
-                </label>
-                <div className="flex items-center justify-between px-4 py-3 bg-white/70 border border-[rgba(90,55,20,0.12)] rounded-xl text-xs font-mono text-[#6B513E]">
-                  <span className="truncate">/{church.slug}</span>
-                  <Link 
+                <span className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-[#9A7E65]">Public portal</span>
+                <div className="flex items-center justify-between gap-3 rounded-xl border border-[rgba(90,55,20,0.1)] bg-white/60 px-4 py-3">
+                  <span className="truncate font-mono text-xs text-[#6B513E]">/{church.slug}</span>
+                  <Link
                     href={`/${church.slug}`}
                     target="_blank"
-                    className="flex items-center gap-1 text-[#B5622A] font-bold hover:underline ml-2 flex-shrink-0"
+                    className="inline-flex shrink-0 items-center gap-1.5 text-xs font-bold text-[#B5622A] transition-colors hover:text-[#8E471D]"
                   >
-                    <span>View Portal</span>
-                    <ExternalLink className="w-3.5 h-3.5" />
+                    View portal <ExternalLink className="h-3.5 w-3.5" />
                   </Link>
                 </div>
               </div>
             </div>
-          </div>
+          </section>
 
-          {/* Attendance & Streak Rules */}
-          <div className="bg-[#F0E6D3] rounded-2xl border border-[rgba(90,55,20,0.13)] p-6 shadow-sm">
-            <div className="flex items-center gap-3 mb-5 pb-4 border-b border-[rgba(90,55,20,0.08)]">
-              <div className="p-2.5 bg-[#2B1A0E] text-[#F5E6CE] rounded-xl">
-                <Calendar className="w-5 h-5 text-[#B5622A]" />
+          <section className="rounded-2xl border border-[rgba(90,55,20,0.13)] bg-[#F0E6D3] p-6 shadow-sm">
+            <div className="mb-5 flex items-center gap-3 border-b border-[rgba(90,55,20,0.08)] pb-4">
+              <div className="rounded-xl bg-[#2B1A0E] p-2.5 text-[#F5E6CE]">
+                <Calendar className="h-4 w-4 text-[#B5622A]" />
               </div>
               <div>
-                <h2 className="text-base font-bold text-[#1E1208]">Attendance Monitoring Rules</h2>
-                <p className="text-xs text-[#9A7E65]">Automated consecutive missed service flags</p>
+                <h2 className="text-base font-bold text-[#1E1208]">Attendance Monitoring</h2>
+                <p className="text-[12px] text-[#9A7E65]">Current rules used for pastoral follow-up alerts.</p>
               </div>
             </div>
 
             <div className="space-y-4">
-              <div className="flex items-center justify-between p-3.5 bg-white/60 rounded-xl border border-[rgba(90,55,20,0.08)]">
+              <div className="flex flex-col gap-2 rounded-xl border border-[rgba(90,55,20,0.08)] bg-white/50 p-4 sm:flex-row sm:items-center sm:justify-between">
                 <div>
-                  <span className="text-xs font-bold text-[#1E1208] block">Consecutive Missed Event Alert Threshold</span>
-                  <span className="text-[11px] text-[#9A7E65]">Members are flagged for pastoral follow-up after missing this many services.</span>
+                  <p className="text-[13px] font-bold text-[#1E1208]">Missed-event alert threshold</p>
+                  <p className="mt-0.5 text-[11px] text-[#9A7E65]">Number of consecutive services before a member is flagged.</p>
                 </div>
-                <span className="px-3 py-1 bg-[#2B1A0E] text-[#F5E6CE] font-mono text-xs font-bold rounded-lg">
-                  {attendanceThreshold} Services
+                <span className="self-start rounded-lg bg-[#2B1A0E] px-3 py-1.5 font-mono text-xs font-bold text-[#F5E6CE] sm:self-auto">
+                  {attendanceThreshold} services
                 </span>
               </div>
 
-              <div className="p-3.5 bg-white/60 rounded-xl border border-[rgba(90,55,20,0.08)]">
-                <span className="text-xs font-bold text-[#1E1208] block mb-1">Standard Fellowship Days</span>
-                <div className="flex gap-1.5 flex-wrap">
-                  {['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map((day, idx) => {
-                    const isoDay = idx + 1;
-                    const isActive = configuredMeetingDays.includes(isoDay);
+              <div className="rounded-xl border border-[rgba(90,55,20,0.08)] bg-white/50 p-4">
+                <p className="mb-2 text-[13px] font-bold text-[#1E1208]">Regular meeting days</p>
+                <div className="flex flex-wrap gap-1.5">
+                  {meetingDays.map(({ label, iso }) => {
+                    const active = configuredMeetingDays.includes(iso);
                     return (
-                      <span 
-                        key={day}
-                        className={`px-2.5 py-1 rounded-lg text-xs font-semibold ${
-                          isActive 
-                            ? 'bg-[#B5622A] text-white shadow-xs' 
-                            : 'bg-black/5 text-[#9A7E65]'
-                        }`}
+                      <span
+                        key={label}
+                        className={`rounded-lg px-2.5 py-1 text-[11px] font-semibold ${active ? 'bg-[#B5622A] text-white' : 'bg-black/5 text-[#9A7E65]'}`}
                       >
-                        {day}
+                        {label}
                       </span>
                     );
                   })}
                 </div>
               </div>
             </div>
-          </div>
+          </section>
         </div>
 
-        {/* Right Column: Quick Status & Account */}
-        <div className="space-y-6">
-          {/* Pastor Account */}
-          <div className="bg-[#F0E6D3] rounded-2xl border border-[rgba(90,55,20,0.13)] p-6 shadow-sm">
-            <div className="flex items-center gap-3 mb-4">
-              <div className="p-2 bg-[#2B1A0E] text-[#F5E6CE] rounded-xl">
-                <Shield className="w-4 h-4 text-[#B5622A]" />
+        <aside className="space-y-6">
+          <section className="rounded-2xl border border-[rgba(90,55,20,0.13)] bg-[#F0E6D3] p-6 shadow-sm">
+            <div className="mb-4 flex items-center gap-3">
+              <div className="rounded-xl bg-[#2B1A0E] p-2.5 text-[#F5E6CE]">
+                <Shield className="h-4 w-4 text-[#B5622A]" />
               </div>
-              <h3 className="text-sm font-bold text-[#1E1208]">Pastor Account</h3>
+              <h2 className="text-sm font-bold text-[#1E1208]">Signed-in account</h2>
             </div>
-
-            <div className="space-y-3 text-xs">
+            <div className="space-y-3">
               <div>
-                <span className="text-[10px] uppercase font-bold text-[#9A7E65] tracking-wider block">Signed In As</span>
-                <span className="text-[#1E1208] font-medium font-mono text-[11px] truncate block mt-0.5">
-                  {user?.email || 'Authenticated Pastor'}
+                <span className="block text-[10px] font-bold uppercase tracking-wider text-[#9A7E65]">Email</span>
+                <span className="mt-1 block truncate font-mono text-[11px] text-[#1E1208]">
+                  {user?.email || 'Authenticated church administrator'}
                 </span>
               </div>
               <div>
-                <span className="text-[10px] uppercase font-bold text-[#9A7E65] tracking-wider block">Role</span>
-                <span className="inline-block mt-0.5 px-2 py-0.5 bg-[#B5622A]/10 text-[#B5622A] rounded font-bold uppercase tracking-wider text-[10px]">
-                  Pastor Admin
+                <span className="block text-[10px] font-bold uppercase tracking-wider text-[#9A7E65]">Workspace</span>
+                <span className="mt-1 inline-flex rounded-md bg-[#B5622A]/10 px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-[#B5622A]">
+                  {church.name}
                 </span>
               </div>
             </div>
-          </div>
+          </section>
 
-          {/* Quick Actions */}
-          <div className="bg-[#2B1A0E] rounded-2xl p-6 text-[#F5E6CE] shadow-md">
-            <h3 
-              style={{ fontFamily: "'Playfair Display', serif" }}
-              className="text-lg font-bold mb-2"
-            >
-              Need Support?
-            </h3>
-            <p className="text-xs text-[#C8B89A] leading-relaxed mb-4">
-              For assistance setting up custom SMS sender IDs, multi-campus branches, or diocese overseer connections.
+          <section className="rounded-2xl bg-[#2B1A0E] p-6 text-[#F5E6CE] shadow-md">
+            <h2 style={{ fontFamily: "'Playfair Display', serif" }} className="text-lg font-bold">
+              Need help?
+            </h2>
+            <p className="mt-2 text-[12px] leading-relaxed text-[#C8B89A]">
+              Ask your denomination overseer for an invite code, or contact support for workspace assistance.
             </p>
-            <div className="space-y-2">
-              <Link 
-                href={`/${church_slug}/admin/messages`}
-                className="block text-center w-full py-2.5 bg-[#B5622A] hover:bg-[#C6733B] text-white rounded-xl text-xs font-bold uppercase tracking-wider transition-colors"
-              >
-                SMS & Communication
-              </Link>
-            </div>
-          </div>
-        </div>
+            <Link
+              href={`/${church_slug}/admin/messages`}
+              className="mt-4 block w-full rounded-xl bg-[#B5622A] px-4 py-2.5 text-center text-xs font-bold uppercase tracking-wider text-white transition-colors hover:bg-[#C6733B]"
+            >
+              Contact support
+            </Link>
+          </section>
+        </aside>
       </div>
     </div>
   );
