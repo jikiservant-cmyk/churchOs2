@@ -114,14 +114,16 @@ async function handlePost(request: Request) {
 
 async function handleSmsDelivery(payload: any) {
   const notification = parseSmsDeliveryNotification(payload)!;
-  const { smsId, reference: smsRef, status: smsStatus, providerId } = notification;
+  const { smsId, reference: smsRef, status: smsStatus } = notification;
 
   console.log(`[Najiki Webhook] SMS Delivery Update for ${smsRef || smsId}: ${smsStatus}`);
 
   // Validate before use — these values arrive in the request body.
   const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-  const KEY_RE = /^[A-Za-z0-9_.:-]{1,80}$/;
-  const safeId = typeof smsId === 'string' && UUID_RE.test(smsId) ? smsId : null;
+  // Na'jiki returns opaque non-UUID smsId values; accept only URL/filter-safe IDs.
+  const SAFE_SMS_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
+  const KEY_RE = /^[A-Za-z0-9_.:-]{1,255}$/;
+  const safeId = typeof smsId === 'string' && (UUID_RE.test(smsId) || SAFE_SMS_ID_RE.test(smsId)) ? smsId : null;
   const safeRef = typeof smsRef === 'string' && KEY_RE.test(smsRef) ? smsRef : null;
 
   if (!safeId && !safeRef) {
@@ -130,7 +132,6 @@ async function handleSmsDelivery(payload: any) {
   }
 
   const db = getServiceDb();
-
   const normalisedStatus =
     smsStatus?.toUpperCase() === 'DELIVERED'
       ? 'DELIVERED'
@@ -138,33 +139,37 @@ async function handleSmsDelivery(payload: any) {
         ? 'FAILED'
         : smsStatus;
 
-  const updateObj = {
+  const updateObj: Record<string, unknown> = {
     status: normalisedStatus,
     message_provider_status: smsStatus,
-    // Opaque downstream provider message id supplied by Na'jiki.
-    provider_message_id: providerId || smsId,
-    updated_at: new Date().toISOString()
+    updated_at: new Date().toISOString(),
   };
+  if (safeId) {
+    // Keep Na'jiki's own smsId as the stable callback key. providerId is an
+    // opaque downstream carrier ID and is not the ID sent in future callbacks.
+    updateObj.provider_message_id = safeId;
+    updateObj.najiki_sms_id = safeId;
+  }
+  if (safeRef) updateObj.najiki_reference = safeRef;
 
-  // Resolve the owning tenant from the row itself, then update with an
-  // explicit predicate on each candidate column — no string-built filters.
   const orConditions = [
     safeId ? `provider_message_id.eq.${safeId}` : null,
-    safeRef ? `idempotency_key.eq.${safeRef}` : null,
+    safeId ? `najiki_sms_id.eq.${safeId}` : null,
+    safeRef ? `najiki_reference.eq.${safeRef}` : null,
   ].filter(Boolean).join(',');
 
+  // Resolve owner(s) first, then keep every update tenant-scoped.
   const { data: owners } = await db
     .schema('church')
     .from('sms_logs')
-    .select('tenant_id, provider_message_id, idempotency_key')
+    .select('tenant_id')
     .or(orConditions)
-    .limit(1);
+    .limit(10);
 
   for (const owner of owners ?? []) {
-    let q = db.schema('church').from('sms_logs').update(updateObj)
-      .eq('tenant_id', owner.tenant_id); // tenant scope, always
-    q = safeId ? q.eq('provider_message_id', safeId) : q.eq('idempotency_key', safeRef!);
-    await q;
+    await db.schema('church').from('sms_logs').update(updateObj)
+      .eq('tenant_id', owner.tenant_id)
+      .or(orConditions);
   }
 
   return NextResponse.json({ received: true, eventType: 'SMS_DELIVERY_UPDATE' });

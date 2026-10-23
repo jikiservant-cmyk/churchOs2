@@ -25,8 +25,8 @@ churchOs-fixes/
 │   └── 004_cron_jobs.sql                     → Run in Supabase SQL Editor
 └── supabase/
     └── functions/
-        └── process-sms-queue/
-            └── index.ts                      → Deploy as Supabase Edge Function
+        ├── church-najiki-dispatch/index.ts   → Single queue-row Na'jiki dispatcher
+        └── church-najiki-queue-worker/index.ts → Due/expired-row recovery worker
 ```
 
 ---
@@ -73,10 +73,13 @@ in the app environment and Na'jiki Setup. All SMS and payment initiation goes
 through Na'jiki; do not add downstream carrier or payment-provider credentials
 to churchOs. See `NAJIKI_INTEGRATION.md` for the full contract.
 
-### 6 — Route all application SMS through Na'jiki
-All application sends use `sendSingleSMS()` in `lib/sms-actions.ts`, which
-submits to Na'jiki. Do not add direct downstream-provider calls or fallback
-paths. See `NAJIKI_INTEGRATION.md` for the contract and signed webhook setup.
+### 6 — Route all application SMS through the Supabase Edge queue
+Application code persists a row in `church.sms_queue`; the `church-najiki-dispatch`
+Supabase Edge Function sends it through Na'jiki using the stable queue ID and
+idempotency key. Do not add synchronous provider calls or downstream-provider
+fallbacks. Deploy/configure the functions and apply
+`migrations/009_najiki_sms_edge_dispatch.sql` as described in `QUEUE_INTEGRATION.md`.
+See `NAJIKI_INTEGRATION.md` for the Na'jiki contract and signed webhook setup.
 
 ### 7 — Replace unbounded member queries with paginated ones
 ```typescript

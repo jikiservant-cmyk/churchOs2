@@ -100,6 +100,16 @@ export async function POST(req: Request) {
       );
     }
 
+    const idempotencyKey = typeof body.idempotencyKey === 'string'
+      ? body.idempotencyKey.trim()
+      : req.headers.get('idempotency-key')?.trim() ?? '';
+    if (idempotencyKey.length < 8 || idempotencyKey.length > 255) {
+      return NextResponse.json(
+        { error: 'Provide a stable idempotencyKey (8–255 characters) and reuse it when retrying this request.' },
+        { status: 400 }
+      );
+    }
+
     const normalizedPhone = normalizeUgPhone(phoneNumber);
     if (!normalizedPhone) {
       return NextResponse.json(
@@ -129,7 +139,7 @@ export async function POST(req: Request) {
         phoneNumber: normalizedPhone,
         message,
         churchId,
-        idempotencyKey: body.idempotencyKey,
+        idempotencyKey,
         senderId,
         balance
       });

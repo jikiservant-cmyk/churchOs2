@@ -1,21 +1,15 @@
 /**
  * POST /api/sms/enqueue
  *
- * Accepts the same body as /api/sms/broadcast but instead of streaming
- * sends one-by-one, it:
- *   1. Validates auth & balance
- *   2. Persists all recipients to the sms_queue table
- *   3. Returns immediately with a broadcastId
- *   4. Fires off /api/sms/process-queue in the background
- *
- * The existing /api/sms/broadcast route is NOT changed or removed.
- * Update BroadcastComposer to hit /api/sms/enqueue instead to opt into
- * the queue system.
+ * Validates the authenticated church admin, persists one PENDING row per
+ * recipient, and wakes the Supabase Edge queue worker after commit. All SMS
+ * dispatch happens in church-najiki-dispatch through Na'jiki.
  */
 
-import { NextResponse } from 'next/server';
+import { after, NextResponse } from 'next/server';
 import { createClient as createServerClient } from '@/lib/supabase/server';
-import { enqueueBroadcast, processQueueBatch } from '@/lib/queue-actions';
+import { enqueueBroadcast } from '@/lib/queue-actions';
+import { dispatchSmsQueueWorker } from '@/lib/sms-dispatch';
 import { normalizeUgPhone } from '@/lib/utils';
 
 export async function POST(req: Request) {
@@ -148,11 +142,16 @@ export async function POST(req: Request) {
       createdBy:  user.id,
     });
 
-    // ── Kick off processing in the background ───────────────────────────────
-    // This means delivery starts immediately without waiting for a cron tick.
-    // Executed in-process asynchronously to prevent exposing secrets to untrusted host headers.
-    processQueueBatch({ tenantId: churchId, batchSize: 15 })
-      .catch(err => console.warn('[Enqueue] Background trigger failed (non-fatal):', err));
+    // ── Wake the Edge queue worker after the durable rows have committed ────
+    // The worker dispatches each row by its existing queue ID; cron recovers
+    // anything that times out, is rate-limited, or has an expired lease.
+    after(async () => {
+      try {
+        await dispatchSmsQueueWorker();
+      } catch (err) {
+        console.warn('[Enqueue] Edge worker wake-up deferred to scheduled recovery:', err);
+      }
+    });
 
     // ── Respond ─────────────────────────────────────────────────────────────
     return NextResponse.json({
