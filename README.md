@@ -67,24 +67,16 @@ If any passkeys start with `$2`, they're already hashed — skip 002.
 
 **Before running 004:** Enable pg_cron in Supabase Dashboard → Database → Extensions.
 
-### 5 — Deploy the Edge Function
-```bash
-supabase functions deploy process-sms-queue
-supabase secrets set AFRICASTALKING_API_KEY=your-key
-supabase secrets set AFRICASTALKING_USERNAME=your-username
-```
+### 5 — Configure Na'jiki
+Set `NAJIKI_API_KEY`, `NAJIKI_APPLICATION_CODE`, and the signed webhook path
+in the app environment and Na'jiki Setup. All SMS and payment initiation goes
+through Na'jiki; do not add downstream carrier or payment-provider credentials
+to churchOs. See `NAJIKI_INTEGRATION.md` for the full contract.
 
-### 6 — Replace direct Africa's Talking calls with queueSms()
-In any file that currently calls `at.SMS.send()` directly, replace it:
-
-```typescript
-// Before (blocks the HTTP response for 500–2000ms):
-await at.SMS.send({ to: [phone], message: body });
-
-// After (returns immediately, sends async):
-import { queueSms } from '@/lib/sms-queue';
-await queueSms(supabase, { tenantId, recipients: [phone], message: body });
-```
+### 6 — Route all application SMS through Na'jiki
+All application sends use `sendSingleSMS()` in `lib/sms-actions.ts`, which
+submits to Na'jiki. Do not add direct downstream-provider calls or fallback
+paths. See `NAJIKI_INTEGRATION.md` for the contract and signed webhook setup.
 
 ### 7 — Replace unbounded member queries with paginated ones
 ```typescript

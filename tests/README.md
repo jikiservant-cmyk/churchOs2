@@ -15,8 +15,6 @@ framework is required.
 | File | What it covers |
 | --- | --- |
 | `activation.test.ts` | Activation fee/currency, missing references, and the fail-closed ledger lookup path against a mocked Supabase HTTP API. |
-| `activation-webhook.test.ts` | Activation webhook authentication fails closed without a configured secret, accepts a valid signature, and rejects unsigned requests. |
-| `africastalking-sdk.test.ts` | Smoke-tests the Africa's Talking SDK import and SMS API surface without credentials or network access. |
 | `attendance-streaks.test.ts` | Consecutive attendance-miss calculations and attendance flag lifecycle rules. |
 | `denomination.test.ts` | Invite code normalization, provisioning payload validation, login-context mapping, and denomination query helpers. |
 | `najiki-contract.test.ts` | Church → Na'jiki payloads validated by Na'jiki's own Zod schemas; error forwarding; idempotency; signed webhook verification and replay/tamper rejection. |
@@ -28,9 +26,10 @@ the fixture README for provenance and refresh instructions.
 
 ## Deliberate test boundaries
 
-The Na'jiki mock does not implement its rate limiting, LivePay provider call,
-wallet crediting, or webhook fan-out. Supabase-dependent payment settlement,
-RLS policies, the full set of server actions/API routes, and real SMS/payment
-provider behavior still require staging integration tests with a non-production
-database and provider sandbox credentials. No live service credentials are
-needed for the unit/contract suite.
+The Na'jiki mock does not implement its rate limiting, downstream provider
+dispatch, wallet crediting, or webhook fan-out. Supabase-dependent payment settlement,
+RLS policies, the full set of server actions/API routes, and live SMS/payment
+behavior still require staging integration tests with a non-production database
+and Na'jiki staging credentials. Do not configure downstream provider
+credentials in churchOs. No live service credentials are needed for the
+unit/contract suite.

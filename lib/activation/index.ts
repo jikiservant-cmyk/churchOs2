@@ -1,8 +1,13 @@
 import { createClient as createSupabaseClient } from '@supabase/supabase-js';
-import { createNajikiPayment, getNajikiConfig, NajikiConfigError, NajikiApiError } from '../najiki/client.ts';
+import { randomUUID } from 'crypto';
+import { createNajikiPayment } from '../najiki/client.ts';
 
 export const ACTIVATION_FEE_UGX = 17000;
 export const ACTIVATION_CURRENCY = 'UGX';
+export const ACTIVATION_PLAN_PRICES = {
+  standard: ACTIVATION_FEE_UGX,
+  bundle: 50_000,
+} as const;
 
 export interface ActivationStatusResult {
   churchId: string;
@@ -94,15 +99,11 @@ export async function startActivationPayment({
   churchId,
   userId,
   phoneNumber,
-  provider = 'najiki',
-  amount,
   plan
 }: {
   churchId: string;
   userId: string;
   phoneNumber: string;
-  provider?: string;
-  amount?: number;
   plan?: string;
 }): Promise<{
   success: boolean;
@@ -116,7 +117,8 @@ export async function startActivationPayment({
     return { success: false, error: 'Unauthorized: church context required' };
   }
 
-  const chosenAmount = (amount && amount > 0) ? Math.round(amount) : ACTIVATION_FEE_UGX;
+  const selectedPlan = plan === 'bundle' ? 'bundle' : 'standard';
+  const chosenAmount = ACTIVATION_PLAN_PRICES[selectedPlan];
   const supabase = getAdminClient();
 
   // 1. Verify church exists and check if already active
@@ -139,10 +141,18 @@ export async function startActivationPayment({
     };
   }
 
+  const { data: tenant } = await supabase
+    .from('tenants')
+    .select('code')
+    .eq('id', churchId)
+    .maybeSingle();
+  const tenantCode = tenant?.code || church.slug || process.env.NAJIKI_TENANT_CODE;
+  if (!tenantCode) {
+    return { success: false, error: 'Na\'jiki tenant code is not configured for this church' };
+  }
+
   // 2. Generate unique merchant reference
-  const randomSuffix = Math.random().toString(36).substring(2, 7).toUpperCase();
-  const timestamp = Date.now().toString(36).toUpperCase();
-  const merchantReference = `ACT-${timestamp}-${randomSuffix}`;
+  const merchantReference = `ACT-${randomUUID()}`;
 
   // Clean phone number (canonical E.164 digits-only format, default Uganda 256)
   let cleanPhone = (phoneNumber || '').replace(/[^0-9]/g, '');
@@ -168,7 +178,7 @@ export async function startActivationPayment({
       church_id: churchId,
       amount: chosenAmount,
       currency: ACTIVATION_CURRENCY,
-      provider: provider || 'najiki',
+      provider: 'najiki',
       merchant_reference: merchantReference,
       status: 'pending',
       initiated_by: validUserId
@@ -181,24 +191,26 @@ export async function startActivationPayment({
     return { success: false, error: 'Failed to record payment attempt in ledger' };
   }
 
-  // 4. Dispatch payment via Na'jiki / LivePay API client
+  // 4. Initiate the payment through Na'jiki only
   let providerTxId: string | null = null;
   let instructions = `Payment prompt sent to ${cleanPhone}. Please approve the request of UGX ${chosenAmount.toLocaleString('en-US')} on your mobile handset.`;
 
   try {
     const najikiResponse = await createNajikiPayment({
       applicationCode: process.env.NAJIKI_APPLICATION_CODE || 'church',
-      paymentTypeCode: process.env.NAJIKI_PAYMENT_TYPE_TOPUP || 'church_activation',
+      tenantCode,
+      paymentTypeCode: process.env.NAJIKI_PAYMENT_TYPE_ACTIVATION || process.env.NAJIKI_PAYMENT_TYPE_TOPUP || 'topup',
       externalEntityId: churchId,
       amount: chosenAmount,
       currency: ACTIVATION_CURRENCY,
       phoneNumber: cleanPhone,
       idempotencyKey: merchantReference,
-      description: `${plan ? `${plan.toUpperCase()} plan` : 'Activation'} for ${church.name}`,
+      description: `${selectedPlan.toUpperCase()} plan activation for ${church.name}`,
       metadata: {
         churchId,
+        tenantCode,
         merchantReference,
-        plan: plan || 'standard',
+        plan: selectedPlan,
         type: 'church_activation'
       }
     });
@@ -219,13 +231,12 @@ export async function startActivationPayment({
       .schema('church')
       .from('activation_payments')
       .update({
+        status: 'failed',
         failure_reason: providerNote
       })
       .eq('id', paymentRow.id);
 
-    if (err instanceof NajikiConfigError) {
-      instructions = `Payment request logged for ${cleanPhone}. (Na'jiki API Key not yet set in environment — use simulation button to complete testing).`;
-    }
+    return { success: false, merchantReference, error: `Na'jiki payment initiation failed: ${providerNote}` };
   }
 
   return {
@@ -237,19 +248,17 @@ export async function startActivationPayment({
 }
 
 /**
- * Confirm and verify payment outcome (called from webhook or verification worker)
+ * Confirm and verify payment outcome. Called only by the signed Na'jiki webhook.
  * Calls the atomic PostgreSQL RPC activate_church_workspace_v2 with fallback.
  */
 export async function confirmActivationPayment({
   merchantReference,
-  provider = 'najiki',
   providerTransactionId,
   paidAmount,
   currency = 'UGX',
   status = 'SUCCESS'
 }: {
   merchantReference: string;
-  provider?: string;
   providerTransactionId?: string;
   paidAmount: number;
   currency?: string;
@@ -271,7 +280,7 @@ export async function confirmActivationPayment({
   try {
     const { data: rpcResult, error: rpcError } = await supabase.rpc('activate_church_workspace_v2', {
       p_merchant_reference: merchantReference.trim(),
-      p_provider: (provider || 'najiki').trim(),
+      p_provider: 'najiki',
       p_provider_transaction_id: providerTransactionId ? providerTransactionId.trim() : null,
       p_paid_amount: Number(paidAmount),
       p_currency: (currency || 'UGX').trim().toUpperCase(),
@@ -287,6 +296,19 @@ export async function confirmActivationPayment({
           activated: !!rpcResult.activated
         };
       } else {
+        // A verified terminal failure has been persisted; acknowledge it so
+        // Na'jiki does not retry a business outcome indefinitely.
+        if (
+          ['FAILED', 'EXPIRED', 'CANCELLED'].includes(String(status).toUpperCase()) &&
+          ['FAILED', 'CANCELLED', 'PROVIDER_FAILED', 'INVALID_STATE'].includes(String(rpcResult.code).toUpperCase())
+        ) {
+          return {
+            success: true,
+            churchId: rpcResult.church_id,
+            alreadyProcessed: String(rpcResult.code).toUpperCase() === 'PROVIDER_FAILED',
+            activated: false,
+          };
+        }
         return {
           success: false,
           error: rpcResult.error || `Payment activation failed (${rpcResult.code || 'UNKNOWN'})`
@@ -339,7 +361,9 @@ export async function confirmActivationPayment({
       })
       .eq('id', payment.id);
 
-    return { success: false, error: `Payment failed with status: ${status}` };
+    // The signed Na'jiki notification was processed and the payment marked
+    // terminally failed; report success to the webhook caller (not activation).
+    return { success: true, churchId: payment.church_id, activated: false };
   }
 
   // Exact amount & currency validation against the recorded payment attempt amount

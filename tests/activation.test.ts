@@ -3,12 +3,14 @@ import assert from 'node:assert/strict';
 import {
   ACTIVATION_FEE_UGX,
   ACTIVATION_CURRENCY,
+  ACTIVATION_PLAN_PRICES,
   confirmActivationPayment,
 } from '../lib/activation/index.ts';
 
 describe('Church Workspace Activation Flow Suite', () => {
-  test('enforces constant one-time fee of UGX 17,000', () => {
+  test('uses server-owned activation plan prices and UGX currency', () => {
     assert.equal(ACTIVATION_FEE_UGX, 17000);
+    assert.deepEqual(ACTIVATION_PLAN_PRICES, { standard: 17000, bundle: 50000 });
     assert.equal(ACTIVATION_CURRENCY, 'UGX');
   });
 

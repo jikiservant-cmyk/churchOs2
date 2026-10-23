@@ -136,8 +136,7 @@ export async function POST(req: Request) {
     }
 
     // ── Sender ID ───────────────────────────────────────────────────────────
-    const isSandbox = process.env.AT_USERNAME?.toLowerCase() === 'sandbox';
-    const senderId  = (!isSandbox && church.sender_id?.trim()) ? church.sender_id.trim() : '';
+    const senderId = church.sender_id?.trim() || '';
 
     // ── Enqueue ─────────────────────────────────────────────────────────────
     const { broadcastId, enqueued, skipped } = await enqueueBroadcast({

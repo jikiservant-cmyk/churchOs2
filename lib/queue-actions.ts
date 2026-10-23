@@ -203,7 +203,7 @@ export async function processQueueBatch(
         throw new Error('Insufficient balance');
       }
 
-      const result = await sendSingleSMS({
+      await sendSingleSMS({
         supabase:       admin,
         phoneNumber:    item.recipient_phone,
         message:        item.message,
@@ -213,7 +213,7 @@ export async function processQueueBatch(
         balance,
       });
 
-      if (!result.success) throw new Error(result.error ?? 'Provider rejected');
+      // sendSingleSMS throws if Na'jiki did not accept the message.
 
       // Mark SENT
       await admin
@@ -260,7 +260,7 @@ export async function processQueueBatch(
       failed++;
     }
 
-    // Small pause between sends to stay comfortably within Africa's Talking rate limits
+    // Small pause between sends to stay comfortably within Na'jiki's request limits
     await new Promise(r => setTimeout(r, 150));
   }
 

@@ -851,8 +851,7 @@ export async function sendMissedYouMessages(churchId: string, churchSlug: string
 
     if (!balance) return { error: 'Billing account not found' };
 
-    const isSandbox = process.env.AT_USERNAME?.toLowerCase() === 'sandbox';
-    const senderId = (!isSandbox && church?.sender_id) ? church.sender_id.trim() : '';
+    const senderId = church?.sender_id?.trim() || '';
 
     let sentCount = 0;
 

@@ -27,12 +27,12 @@ import {
   NajikiApiError,
   NajikiConfigError,
   sendNajikiSms,
-  shouldFallBackToAfricasTalking,
   NAJIKI_DEFAULT_APPLICATION_CODE,
   NAJIKI_DEFAULT_BASE_URL,
 } from '../lib/najiki/client.ts'
 import {
   classifyNajikiWebhook,
+  activationMerchantReference,
   notificationChurchId,
   notificationTenantCode,
   parsePaymentNotification,
@@ -587,6 +587,29 @@ describe('inbound webhook payload handling', () => {
 
     assert.equal(notificationTenantCode(notification), TENANT_CODE)
     assert.equal(notificationChurchId(notification), CHURCH_ID)
+    assert.equal(activationMerchantReference(notification), null)
+  })
+
+  test('only identifies activation settlements from Na\u2019jiki metadata with a merchant reference', () => {
+    const payload = buildNajikiPaymentNotification({
+      paymentIntentId: 'pay_activation',
+      reference: 'CHURCH-ACT-1234',
+      status: 'success',
+      amount: 17_000,
+      metadata: {
+        type: 'church_activation',
+        merchantReference: 'ACT-activation-merchant-ref',
+      },
+    })
+    const notification = parsePaymentNotification(JSON.parse(payload))!
+    assert.equal(activationMerchantReference(notification), 'ACT-activation-merchant-ref')
+
+    const malformed = parsePaymentNotification({
+      paymentIntentId: 'pay_activation',
+      status: 'success',
+      metadata: { type: 'church_activation' },
+    })!
+    assert.equal(activationMerchantReference(malformed), null)
   })
 
   test('parses SMS delivery updates', () => {
@@ -661,24 +684,5 @@ describe('inbound webhook payload handling', () => {
       }),
       null
     )
-  })
-})
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Fallback policy
-// ─────────────────────────────────────────────────────────────────────────────
-
-describe('fallback policy', () => {
-  test('a 4xx from Na\u2019jiki must NOT silently fall back to another provider', () => {
-    const rejection = new NajikiApiError(403, { error: 'Application code mismatch' }, '/api/messaging/send')
-    assert.equal(shouldFallBackToAfricasTalking(rejection), false)
-    assert.equal(shouldFallBackToAfricasTalking(new NajikiApiError(400, { error: 'Validation failed' }, '/x')), false)
-    assert.equal(shouldFallBackToAfricasTalking(new NajikiApiError(429, { error: 'Too many requests' }, '/x')), false)
-  })
-
-  test('a missing config or a 5xx/network failure may fall back', () => {
-    assert.equal(shouldFallBackToAfricasTalking(new NajikiConfigError(['NAJIKI_API_KEY'])), true)
-    assert.equal(shouldFallBackToAfricasTalking(new NajikiApiError(503, { error: 'unavailable' }, '/x')), true)
-    assert.equal(shouldFallBackToAfricasTalking(new Error('fetch failed')), true)
   })
 })

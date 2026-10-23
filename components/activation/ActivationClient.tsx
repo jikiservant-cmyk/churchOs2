@@ -84,7 +84,6 @@ export default function ActivationClient({
   const [instructions, setInstructions] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isSuccess, setIsSuccess] = useState(false);
-  const [isSimulating, setIsSimulating] = useState(false);
   const [isCheckingStatus, setIsCheckingStatus] = useState(false);
 
   const pollIntervalRef = useRef<NodeJS.Timeout | null>(null);
@@ -131,9 +130,7 @@ export default function ActivationClient({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           phoneNumber,
-          provider: 'najiki',
           network,
-          amount: plan.price,
           plan: selected,
           churchId,
           churchSlug
@@ -164,34 +161,6 @@ export default function ActivationClient({
       setErrorMessage(err.message || 'Network connection failed. Please try again.');
     } finally {
       setIsLoading(false);
-    }
-  };
-
-  // Test Simulation Helper
-  const handleSimulatePayment = async () => {
-    if (!merchantRef) return;
-    setIsSimulating(true);
-    try {
-      const res = await fetch('/api/church/activation/simulate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ merchantReference: merchantRef })
-      });
-      const data = await res.json();
-      if (data.success) {
-        setIsPolling(false);
-        setIsSuccess(true);
-        setTimeout(() => {
-          router.replace(`/${churchSlug}/admin`);
-          router.refresh();
-        }, 1500);
-      } else {
-        setErrorMessage(data.error || 'Simulation failed');
-      }
-    } catch (err: any) {
-      setErrorMessage(err.message || 'Simulation error');
-    } finally {
-      setIsSimulating(false);
     }
   };
 
@@ -516,16 +485,6 @@ export default function ActivationClient({
                 </div>
 
                 <div className="space-y-2 pt-2">
-                  <button
-                    type="button"
-                    onClick={handleSimulatePayment}
-                    disabled={isSimulating}
-                    className="w-full py-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-[15px] font-medium text-xs tracking-wider uppercase transition-all shadow flex items-center justify-center gap-2 cursor-pointer"
-                  >
-                    {isSimulating ? <Loader2 size={14} className="animate-spin" /> : <CheckCircle2 size={14} />}
-                    <span>Simulate PIN Approval (Instant Test)</span>
-                  </button>
-
                   <button
                     type="button"
                     onClick={() => setIsPolling(false)}

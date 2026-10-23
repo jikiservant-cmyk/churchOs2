@@ -1,10 +1,6 @@
 import { normalizeUgPhone } from '@/lib/utils';
-import Africastalking from 'africastalking';
 import { createAdminClient } from '@/lib/supabase/server';
-import {
-  sendNajikiSms,
-  shouldFallBackToAfricasTalking,
-} from '@/lib/najiki/client';
+import { sendNajikiSms } from '@/lib/najiki/client';
 
 interface SendSMSParams {
   supabase: any;
@@ -19,6 +15,7 @@ interface SendSMSParams {
   };
 }
 
+/** Send SMS exclusively through Na'jiki; never call an underlying SMS carrier. */
 export async function sendSingleSMS({
   supabase,
   phoneNumber,
@@ -26,16 +23,16 @@ export async function sendSingleSMS({
   churchId,
   idempotencyKey,
   senderId,
-  balance
+  balance,
 }: SendSMSParams) {
   const finalPhone = normalizeUgPhone(phoneNumber);
   if (!finalPhone) {
     throw new Error(`Invalid phone number format: "${phoneNumber}"`);
   }
 
-  const actualIdempotencyKey = idempotencyKey || `sms_${Math.random().toString(36).substring(2, 10)}_${Date.now()}`;
-  
-  // 1. Create Initial "PENDING" Log
+  const actualIdempotencyKey =
+    idempotencyKey || `sms_${crypto.randomUUID()}`;
+
   const { data: initialLog, error: initialLogError } = await supabase
     .schema('church')
     .from('sms_logs')
@@ -44,7 +41,7 @@ export async function sendSingleSMS({
       recipient_phone: finalPhone,
       body: message,
       status: 'PENDING',
-      idempotency_key: actualIdempotencyKey
+      idempotency_key: actualIdempotencyKey,
     })
     .select('id')
     .single();
@@ -56,67 +53,26 @@ export async function sendSingleSMS({
   const logId = initialLog.id;
 
   try {
-    // Try Najiki first, fall back to Africa's Talking if Najiki config missing or fails
-    let najikiResult;
-    let providerUsed = 'najiki';
-    try {
-      najikiResult = await sendNajikiSms({
-        to: finalPhone,
-        message,
-        from: senderId,
-        // Na'jiki dedupes on (application, idempotencyKey) — forwarding our own
-        // key makes a retried request a no-op on their side instead of a second
-        // SMS and a second charge.
-        idempotencyKey: actualIdempotencyKey,
-      });
-    } catch (najikiError) {
-      if (!shouldFallBackToAfricasTalking(najikiError)) {
-        // Na'jiki rejected the request outright — do not silently re-send it
-        // through another provider. Log it and let the caller see the reason.
-        console.error(
-          '[SMS Actions] Najiki rejected the SMS request; not falling back:',
-          najikiError instanceof Error ? najikiError.message : najikiError
-        );
-        throw najikiError;
-      }
-      console.warn('[SMS Actions] Najiki unavailable, falling back to the direct Africa route:', najikiError);
-      providerUsed = 'africastalking';
+    // Na'jiki owns carrier selection, dispatch, retries and delivery callbacks.
+    const result = await sendNajikiSms({
+      to: finalPhone,
+      message,
+      from: senderId,
+      idempotencyKey: actualIdempotencyKey,
+    });
+
+    if (result.success === false) {
+      throw new Error(`Na'jiki refused the SMS: ${result.message || result.status || 'unknown error'}`);
     }
 
-    let isSuccess = false;
-    let finalStatus = 'FAILED';
-    let providerMessageId = null;
-    let providerStatus = null;
-
-    if (providerUsed === 'najiki' && najikiResult) {
-      // Handle Najiki response: 202 { success, message, smsId, reference,
-      // status, deduplicated, createdAt }.
-      if (najikiResult.success === false) {
-        throw new Error(
-          `Najiki refused the SMS: ${najikiResult.message || najikiResult.status || 'unknown error'}`
-        );
-      }
-
-      isSuccess = true;
-      finalStatus = 'Queued';
-      providerMessageId = najikiResult.smsId;
-      providerStatus = najikiResult.status;
-
-      // Na'jiki returned an already-queued message for this idempotency key:
-      // the original request was accepted (and billed) already, so charging the
-      // wallet again would double-bill the church for one SMS.
-      if (najikiResult.deduplicated === true) {
-        console.log(
-          `[SMS Actions] Najiki deduplicated SMS ${najikiResult.smsId} for key ${actualIdempotencyKey} — wallet not debited again`
-        );
-      } else {
-      // 2. Perform Atomic Deduction via RPC (eliminates read-modify-write race)
+    // A repeated Na'jiki idempotency key represents an already-queued/billed
+    // SMS. Do not debit this church a second time for the same message.
+    if (!result.deduplicated) {
       const adminSupabase = await createAdminClient();
-      
-      const { data: debited, error: debitError } = await adminSupabase.rpc('decrement_wallet_balance', {
-        p_tenant_id: churchId,
-        p_amount: balance.sms_rate
-      });
+      const { data: debited, error: debitError } = await adminSupabase.rpc(
+        'decrement_wallet_balance',
+        { p_tenant_id: churchId, p_amount: balance.sms_rate },
+      );
 
       if (debitError || !debited) {
         console.error('[SMS Actions] Atomic wallet deduction failed:', debitError);
@@ -129,129 +85,34 @@ export async function sendSingleSMS({
         .eq('tenant_id', churchId)
         .maybeSingle();
 
-      // Record transaction history
-      const { error: ledgerErr } = await adminSupabase.from('wallet_transactions').insert({
+      const { error: ledgerError } = await adminSupabase.from('wallet_transactions').insert({
         tenant_id: churchId,
         wallet_id: walletData?.id,
         amount: -balance.sms_rate,
         type: 'SMS_SENT',
-        description: `Sent 1 SMS to ${finalPhone} via Najiki`,
+        description: `Sent 1 SMS to ${finalPhone} via Na'jiki`,
         reference_code: `SMS_${logId}_${Date.now()}`,
         status: 'success',
         idempotency_key: logId,
         product: 'sms',
-        reference_id: logId
+        reference_id: logId,
       });
 
-      if (ledgerErr) {
-        console.error('[SMS Actions] Ledger write failed after debit:', ledgerErr);
-        throw new Error(`Ledger write failed after debit: ${ledgerErr.message}`);
-      }
-      }
-    } else {
-      // Fallback to Africa's Talking
-      const apiKey = process.env.AT_API_KEY;
-      const username = process.env.AT_USERNAME;
-
-      if (!apiKey || !username) {
-        throw new Error('Service configuration error: AT credentials missing');
-      }
-
-      const africastalking = Africastalking({ apiKey, username });
-      const sms = africastalking.SMS;
-
-      const payload: any = {
-        to: finalPhone,
-        message: message,
-      };
-
-      if (senderId) {
-        payload.from = senderId;
-      }
-
-      let response = await sms.send(payload);
-      let messageData = response.SMSMessageData;
-      let recipients = messageData?.Recipients || [];
-
-      if (recipients.length === 0) {
-        const errorMessage = messageData?.Message || '';
-        if (errorMessage.includes('InvalidSenderId') && payload.from) {
-          delete payload.from;
-          response = await sms.send(payload);
-          messageData = response.SMSMessageData;
-          recipients = messageData?.Recipients || [];
-        }
-      }
-
-      if (recipients.length === 0) {
-        const errorMessage = messageData?.Message || 'Zero recipients returned from provider';
-        throw new Error(`Africa's Talking API rejection: ${errorMessage}`);
-      }
-
-      const recipient = recipients[0];
-      const successStatuses = ['Success', 'Sent', 'Queued', 'Buffered'];
-      isSuccess = successStatuses.includes(recipient.status);
-
-      if (isSuccess) {
-        if (recipient.status.toLowerCase() === 'success') finalStatus = 'Success';
-        else if (recipient.status.toLowerCase() === 'sent') finalStatus = 'Sent';
-        else if (recipient.status.toLowerCase() === 'queued') finalStatus = 'Queued';
-        else if (recipient.status.toLowerCase() === 'buffered') finalStatus = 'Buffered';
-        else finalStatus = recipient.status;
-      }
-
-      providerMessageId = recipient.messageId;
-      providerStatus = recipient.status;
-
-      // 2. Perform Atomic Deduction via RPC (eliminates read-modify-write race)
-      const adminSupabase = await createAdminClient();
-      
-      const { data: debited, error: debitError } = await adminSupabase.rpc('decrement_wallet_balance', {
-        p_tenant_id: churchId,
-        p_amount: balance.sms_rate
-      });
-
-      if (debitError || !debited) {
-        console.error('[SMS Actions] Atomic wallet deduction failed:', debitError);
-        throw new Error('Insufficient SMS balance or wallet update failed');
-      }
-
-      const { data: walletData } = await adminSupabase
-        .from('wallets')
-        .select('id')
-        .eq('tenant_id', churchId)
-        .maybeSingle();
-
-      // Record transaction history
-      const { error: ledgerErr } = await adminSupabase.from('wallet_transactions').insert({
-        tenant_id: churchId,
-        wallet_id: walletData?.id,
-        amount: -balance.sms_rate,
-        type: 'SMS_SENT',
-        description: `Sent 1 SMS to ${finalPhone}`,
-        reference_code: `SMS_${logId}_${Date.now()}`,
-        status: 'success',
-        idempotency_key: logId,
-        product: 'sms',
-        reference_id: logId
-      });
-
-      if (ledgerErr) {
-        console.error('[SMS Actions] Ledger write failed after debit:', ledgerErr);
-        throw new Error(`Ledger write failed after debit: ${ledgerErr.message}`);
+      if (ledgerError) {
+        console.error('[SMS Actions] Ledger write failed after debit:', ledgerError);
+        throw new Error(`Ledger write failed after debit: ${ledgerError.message}`);
       }
     }
 
-    // 3. Update Log to Final Status
     const { error: updateError } = await supabase
       .schema('church')
       .from('sms_logs')
       .update({
-        status: finalStatus,
-        message_provider_status: providerStatus,
-        provider_message_id: providerMessageId,
-        error_message: isSuccess ? null : providerStatus,
-        updated_at: new Date().toISOString()
+        status: 'Queued',
+        message_provider_status: result.status,
+        provider_message_id: result.smsId,
+        error_message: null,
+        updated_at: new Date().toISOString(),
       })
       .eq('id', logId);
 
@@ -259,29 +120,21 @@ export async function sendSingleSMS({
       throw new Error(`Failed to finalize SMS log: ${updateError.message}`);
     }
 
-    if (isSuccess) {
-      return {
-        success: true,
-        messageId: providerMessageId,
-        status: providerStatus
-      };
-    } else {
-      return {
-        success: false,
-        error: `SMS delivery failed: ${providerStatus}`,
-        details: null
-      };
-    }
-
-  } catch (error: any) {
-    // Update log to FAILED on exception
+    return {
+      success: true,
+      messageId: result.smsId,
+      status: result.status,
+      deduplicated: result.deduplicated,
+    };
+  } catch (error) {
+    const messageText = error instanceof Error ? error.message : String(error);
     await supabase
       .schema('church')
       .from('sms_logs')
-      .update({ 
-        status: 'FAILED', 
-        error_message: error.message || String(error),
-        updated_at: new Date().toISOString()
+      .update({
+        status: 'FAILED',
+        error_message: messageText,
+        updated_at: new Date().toISOString(),
       })
       .eq('id', logId);
 

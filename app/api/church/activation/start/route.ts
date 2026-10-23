@@ -13,8 +13,6 @@ export async function POST(req: NextRequest) {
 
     const body = await req.json().catch(() => ({}));
     const phoneNumber = (body.phoneNumber || body.phone || '').trim();
-    const provider = (body.provider || 'najiki').trim();
-    const amount = Number(body.amount) || undefined;
     const plan = (body.plan || '').trim() || undefined;
     const churchIdParam = (body.churchId || '').trim();
     const churchSlugParam = (body.churchSlug || '').trim();
@@ -100,8 +98,6 @@ export async function POST(req: NextRequest) {
       churchId: targetTenantId,
       userId: user.id,
       phoneNumber,
-      provider,
-      amount,
       plan
     });
 

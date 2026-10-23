@@ -39,12 +39,9 @@ export async function proxy(request: NextRequest) {
     // CSRF Protection for state-changing API mutations (F7 remediation)
     const PUBLIC_EXEMPT_ROUTES = new Set([
       '/api/auth/logout',
-      '/api/billing/topup',
       '/api/sms/process-queue',
       '/api/najiki/webhook',
       '/api/webhooks/najiki',
-      '/api/relworx/webhook',
-      '/api/church/activation/webhook'
     ]);
 
     if (url.pathname.startsWith('/api/') && ['POST', 'PUT', 'DELETE', 'PATCH'].includes(request.method)) {

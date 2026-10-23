@@ -112,8 +112,7 @@ export async function POST(req: Request) {
           return;
         }
 
-        const isSandbox = process.env.AT_USERNAME?.toLowerCase() === 'sandbox';
-        const senderId = (!isSandbox && church?.sender_id) ? church.sender_id.trim() : '';
+        const senderId = church?.sender_id?.trim() || '';
 
         // F-02: the send loop, the progress total and the idempotency key are all
         // driven by rows that were re-read from the database for THIS tenant.
@@ -133,7 +132,7 @@ export async function POST(req: Request) {
               .replace(/{name}/gi, recipient.full_name || 'Member')
               .replace(/{first_name}/gi, (recipient.full_name || 'Member').split(' ')[0]);
 
-            const result = await sendSingleSMS({
+            await sendSingleSMS({
               supabase,
               phoneNumber: recipient.phone_number,
               message: personalizedMessage,
@@ -143,13 +142,9 @@ export async function POST(req: Request) {
               balance
             });
 
-            if (result.success) {
-              sendUpdate({ type: 'success', recipient: recipient.full_name, index: i });
-              // Optimistically update local balance to stop early if needed
-              balance.balance -= balance.sms_rate;
-            } else {
-              sendUpdate({ type: 'error', recipient: recipient.full_name, error: result.error });
-            }
+            sendUpdate({ type: 'success', recipient: recipient.full_name, index: i });
+            // Optimistically update local balance to stop early if needed.
+            balance.balance -= balance.sms_rate;
           } catch (err: any) {
             console.error(`Broadcast error for ${recipient.full_name}:`, err);
             sendUpdate({ type: 'error', recipient: recipient.full_name, error: err.message });

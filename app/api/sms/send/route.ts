@@ -120,11 +120,7 @@ export async function POST(req: Request) {
     }
 
     // 6. Determine Sender ID
-    const isSandbox = process.env.AT_USERNAME?.toLowerCase() === 'sandbox';
-    let senderId = '';
-    if (!isSandbox && authorizedChurch.sender_id && authorizedChurch.sender_id.trim() !== '') {
-       senderId = authorizedChurch.sender_id.trim();
-    }
+    const senderId = authorizedChurch.sender_id?.trim() || '';
 
     // 7. Use the shared sending logic
     try {

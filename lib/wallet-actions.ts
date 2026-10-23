@@ -9,13 +9,10 @@ import {
   buildChurchTopupPayment,
   createNajikiPayment,
   getNajikiConfig,
-  isNajikiConfigured,
 } from '@/lib/najiki/client';
 
-// Helper to format phone for Najiki (E.164 without plus or 256...)
-// Na'jiki's LivePay adapter runs its own normalizePhone() (which strips the
-// leading '+') before calling the provider, so the digits-only E.164 form is
-// the canonical thing to send: 2567XXXXXXXX.
+// Format phone numbers for Na'jiki's payment API as digits-only E.164.
+// Na'jiki normalizes provider-specific formatting internally.
 function formatPhoneForNajiki(phone: string): string {
   const normalized = normalizeUgPhone(phone);
   if (normalized) {
@@ -222,22 +219,27 @@ export async function initiateDonationPayment(params: {
   phoneNumber: string;
   category: string;
 }) {
+  const { churchId, amount, phoneNumber, category } = params;
+  const DONATION_MIN = 500, DONATION_MAX = 10_000_000;
+  if (!Number.isFinite(amount) || amount < DONATION_MIN || amount > DONATION_MAX) {
+    return { error: `Donation must be between ${DONATION_MIN.toLocaleString()} and ${DONATION_MAX.toLocaleString()} UGX` };
+  }
+
+  const cleanPhone = normalizeUgPhone(phoneNumber);
+  if (!cleanPhone) {
+    return { error: 'Please enter a valid Ugandan phone number' };
+  }
+
+  // Fail closed if Na'jiki is unavailable or unconfigured. No downstream
+  // payment credentials or direct-provider fallback are supported here.
   try {
-    const { churchId, amount, phoneNumber, category } = params;
+    getNajikiConfig();
+  } catch (error: any) {
+    return { error: error?.message ?? "Na'jiki payment service is not configured" };
+  }
 
-    const DONATION_MIN = 500, DONATION_MAX = 10_000_000;
-    if (!Number.isFinite(amount) || amount < DONATION_MIN || amount > DONATION_MAX) {
-      return { error: `Donation must be between ${DONATION_MIN.toLocaleString()} and ${DONATION_MAX.toLocaleString()} UGX` };
-    }
-
-    const cleanPhone = normalizeUgPhone(phoneNumber);
-    if (!cleanPhone) {
-      return { error: 'Please enter a valid Ugandan phone number' };
-    }
-
+  try {
     const supabaseAdmin = await createAdminClient();
-
-    // Verify the church exists
     const { data: church } = await supabaseAdmin
       .schema('church')
       .from('churches')
@@ -245,11 +247,16 @@ export async function initiateDonationPayment(params: {
       .eq('id', churchId)
       .maybeSingle();
 
-    if (!church) {
-      return { error: 'Church not found' };
-    }
+    if (!church) return { error: 'Church not found' };
 
-    // Ensure wallet exists for this church
+    const { data: tenant } = await supabaseAdmin
+      .from('tenants')
+      .select('code')
+      .eq('id', churchId)
+      .maybeSingle();
+    const tenantCode = tenant?.code || church.slug || process.env.NAJIKI_TENANT_CODE;
+    if (!tenantCode) return { error: 'Tenant code not configured' };
+
     let { data: wallet } = await supabaseAdmin
       .from('wallets')
       .select('id')
@@ -259,25 +266,22 @@ export async function initiateDonationPayment(params: {
     if (!wallet?.id) {
       await supabaseAdmin
         .from('tenants')
-        .upsert({ id: churchId, app_type: 'church', name: church?.slug || 'Church' });
-
+        .upsert({ id: churchId, app_type: 'church', name: church.slug || 'Church' });
       const { data: newWallet } = await supabaseAdmin
         .from('wallets')
         .upsert({ tenant_id: churchId, balance: 0, sms_rate: 70, app_type: 'church' })
         .select('id')
         .single();
-
       wallet = newWallet;
     }
+    if (!wallet?.id) return { error: 'Wallet record missing for church' };
 
     const reference = `DON-${crypto.randomUUID()}`;
     const idempotencyKey = `ik_don_${crypto.randomUUID()}`;
-
-    // Record pending transaction in wallet_transactions
     const { error: txError } = await supabaseAdmin.from('wallet_transactions').insert({
       tenant_id: churchId,
-      wallet_id: wallet?.id,
-      amount: amount,
+      wallet_id: wallet.id,
+      amount,
       direction: 'credit',
       currency: 'UGX',
       type: 'DONATION',
@@ -285,7 +289,7 @@ export async function initiateDonationPayment(params: {
       reference_code: reference,
       idempotency_key: idempotencyKey,
       status: 'pending',
-      note: `Category: ${category || 'general'}`
+      note: `Category: ${category || 'general'}`,
     });
 
     if (txError) {
@@ -293,89 +297,43 @@ export async function initiateDonationPayment(params: {
       return { error: 'Unable to initiate payment record' };
     }
 
-    // Call payment provider (LivePay or Najiki)
-    const apiKey = process.env.LIVEPAY_API_KEY;
-    const accountNumber = process.env.LIVEPAY_ACCOUNT_NO;
+    const paymentRequest = buildChurchDonationPayment({
+      churchId,
+      tenantCode,
+      churchName: church.name,
+      reference,
+      idempotencyKey,
+      amount,
+      phoneNumber: formatPhoneForNajiki(cleanPhone),
+      category,
+    });
 
-    if (apiKey && accountNumber) {
-      const livepayRes = await fetch('https://livepay.me/api/collect-money', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${apiKey}`,
-        },
-        body: JSON.stringify({
-          accountNumber,
-          phoneNumber: cleanPhone,
-          amount: amount,
-          currency: 'UGX',
-          reference: reference.slice(0, 24).replace(/-/g, ''),
-          description: `${church.name || 'Church'} ${category || 'giving'}`,
-        }),
-      });
-
-      const data = await livepayRes.json();
-      if (!livepayRes.ok) {
-        await supabaseAdmin
-          .from('wallet_transactions')
-          .update({ status: 'failed', raw_provider_response: data })
-          .eq('reference_code', reference);
-        return { error: data.error || 'Payment request failed' };
-      }
+    try {
+      const result = await createNajikiPayment(paymentRequest);
+      await supabaseAdmin
+        .from('wallet_transactions')
+        .update({
+          raw_provider_response: result,
+          reference: result.reference ?? null,
+        })
+        .eq('reference_code', reference);
 
       return { success: true, message: 'Payment prompt sent to your phone!', reference };
+    } catch (error: any) {
+      await supabaseAdmin
+        .from('wallet_transactions')
+        .update({
+          status: 'failed',
+          raw_provider_response: {
+            error: error?.message ?? String(error),
+            status: error?.status ?? null,
+          },
+        })
+        .eq('reference_code', reference);
+      return { error: error?.message || 'Payment request failed' };
     }
-
-    // Fallback: Najiki payment provider if configured.
-    //
-    // This used to authenticate with `x-api-key: <key>`. Na'jiki's
-    // POST /api/payments reads ONLY `Authorization: Bearer <api key>` and
-    // answers 401 "Missing or invalid authorization header" for anything else,
-    // so every donation routed through this branch was rejected before it
-    // reached the provider.
-    if (isNajikiConfigured()) {
-      const formattedPhone = formatPhoneForNajiki(cleanPhone);
-      const paymentRequest = buildChurchDonationPayment({
-        churchId,
-        // Na'jiki resolves the tenant as (applicationId, code); the church slug
-        // is what the tenant row is keyed on.
-        tenantCode: church.slug,
-        churchName: church.name,
-        reference,
-        idempotencyKey,
-        amount,
-        phoneNumber: formattedPhone,
-        category,
-      });
-
-      let result;
-      try {
-        result = await createNajikiPayment(paymentRequest);
-      } catch (err: any) {
-        console.error('[Donation] Najiki rejected the payment:', err?.message ?? err);
-        await supabaseAdmin
-          .from('wallet_transactions')
-          .update({
-            status: 'failed',
-            raw_provider_response: { error: err?.message ?? String(err), status: err?.status ?? null }
-          })
-          .eq('reference_code', reference);
-        return { error: err?.message || 'Payment request failed' };
-      }
-
-      if (result.paymentId) {
-        await supabaseAdmin
-          .from('wallet_transactions')
-          .update({ raw_provider_response: result, reference: result.reference ?? null })
-          .eq('reference_code', reference);
-      }
-
-      return { success: true, message: 'Payment prompt sent to your phone!', reference };
-    }
-
-    return { error: 'Payment gateway is not currently configured.' };
-  } catch (err: any) {
-    console.error('[Donation] Error:', err);
-    return { error: 'Payment processing error: ' + (err.message || 'Unknown error') };
+  } catch (error: any) {
+    console.error('[Donation] Error:', error);
+    return { error: 'Payment processing error: ' + (error.message || 'Unknown error') };
   }
 }

@@ -29,6 +29,7 @@ import { revalidatePath } from 'next/cache';
 import {
   verifyNajikiWebhook,
   classifyNajikiWebhook,
+  activationMerchantReference,
   parsePaymentNotification,
   parseSmsDeliveryNotification,
   transactionLookupCandidates,
@@ -37,6 +38,7 @@ import {
   planPaymentReceiptSms,
 } from '@/lib/najiki/webhook';
 import { sendSingleSMS } from '@/lib/sms-actions';
+import { confirmActivationPayment } from '@/lib/activation';
 
 export const dynamic = 'force-dynamic';
 
@@ -139,7 +141,7 @@ async function handleSmsDelivery(payload: any) {
   const updateObj = {
     status: normalisedStatus,
     message_provider_status: smsStatus,
-    // Na'jiki's provider message id is the Africa's Talking id.
+    // Opaque downstream provider message id supplied by Na'jiki.
     provider_message_id: providerId || smsId,
     updated_at: new Date().toISOString()
   };
@@ -180,6 +182,30 @@ async function handlePaymentNotification(payload: any) {
   }
 
   const { reference, status, amount } = notification;
+
+  // Activation payments are settled here too: there is no separate public
+  // callback that can activate a church. This branch runs only after the
+  // shared Na'jiki signature verification above succeeds.
+  if (notification.metadata.type === 'church_activation') {
+    const merchantReference = activationMerchantReference(notification);
+    if (!merchantReference) {
+      return NextResponse.json({ error: 'Missing activation merchant reference' }, { status: 400 });
+    }
+
+    const outcome = await confirmActivationPayment({
+      merchantReference,
+      providerTransactionId: notification.providerPaymentId || notification.paymentIntentId,
+      paidAmount: Number(amount ?? 0),
+      currency: notification.currency || 'UGX',
+      status: String(status).toUpperCase(),
+    });
+
+    if (!outcome.success) {
+      return NextResponse.json({ error: outcome.error || 'Activation settlement failed' }, { status: 422 });
+    }
+    return NextResponse.json({ received: true, type: 'church_activation' });
+  }
+
   const db = getServiceDb();
 
   // Na'jiki never echoes our own reference back at the top level, so the
@@ -337,10 +363,9 @@ async function sendPaymentReceipt(db: any, notification: any, tx: any) {
       return;
     }
 
-    const isSandbox = process.env.AT_USERNAME?.toLowerCase() === 'sandbox';
-    const senderId = !isSandbox && church?.sender_id ? church.sender_id.trim() : '';
+    const senderId = church?.sender_id?.trim() || '';
 
-    const result = await sendSingleSMS({
+    await sendSingleSMS({
       supabase: db,
       phoneNumber: plan.to,
       message: plan.message,
@@ -350,11 +375,7 @@ async function sendPaymentReceipt(db: any, notification: any, tx: any) {
       balance: wallet
     });
 
-    if (!result.success) {
-      console.warn('[Najiki Webhook] Receipt SMS was not delivered:', result.error);
-    } else {
-      console.log(`[Najiki Webhook] Receipt SMS queued for ${plan.to} (${plan.idempotencyKey})`);
-    }
+    console.log(`[Najiki Webhook] Receipt SMS queued for ${plan.to} (${plan.idempotencyKey})`);
   } catch (err: any) {
     console.error('[Najiki Webhook] Receipt SMS failed (payment is unaffected):', err?.message ?? err);
   }

@@ -208,6 +208,14 @@ export function parsePaymentNotification(
   }
 }
 
+/** Extract an activation ledger reference only from our typed Na'jiki metadata. */
+export function activationMerchantReference(
+  notification: NajikiPaymentNotification
+): string | null {
+  if (notification.metadata.type !== 'church_activation') return null
+  return str(notification.metadata.merchantReference)
+}
+
 export function parseSmsDeliveryNotification(
   payload: unknown
 ): NajikiSmsDeliveryNotification | null {
