@@ -124,6 +124,14 @@ describe('configuration', () => {
     assert.equal(najikiPaymentTypeCode('donation'), 'donation')
 
     process.env.NAJIKI_PAYMENT_TYPE_TOPUP = 'topup'
+    assert.equal(najikiPaymentTypeCode('topup'), 'BUY_SMS')
+    delete process.env.NAJIKI_PAYMENT_TYPE_TOPUP
+
+    process.env.NAJIKI_PAYMENT_TYPE_ACTIVATION = 'church_activation'
+    assert.equal(najikiPaymentTypeCode('activation'), 'ACCOUNT_ACTIVATION')
+    delete process.env.NAJIKI_PAYMENT_TYPE_ACTIVATION
+
+    process.env.NAJIKI_PAYMENT_TYPE_TOPUP = 'tenant_topup'
     assert.throws(() => najikiPaymentTypeCode('topup'), /must be a Na'jiki platform-fee payment type/)
     delete process.env.NAJIKI_PAYMENT_TYPE_TOPUP
 

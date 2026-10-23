@@ -175,6 +175,11 @@ const DEFAULT_PAYMENT_TYPE_CODES: Record<NajikiPaymentPurpose, string> = {
   activation: 'ACCOUNT_ACTIVATION',
 }
 
+const LEGACY_PAYMENT_TYPE_CODES: Partial<Record<NajikiPaymentPurpose, Record<string, string>>> = {
+  topup: { TOPUP: 'BUY_SMS' },
+  activation: { CHURCH_ACTIVATION: 'ACCOUNT_ACTIVATION' },
+}
+
 /**
  * Resolve a payment type against Na'jiki's real contract. Payment types are
  * application-scoped and auto-registered by the gateway when unknown, so they
@@ -185,7 +190,12 @@ const DEFAULT_PAYMENT_TYPE_CODES: Record<NajikiPaymentPurpose, string> = {
  */
 export function najikiPaymentTypeCode(kind: NajikiPaymentPurpose): string {
   const envName = `NAJIKI_PAYMENT_TYPE_${kind.toUpperCase()}`
-  const code = (process.env[envName] ?? '').trim() || DEFAULT_PAYMENT_TYPE_CODES[kind]
+  let code = (process.env[envName] ?? '').trim() || DEFAULT_PAYMENT_TYPE_CODES[kind]
+  const legacyCode = LEGACY_PAYMENT_TYPE_CODES[kind]?.[code.toUpperCase()]
+  if (legacyCode) {
+    console.warn(`[Najiki] ${envName}=${code} is legacy; using ${legacyCode} to preserve platform-fee routing.`)
+    code = legacyCode
+  }
   const isPlatformType = platformPaymentTypeCodeSet.has(code.toUpperCase())
 
   if ((kind === 'topup' || kind === 'activation') && !isPlatformType) {

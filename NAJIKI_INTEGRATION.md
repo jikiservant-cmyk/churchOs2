@@ -301,9 +301,10 @@ Summary of integration fixes:
    SMS-credit purchases default to `BUY_SMS` and activations to
    `ACCOUNT_ACTIVATION`, both in Na'jiki's platform-fee set; donations default
    to the ordinary tenant collection type `donation`. Overrides for the first
-   two must remain in Na'jiki's platform-fee set. Update deployed legacy values
-   (`topup` / `church_activation`) to `BUY_SMS` / `ACCOUNT_ACTIVATION`; the client
-   now fails fast rather than silently routing those fees as tenant collections.
+   two must remain in Na'jiki's platform-fee set. Legacy defaults
+   (`topup` / `church_activation`) are normalized to `BUY_SMS` /
+   `ACCOUNT_ACTIVATION` with a warning, but update deployed environment values to
+   remove the warning. Any other non-platform override fails before dispatch.
 3. **`tenantCode` for each church.** Na'jiki resolves tenants per application.
    churchOs sends `public.tenants.code` → church slug → `NAJIKI_TENANT_CODE`.
    Whichever is used must exist as a tenant row in Na'jiki, otherwise the
