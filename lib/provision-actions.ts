@@ -1,8 +1,8 @@
 'use server';
 
 import { createAdminClient, createClient } from '@/lib/supabase/server';
-import { redirect } from 'next/navigation';
 import { headers } from 'next/headers';
+import { canProvisionChurch } from '@/lib/provisioning-security';
 
 export type ProvisionState = {
   error?: string;
@@ -52,13 +52,21 @@ export async function provisionTenant(prevState: ProvisionState, formData: FormD
   }
 
   // 1.1 Check if user already has an active church
-  const { data: existingProfile } = await adminSupabase
+  const { data: existingProfile, error: profileLookupError } = await adminSupabase
     .from('admin_profiles')
     .select('tenant_id, role')
     .eq('id', user.id)
     .maybeSingle();
 
+  if (profileLookupError) {
+    console.error('[Provisioning] Could not verify existing profile:', profileLookupError);
+    return { error: 'Unable to verify your church account. Please try again.' };
+  }
+
   if (existingProfile?.tenant_id) {
+    if (!['pastor', 'admin'].includes(existingProfile.role)) {
+      return { error: 'Only a church pastor or administrator can access this workspace.' };
+    }
     const { data: existingChurch } = await adminSupabase
       .schema('church')
       .from('churches')
@@ -97,137 +105,23 @@ export async function provisionTenant(prevState: ProvisionState, formData: FormD
     const sanitizedSlug = rawSlug.normalize('NFKC');
 
     currentStep = 'provisioning-church';
-    let tenantId: string | null = null;
-    let rpcError: any = null;
-
-    // Check slug uniqueness
-    const { data: slugCheck } = await adminSupabase
-      .schema('church')
-      .from('churches')
-      .select('id')
-      .ilike('slug', sanitizedSlug)
-      .maybeSingle();
-
-    if (slugCheck) {
-      return { error: 'Workspace URL (slug) is already taken. Please choose another.' };
+    if (!canProvisionChurch(existingProfile)) {
+      return { error: 'This account already belongs to a church or is not eligible to create one.' };
     }
 
-    // Resolve denomination invite if provided
-    let denomId: string | null = null;
-    if (inviteCode) {
-      const { data: invite } = await adminSupabase
-        .schema('church')
-        .from('denomination_invites')
-        .select('denomination_id')
-        .ilike('code', inviteCode)
-        .maybeSingle();
-      if (invite?.denomination_id) {
-        denomId = invite.denomination_id;
-      }
-    }
+    // Keep all identity, invite, and tenant writes inside the verified atomic
+    // RPC. Never fall back to service-role table inserts if the RPC fails.
+    const { data: tenantId, error: provisionError } = await supabase.rpc('provision_church_v3', {
+      p_user_id: user.id,
+      p_name: sanitizedName,
+      p_slug: sanitizedSlug,
+      p_role: 'pastor',
+      p_invite_code: inviteCode || null,
+    });
 
-    // If an admin profile already exists for this auth user (e.g. created on auth signup with null tenant_id),
-    // provision the church directly and link the profile to avoid redundant constraint violations
-    if (existingProfile) {
-      const newTenantId = crypto.randomUUID();
-
-      const { error: churchInsertError } = await adminSupabase
-        .schema('church')
-        .from('churches')
-        .insert({
-          id: newTenantId,
-          name: sanitizedName,
-          slug: sanitizedSlug,
-          app_type: 'church',
-          denomination_id: denomId,
-          activation_status: 'pending_payment'
-        });
-
-      if (churchInsertError) {
-        console.error('[Provisioning] Church insert error:', churchInsertError);
-        return { error: churchInsertError.message || 'Failed to create church workspace' };
-      }
-
-      const { error: profileError } = await adminSupabase
-        .from('admin_profiles')
-        .upsert({
-          id: user.id,
-          email: user.email,
-          tenant_id: newTenantId,
-          role: 'pastor',
-          full_name: sanitizedName,
-          app_type: 'church'
-        }, { onConflict: 'id' });
-
-      if (profileError) {
-        console.error('[Provisioning] Profile upsert error:', profileError);
-      }
-
-      tenantId = newTenantId;
-    } else {
-      // If no admin profile exists yet, attempt the atomic provision_church_v3 RPC
-      try {
-        const v3Response = await supabase
-          .rpc('provision_church_v3', {
-            p_user_id: user.id,
-            p_name: sanitizedName,
-            p_slug: sanitizedSlug,
-            p_role: 'pastor',
-            p_invite_code: inviteCode || null,
-          });
-
-        if (v3Response.error) {
-          rpcError = v3Response.error;
-        } else {
-          tenantId = v3Response.data;
-        }
-      } catch (v3CallErr: any) {
-        rpcError = v3CallErr;
-      }
-
-      // Direct fallback if RPC fails
-      if (rpcError) {
-        const newTenantId = crypto.randomUUID();
-
-        const { error: churchInsertError } = await adminSupabase
-          .schema('church')
-          .from('churches')
-          .insert({
-            id: newTenantId,
-            name: sanitizedName,
-            slug: sanitizedSlug,
-            app_type: 'church',
-            denomination_id: denomId,
-            activation_status: 'pending_payment'
-          });
-
-        if (churchInsertError) {
-          console.error('[Provisioning] Direct church insert error:', churchInsertError);
-          return { error: churchInsertError.message || 'Failed to create church workspace' };
-        }
-
-        const { error: profileError } = await adminSupabase
-          .from('admin_profiles')
-          .upsert({
-            id: user.id,
-            email: user.email,
-            tenant_id: newTenantId,
-            role: 'pastor',
-            full_name: sanitizedName,
-            app_type: 'church'
-          }, { onConflict: 'id' });
-
-        if (profileError) {
-          console.error('[Provisioning] Direct profile upsert error:', profileError);
-        }
-
-        tenantId = newTenantId;
-        rpcError = null;
-      }
-    }
-
-    if (!tenantId) {
-      throw new Error('Provisioning failed: No tenant ID returned');
+    if (provisionError || !tenantId) {
+      console.error('[Provisioning] Atomic church provisioning failed:', provisionError);
+      return { error: 'Church setup could not be completed. Check the invite code or try again.' };
     }
 
     console.log('[Provisioning] Success!', { tenantId, slug: sanitizedSlug });
