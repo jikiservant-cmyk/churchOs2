@@ -66,7 +66,9 @@ export default function GivingPortal({ church }: { church: Church }) {
       // Only acknowledge the request after Na'jiki accepts the payment initiation.
       // The confirmation SMS should be sent from the server-side webhook once payment
       // is actually confirmed by Na'jiki via its signed webhook — NOT here on the client.
-      alert('Payment prompt sent to your phone! Please approve it on your handset.');
+      alert(result.status === 'pending_confirmation'
+        ? (result.message || 'Payment request is pending confirmation. Do not submit another payment yet.')
+        : (result.message || 'Payment prompt sent to your phone! Please approve it on your handset.'));
     } catch (err) {
       console.error('Error during submission:', err);
       alert('Something went wrong. Please try again.');

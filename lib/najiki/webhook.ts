@@ -101,32 +101,31 @@ export function verifyNajikiWebhook(input: {
     }
   }
 
-  const timestamp = Number(timestampHeader)
-  if (!Number.isFinite(timestamp)) {
+  if (!/^\d{10,13}$/.test(timestampHeader)) {
     return { ok: false, reason: 'Malformed X-Najiki-Timestamp' }
   }
+  const timestamp = Number(timestampHeader)
 
   if (Math.abs(now - timestamp) > maxSkewMs) {
     return { ok: false, reason: 'Timestamp outside the 5-minute replay window' }
   }
 
-  // `t=<timestamp>,v=<hmac>`
-  const parts = String(signatureHeader)
-    .split(',')
-    .map((p) => p.trim())
-  const t = parts.find((p) => p.startsWith('t='))?.slice(2)
-  const v = parts.find((p) => p.startsWith('v='))?.slice(2)
-
-  if (!v || !/^[0-9a-f]+$/i.test(v)) {
+  // Require the single canonical timestamp/signature pair. Duplicate fields,
+  // extra parameters, and timestamp normalization are intentionally rejected.
+  const match = /^t=(\d{10,13}),v=([0-9a-f]{64})$/i.exec(signatureHeader)
+  if (!match) {
+    if (!/(?:^|,)\s*t=/.test(signatureHeader)) {
+      return { ok: false, reason: 'Missing signed timestamp in X-Najiki-Signature' }
+    }
     return { ok: false, reason: 'Malformed X-Najiki-Signature' }
   }
-  // The timestamp in the signature is mandatory and must match the signed header.
-  if (t === undefined || !/^\d+$/.test(t) || Number(t) !== timestamp) {
+  if (match[1] !== timestampHeader) {
     return { ok: false, reason: 'Signature timestamp does not match the header' }
   }
+  const v = match[2]
 
   const expected = createHmac('sha256', secret)
-    .update(`${timestamp}.${rawBody}`)
+    .update(`${timestampHeader}.${rawBody}`)
     .digest('hex')
 
   const a = Buffer.from(expected, 'utf8')
@@ -176,6 +175,44 @@ export interface NajikiSmsDeliveryNotification {
   providerId: string | null
   recipient: string | null
   applicationCode: string | null
+}
+
+export type WalletSettlementDecision = 'credited' | 'already_credited' | 'conflict' | 'retry'
+
+/** Interpret the atomic settlement RPC response fail-closed. */
+export function classifyWalletSettlementResult(result: unknown): WalletSettlementDecision {
+  if (!result || typeof result !== 'object' || Array.isArray(result)) return 'retry'
+  const response = result as Record<string, unknown>
+  if (response.result === 'credited') return 'credited'
+  if (response.result === 'duplicate' && response.previous_status === 'success') {
+    return 'already_credited'
+  }
+  if (response.result === 'duplicate') return 'conflict'
+  return 'retry'
+}
+
+/** Require an exact amount and currency match before invoking the credit RPC. */
+export function validateWalletPaymentAmount(input: {
+  receivedAmount: number | null
+  receivedCurrency: string | null
+  expectedAmount: unknown
+  expectedCurrency?: unknown
+}): { ok: true } | { ok: false; reason: 'missing_amount' | 'invalid_amount' | 'amount_mismatch' | 'missing_currency' | 'currency_mismatch' } {
+  const expectedAmount = Number(input.expectedAmount)
+  if (input.receivedAmount === null || input.receivedAmount === undefined) {
+    return { ok: false, reason: 'missing_amount' }
+  }
+  if (!Number.isSafeInteger(expectedAmount) || expectedAmount <= 0 ||
+      !Number.isSafeInteger(input.receivedAmount) || input.receivedAmount <= 0) {
+    return { ok: false, reason: 'invalid_amount' }
+  }
+  if (input.receivedAmount !== expectedAmount) return { ok: false, reason: 'amount_mismatch' }
+  if (!input.receivedCurrency?.trim()) return { ok: false, reason: 'missing_currency' }
+  const expectedCurrency = String(input.expectedCurrency ?? 'UGX').trim().toUpperCase()
+  if (input.receivedCurrency.trim().toUpperCase() !== expectedCurrency) {
+    return { ok: false, reason: 'currency_mismatch' }
+  }
+  return { ok: true }
 }
 
 export type NajikiWebhookKind = 'sms_delivery' | 'payment' | 'unknown'

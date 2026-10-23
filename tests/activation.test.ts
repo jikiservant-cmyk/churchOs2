@@ -26,7 +26,7 @@ describe('Church Workspace Activation Flow Suite', () => {
     assert.match(res.error || '', /reference/i);
   });
 
-  test('fails closed when payment record is not found', async () => {
+  test('fails closed without a non-atomic fallback when the settlement RPC is unavailable', async () => {
     const originalFetch = globalThis.fetch;
     const originalUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
     const originalKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -38,17 +38,11 @@ describe('Church Workspace Activation Flow Suite', () => {
       const url = new URL(typeof input === 'string' || input instanceof URL ? input : input.url);
       requestedPaths.push(url.pathname);
 
-      // Simulate an older database without the atomic RPC, then an empty ledger lookup.
+      // Simulate a missing atomic RPC. The handler must not run direct writes/reads as fallback.
       if (url.pathname.endsWith('/rpc/activate_church_workspace_v2')) {
         return new Response(JSON.stringify({ code: '42883', message: 'function does not exist' }), {
           status: 404,
           headers: { 'content-type': 'application/json' },
-        });
-      }
-      if (url.pathname.endsWith('/activation_payments')) {
-        return new Response('[]', {
-          status: 200,
-          headers: { 'content-type': 'application/json', 'content-range': '0-0/0' },
         });
       }
       throw new Error(`Unexpected Supabase request: ${url.pathname}`);
@@ -63,8 +57,8 @@ describe('Church Workspace Activation Flow Suite', () => {
       });
 
       assert.equal(res.success, false);
-      assert.match(res.error || '', /not found/i);
-      assert.equal(requestedPaths.length, 2);
+      assert.match(res.error || '', /atomic activation settlement/i);
+      assert.deepEqual(requestedPaths, ['/rest/v1/rpc/activate_church_workspace_v2']);
     } finally {
       globalThis.fetch = originalFetch;
       if (originalUrl === undefined) delete process.env.NEXT_PUBLIC_SUPABASE_URL;

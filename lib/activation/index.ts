@@ -1,6 +1,7 @@
 import { createClient as createSupabaseClient } from '@supabase/supabase-js';
 import { randomUUID } from 'crypto';
-import { createNajikiPayment, najikiApplicationCode, najikiPaymentTypeCode } from '../najiki/client.ts';
+import { normalizeUgPhone } from '../utils.ts';
+import { createNajikiPayment, najikiApplicationCode, najikiPaymentTypeCode, NajikiApiError } from '../najiki/client.ts';
 
 export const ACTIVATION_FEE_UGX = 17000;
 export const ACTIVATION_CURRENCY = 'UGX';
@@ -110,6 +111,7 @@ export async function startActivationPayment({
   alreadyActive?: boolean;
   merchantReference?: string;
   providerTransactionId?: string;
+  status?: 'pending_confirmation';
   instructions?: string;
   error?: string;
 }> {
@@ -146,7 +148,7 @@ export async function startActivationPayment({
     .select('code')
     .eq('id', churchId)
     .maybeSingle();
-  const tenantCode = tenant?.code || church.slug || process.env.NAJIKI_TENANT_CODE;
+  const tenantCode = tenant?.code || church.slug;
   if (!tenantCode) {
     return { success: false, error: 'Na\'jiki tenant code is not configured for this church' };
   }
@@ -154,13 +156,10 @@ export async function startActivationPayment({
   // 2. Generate unique merchant reference
   const merchantReference = `ACT-${randomUUID()}`;
 
-  // Clean phone number (canonical E.164 digits-only format, default Uganda 256)
-  let cleanPhone = (phoneNumber || '').replace(/[^0-9]/g, '');
-  if (cleanPhone.startsWith('0')) {
-    cleanPhone = '256' + cleanPhone.substring(1);
-  } else if (!cleanPhone.startsWith('256') && cleanPhone.length === 9) {
-    cleanPhone = '256' + cleanPhone;
-  }
+  // Require a valid Ugandan mobile number before creating a ledger attempt.
+  const normalizedPhone = normalizeUgPhone(phoneNumber || '');
+  if (!normalizedPhone) return { success: false, error: 'Please enter a valid Ugandan mobile number' };
+  const cleanPhone = normalizedPhone.replace('+', '');
 
   // 3. Record pending payment attempt in database ledger
   let validUserId: string | null = null;
@@ -195,8 +194,9 @@ export async function startActivationPayment({
   let providerTxId: string | null = null;
   let instructions = `Payment prompt sent to ${cleanPhone}. Please approve the request of UGX ${chosenAmount.toLocaleString('en-US')} on your mobile handset.`;
 
+  let requestDispatched = false;
   try {
-    const najikiResponse = await createNajikiPayment({
+    const paymentRequest = {
       applicationCode: najikiApplicationCode(),
       tenantCode,
       paymentTypeCode: najikiPaymentTypeCode('activation'),
@@ -213,8 +213,10 @@ export async function startActivationPayment({
         plan: selectedPlan,
         type: 'church_activation'
       }
-    });
+    };
 
+    requestDispatched = true;
+    const najikiResponse = await createNajikiPayment(paymentRequest);
     providerTxId = najikiResponse.paymentId || najikiResponse.reference || null;
     if (providerTxId) {
       await supabase
@@ -225,17 +227,30 @@ export async function startActivationPayment({
     }
   } catch (err: any) {
     const providerNote = err?.message || String(err);
-    console.warn('[Activation] Na\'jiki gateway dispatch note:', providerNote);
+    const definitiveRejection = !requestDispatched || (err instanceof NajikiApiError && err.isClientError);
 
-    await supabase
+    if (!definitiveRejection) {
+      console.warn('[Activation] Payment initiation outcome is ambiguous; leaving attempt pending.');
+      return {
+        success: true,
+        status: 'pending_confirmation',
+        merchantReference,
+        instructions: 'We are confirming whether the payment prompt was received. Do not start another payment yet.',
+      };
+    }
+
+    console.warn('[Activation] Na\'jiki definitively rejected payment initiation:', providerNote);
+    const { error: failUpdateError } = await supabase
       .schema('church')
       .from('activation_payments')
-      .update({
-        status: 'failed',
-        failure_reason: providerNote
-      })
-      .eq('id', paymentRow.id);
+      .update({ status: 'failed', failure_reason: providerNote })
+      .eq('id', paymentRow.id)
+      .eq('status', 'pending');
 
+    if (failUpdateError) {
+      console.error('[Activation] Could not persist payment rejection:', failUpdateError.message);
+      return { success: false, merchantReference, error: 'Payment request was rejected but its status could not be saved' };
+    }
     return { success: false, merchantReference, error: `Na'jiki payment initiation failed: ${providerNote}` };
   }
 
@@ -249,7 +264,7 @@ export async function startActivationPayment({
 
 /**
  * Confirm and verify payment outcome. Called only by the signed Na'jiki webhook.
- * Calls the atomic PostgreSQL RPC activate_church_workspace_v2 with fallback.
+ * Settles exclusively through the atomic PostgreSQL RPC activate_church_workspace_v2.
  */
 export async function confirmActivationPayment({
   merchantReference,
@@ -268,6 +283,7 @@ export async function confirmActivationPayment({
   churchId?: string;
   alreadyProcessed?: boolean;
   activated?: boolean;
+  retryable?: boolean;
   error?: string;
 }> {
   if (!merchantReference) {
@@ -276,7 +292,9 @@ export async function confirmActivationPayment({
 
   const supabase = getAdminClient();
 
-  // Attempt 1: Execute atomic PostgreSQL transaction RPC v2
+  // Settle only through the atomic RPC. A direct-table fallback could mark the
+  // payment paid without activating the church (or the reverse) and cannot
+  // preserve the ledger's idempotency guarantees.
   try {
     const { data: rpcResult, error: rpcError } = await supabase.rpc('activate_church_workspace_v2', {
       p_merchant_reference: merchantReference.trim(),
@@ -287,143 +305,44 @@ export async function confirmActivationPayment({
       p_provider_status: (status || 'SUCCESS').trim().toUpperCase()
     });
 
-    if (!rpcError && rpcResult) {
-      if (rpcResult.success) {
-        return {
-          success: true,
-          churchId: rpcResult.church_id,
-          alreadyProcessed: !!rpcResult.already_processed,
-          activated: !!rpcResult.activated
-        };
-      } else {
-        // A verified terminal failure has been persisted; acknowledge it so
-        // Na'jiki does not retry a business outcome indefinitely.
-        if (
-          ['FAILED', 'EXPIRED', 'CANCELLED'].includes(String(status).toUpperCase()) &&
-          ['FAILED', 'CANCELLED', 'PROVIDER_FAILED', 'INVALID_STATE'].includes(String(rpcResult.code).toUpperCase())
-        ) {
-          return {
-            success: true,
-            churchId: rpcResult.church_id,
-            alreadyProcessed: String(rpcResult.code).toUpperCase() === 'PROVIDER_FAILED',
-            activated: false,
-          };
-        }
-        return {
-          success: false,
-          error: rpcResult.error || `Payment activation failed (${rpcResult.code || 'UNKNOWN'})`
-        };
-      }
+    if (rpcError) {
+      console.error('[Activation] Atomic settlement RPC failed; no fallback was attempted:', rpcError.message);
+      return { success: false, retryable: true, error: 'Atomic activation settlement is temporarily unavailable' };
+    }
+    if (!rpcResult || typeof rpcResult !== 'object') {
+      console.error('[Activation] Atomic settlement RPC returned no structured result.');
+      return { success: false, retryable: true, error: 'Atomic activation settlement returned an invalid result' };
     }
 
-    if (rpcError && rpcError.code !== '42883') {
-      console.warn('[Activation] RPC v2 returned error, evaluating fallback:', rpcError);
+    if (rpcResult.success) {
+      return {
+        success: true,
+        churchId: rpcResult.church_id,
+        alreadyProcessed: !!rpcResult.already_processed,
+        activated: !!rpcResult.activated
+      };
     }
-  } catch (rpcEx) {
-    console.warn('[Activation] RPC v2 execution exception, falling back:', rpcEx);
-  }
 
-  // Attempt 2: Direct fallback logic
-  const { data: payment, error: fetchError } = await supabase
-    .schema('church')
-    .from('activation_payments')
-    .select('*')
-    .eq('merchant_reference', merchantReference)
-    .maybeSingle();
+    // The RPC persists terminal provider failures; acknowledge those business
+    // outcomes so Na'jiki does not retry them indefinitely.
+    if (
+      ['FAILED', 'EXPIRED', 'CANCELLED', 'CANCELED'].includes(String(status).toUpperCase()) &&
+      ['FAILED', 'CANCELLED', 'CANCELED', 'PROVIDER_FAILED'].includes(String(rpcResult.code).toUpperCase())
+    ) {
+      return {
+        success: true,
+        churchId: rpcResult.church_id,
+        alreadyProcessed: String(rpcResult.code).toUpperCase() === 'PROVIDER_FAILED',
+        activated: false,
+      };
+    }
 
-  if (fetchError || !payment) {
-    console.error('[Activation] Payment reference not found:', merchantReference, fetchError);
-    return { success: false, error: 'Payment attempt record not found' };
-  }
-
-  // Idempotency Check
-  if (payment.status === 'paid') {
     return {
-      success: true,
-      alreadyProcessed: true,
-      churchId: payment.church_id,
-      activated: true
+      success: false,
+      error: rpcResult.error || `Payment activation failed (${rpcResult.code || 'UNKNOWN'})`
     };
+  } catch (rpcError: any) {
+    console.error('[Activation] Atomic settlement RPC threw:', rpcError?.message ?? rpcError);
+    return { success: false, retryable: true, error: 'Atomic activation settlement is temporarily unavailable' };
   }
-
-  // Status verification
-  const isSuccessful = ['SUCCESS', 'COMPLETED', 'PAID', 'CONFIRMED'].includes((status || '').toUpperCase());
-
-  if (!isSuccessful) {
-    console.warn('[Activation] Payment marked as failed by provider:', merchantReference, status);
-    await supabase
-      .schema('church')
-      .from('activation_payments')
-      .update({
-        status: 'failed',
-        failure_reason: `Provider reported status: ${status}`,
-        provider_transaction_id: providerTransactionId || payment.provider_transaction_id
-      })
-      .eq('id', payment.id);
-
-    // The signed Na'jiki notification was processed and the payment marked
-    // terminally failed; report success to the webhook caller (not activation).
-    return { success: true, churchId: payment.church_id, activated: false };
-  }
-
-  // Exact amount & currency validation against the recorded payment attempt amount
-  const expectedAmount = Number(payment.amount);
-  if (Number(paidAmount) !== expectedAmount || (currency && currency.toUpperCase() !== ACTIVATION_CURRENCY)) {
-    console.error('[Activation] Reconciliation mismatch:', {
-      expected: { amount: expectedAmount, currency: ACTIVATION_CURRENCY },
-      received: { amount: paidAmount, currency }
-    });
-
-    await supabase
-      .schema('church')
-      .from('activation_payments')
-      .update({
-        status: 'failed',
-        failure_reason: `Amount mismatch: expected UGX ${expectedAmount}, received ${currency} ${paidAmount}`,
-        provider_transaction_id: providerTransactionId || payment.provider_transaction_id
-      })
-      .eq('id', payment.id);
-
-    return { success: false, error: 'Reconciliation error: payment amount mismatch' };
-  }
-
-  // Verification Success
-  const now = new Date().toISOString();
-
-  const { error: updatePaymentError } = await supabase
-    .schema('church')
-    .from('activation_payments')
-    .update({
-      status: 'paid',
-      verified_at: now,
-      provider_transaction_id: providerTransactionId || payment.provider_transaction_id
-    })
-    .eq('id', payment.id);
-
-  if (updatePaymentError) {
-    console.error('[Activation] Failed to update payment record:', updatePaymentError);
-    return { success: false, error: 'Database update failed' };
-  }
-
-  const { error: updateChurchError } = await supabase
-    .schema('church')
-    .from('churches')
-    .update({
-      activation_status: 'active',
-      activation_paid_at: now
-    })
-    .eq('id', payment.church_id);
-
-  if (updateChurchError) {
-    console.error('[Activation] Failed to activate church:', updateChurchError);
-    return { success: false, error: 'Failed to update church activation status' };
-  }
-
-  console.log(`[Activation] Church ${payment.church_id} successfully activated via payment ${merchantReference}!`);
-
-  return {
-    success: true,
-    churchId: payment.church_id,
-    activated: true
-  };
 }

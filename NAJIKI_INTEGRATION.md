@@ -306,10 +306,11 @@ Summary of integration fixes:
    `ACCOUNT_ACTIVATION` with a warning, but update deployed environment values to
    remove the warning. Any other non-platform override fails before dispatch.
 3. **`tenantCode` for each church.** Na'jiki resolves tenants per application.
-   churchOs sends `public.tenants.code` → church slug → `NAJIKI_TENANT_CODE`.
-   Whichever is used must exist as a tenant row in Na'jiki, otherwise the
-   payment is rejected 404. This is per-church configuration and cannot be
-   verified from here.
+   churchOs sends the matched `public.tenants.code` or that church's slug.
+   A global tenant-code fallback is intentionally not used, because it can
+   misroute one church's payment to another tenant. The selected code must exist
+   as a tenant row in Na'jiki, otherwise the payment is rejected 404. This
+   per-church mapping cannot be verified from here.
 4. **Webhook secret vs API key.** Na'jiki signs with the application's
    `webhookSecret` when present and falls back to the API key. churchOs accepts
    either, in that order. If a church app row has a distinct `webhookSecret`,

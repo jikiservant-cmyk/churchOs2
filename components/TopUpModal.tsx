@@ -14,6 +14,7 @@ interface TopUpModalProps {
 export default function TopUpModal({ churchId, isOpen, onClose }: TopUpModalProps) {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isSuccess, setIsSuccess] = useState(false);
+  const [pendingConfirmationMessage, setPendingConfirmationMessage] = useState<string | null>(null);
   const [amount, setAmount] = useState('5000');
   const [customAmount, setCustomAmount] = useState('');
   const [phone, setPhone] = useState('');
@@ -27,6 +28,7 @@ export default function TopUpModal({ churchId, isOpen, onClose }: TopUpModalProp
       document.addEventListener('keydown', handleEscape);
       document.body.style.overflow = 'hidden';
       setIsSuccess(false); // Reset success state when opening
+      setPendingConfirmationMessage(null);
     }
 
     return () => {
@@ -40,9 +42,10 @@ export default function TopUpModal({ churchId, isOpen, onClose }: TopUpModalProp
   async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     
-    const finalAmount = customAmount ? parseInt(customAmount, 10) : parseInt(amount, 10);
+    const rawAmount = customAmount || amount;
+    const finalAmount = Number(rawAmount);
     
-    if (isNaN(finalAmount) || finalAmount < 2000) {
+    if (!/^\d+$/.test(rawAmount) || !Number.isSafeInteger(finalAmount) || finalAmount < 2000) {
       toast.error('Please enter a valid amount (minimum 2,000 UGX)');
       return;
     }
@@ -59,10 +62,9 @@ export default function TopUpModal({ churchId, isOpen, onClose }: TopUpModalProp
       const formData = new FormData(e.currentTarget);
       formData.set('amount', finalAmount.toString());
       
-      console.log('Submitting top-up for amount:', finalAmount, 'phone:', phone);
-
       const result = await initiateNajikiPayment(formData);
       if (result?.success) {
+        setPendingConfirmationMessage(result.status === 'pending_confirmation' ? result.message ?? null : null);
         setIsSuccess(true);
         toast.success(result.message || 'Payment prompt sent!');
         // Don't close immediately, show the success state
@@ -115,7 +117,9 @@ export default function TopUpModal({ churchId, isOpen, onClose }: TopUpModalProp
             <div className="space-y-2">
               <h3 className="text-xl font-bold text-[#1E1208]">Prompt Sent!</h3>
               <p className="text-sm text-[#9A7E65] leading-relaxed">
-                Please check your phone (<strong>{phone}</strong>) and enter your Mobile Money PIN to complete the payment of <strong>UGX {(customAmount ? parseInt(customAmount) : parseInt(amount)).toLocaleString()}</strong>.
+                {pendingConfirmationMessage || (
+                  <>Please check your phone (<strong>{phone}</strong>) and enter your Mobile Money PIN to complete the payment of <strong>UGX {(customAmount ? Number(customAmount) : Number(amount)).toLocaleString()}</strong>.</>
+                )}
               </p>
             </div>
             <button

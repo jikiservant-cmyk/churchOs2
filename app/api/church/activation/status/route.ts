@@ -14,50 +14,24 @@ export async function GET(req: NextRequest) {
     }
 
     const adminSupabase = await createAdminClient();
-    let { data: profile } = await adminSupabase
+    const { data: profile, error: profileError } = await adminSupabase
       .from('admin_profiles')
-      .select('tenant_id')
+      .select('tenant_id, role')
       .eq('id', user.id)
       .maybeSingle();
 
-    if (!profile?.tenant_id && user.email) {
-      const { data: emailProfile } = await adminSupabase
-        .from('admin_profiles')
-        .select('tenant_id')
-        .eq('email', user.email)
-        .maybeSingle();
-
-      if (emailProfile?.tenant_id) {
-        profile = emailProfile;
-      }
+    if (profileError) {
+      return NextResponse.json({ error: 'Unable to verify church administrator access' }, { status: 500 });
+    }
+    if (!profile?.tenant_id || !['pastor', 'admin'].includes(profile.role)) {
+      return NextResponse.json({ error: 'A linked pastor or administrator account is required' }, { status: 403 });
     }
 
-    let targetTenantId = profile?.tenant_id;
-
-    // Check query params if tenant_id was not yet attached to profile
-    const churchSlugParam = req.nextUrl.searchParams.get('church_slug') || req.nextUrl.searchParams.get('slug');
     const churchIdParam = req.nextUrl.searchParams.get('church_id');
-
-    if (!targetTenantId && churchIdParam) {
-      targetTenantId = churchIdParam;
+    if (churchIdParam && churchIdParam !== profile.tenant_id) {
+      return NextResponse.json({ error: 'Access denied for this church workspace' }, { status: 403 });
     }
-
-    if (!targetTenantId && churchSlugParam) {
-      const { data: church } = await adminSupabase
-        .schema('church')
-        .from('churches')
-        .select('id')
-        .eq('slug', churchSlugParam)
-        .maybeSingle();
-
-      if (church) {
-        targetTenantId = church.id;
-      }
-    }
-
-    if (!targetTenantId) {
-      return NextResponse.json({ error: 'No church workspace linked' }, { status: 400 });
-    }
+    const targetTenantId = profile.tenant_id;
 
     const status = await getChurchActivationStatus(targetTenantId);
 
