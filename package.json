@@ -1,5 +1,5 @@
 {
-  "name": "ai-studio-applet",
+  "name": "churchos-app",
   "version": "0.1.0",
   "private": true,
   "scripts": {
@@ -7,20 +7,21 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint .",
-    "test": "node --test tests/*.test.ts",
-    "clean": "next clean"
+    "test": "node --test tests/*.test.ts && tsx --test tests/sms-topup-e2e.ts",
+    "clean": "next clean",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck && npm run lint && npm test && npm run security:audit && npm run build",
+    "security:audit": "npm audit --omit=dev --audit-level=moderate"
   },
   "dependencies": {
     "@fontsource/outfit": "^5.3.0",
     "@fontsource/playfair-display": "^5.3.0",
-    "@google/genai": "^1.17.0",
     "@hookform/resolvers": "^5.2.1",
     "@supabase/ssr": "^0.10.2",
     "@supabase/supabase-js": "^2.103.2",
     "@types/uuid": "^10.0.0",
     "@upstash/ratelimit": "^2.0.8",
     "@upstash/redis": "^1.38.0",
-    "africastalking": "^0.7.9",
     "autoprefixer": "^10.4.21",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
@@ -28,7 +29,7 @@
     "jose": "^6.2.3",
     "lucide-react": "^0.553.0",
     "motion": "^12.23.24",
-    "next": "^15.4.9",
+    "next": "^16.4.2",
     "papaparse": "^5.5.3",
     "postcss": "^8.5.6",
     "react": "^19.2.1",
@@ -40,16 +41,21 @@
   },
   "devDependencies": {
     "@tailwindcss/postcss": "4.1.11",
-    "@tailwindcss/typography": "^0.5.19",
     "@types/node": "^20",
     "@types/papaparse": "^5.5.2",
     "@types/react": "^19",
     "@types/react-dom": "^19",
-    "eslint": "8.57.0",
-    "eslint-config-next": "15.0.0",
-    "firebase-tools": "^15.0.0",
+    "eslint": "^9.39.5",
+    "eslint-config-next": "^16.4.2",
     "tailwindcss": "4.1.11",
+    "tsx": "^4.23.15",
     "tw-animate-css": "^1.4.0",
-    "typescript": "5.9.3"
+    "typescript": "5.9.3",
+    "zod": "^4.6.7"
+  },
+  "overrides": {
+    "qs": "^6.16.1",
+    "fast-glob": "^3.3.3",
+    "micromatch": "^4.0.8"
   }
 }

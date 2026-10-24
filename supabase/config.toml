@@ -1,0 +1,2 @@
+[functions.church-najiki-dispatch]
+verify_jwt = true

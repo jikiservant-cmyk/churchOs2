@@ -42,6 +42,7 @@ export default function SMSWalletWidget({
               <p className="text-[10px] font-medium text-[#9A7E65] mt-0.5">
                 UGX {balanceUgx.toLocaleString()} ({leftoverUGX} leftover)
               </p>
+
             </div>
             <div className="flex flex-col items-end gap-2">
               {remainingSMS < 50 && (

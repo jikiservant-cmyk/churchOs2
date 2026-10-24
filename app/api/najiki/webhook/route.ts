@@ -29,14 +29,20 @@ import { revalidatePath } from 'next/cache';
 import {
   verifyNajikiWebhook,
   classifyNajikiWebhook,
+  activationMerchantReference,
+  activationProviderTransactionId,
   parsePaymentNotification,
   parseSmsDeliveryNotification,
   transactionLookupCandidates,
   notificationTenantCode,
   notificationChurchId,
   planPaymentReceiptSms,
+  validateWalletPaymentAmount,
 } from '@/lib/najiki/webhook';
+import { getNajikiPayment } from '@/lib/najiki/client';
+import { settleWalletPayment } from '@/lib/najiki/settlement';
 import { sendSingleSMS } from '@/lib/sms-actions';
+import { confirmActivationPayment } from '@/lib/activation';
 
 export const dynamic = 'force-dynamic';
 
@@ -55,17 +61,42 @@ export async function POST(request: Request) {
     return await handlePost(request)
   } catch (err: any) {
     // A 500 tells Na'jiki to retry, which is what we want for a transient
-    // failure — and every handler below is idempotent (the wallet credit is
-    // guarded by billing_events, the receipt SMS by its own key). It must never
-    // be an unhandled rejection.
+    // failure — and each handler below is idempotent (the atomic wallet RPC
+    // locks the ledger row; receipt SMS uses its own idempotency key). It must
+    // never be an unhandled rejection.
     console.error('[Najiki Webhook] Unhandled error:', err?.message ?? err)
     return NextResponse.json({ error: 'Internal Server Error' }, { status: 500 })
   }
 }
 
 async function handlePost(request: Request) {
-  // 1. Read the raw body first — the HMAC covers the exact bytes received.
-  const rawBody = await request.text();
+  // 1. Bound request size before parsing; signature verification still uses the exact bytes.
+  const MAX_WEBHOOK_BYTES = 64 * 1024;
+  const contentLength = Number(request.headers.get('content-length'));
+  if (Number.isFinite(contentLength) && contentLength > MAX_WEBHOOK_BYTES) {
+    return NextResponse.json({ error: 'Payload too large' }, { status: 413 });
+  }
+  if (!request.body) return NextResponse.json({ error: 'Missing request body' }, { status: 400 });
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      totalBytes += value.byteLength;
+      if (totalBytes > MAX_WEBHOOK_BYTES) {
+        await reader.cancel();
+        return NextResponse.json({ error: 'Payload too large' }, { status: 413 });
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const rawBody = new TextDecoder('utf-8', { fatal: true }).decode(
+    Buffer.concat(chunks.map((chunk) => Buffer.from(chunk)))
+  );
 
   // 2. Verify the signature (fail closed, replay-protected).
   const secret = process.env.NAJIKI_WEBHOOK_SECRET || process.env.NAJIKI_API_KEY;
@@ -100,10 +131,10 @@ async function handlePost(request: Request) {
     return handlePaymentNotification(payload);
   }
 
-  // Unknown shape: acknowledge so Na'jiki does not retry forever, but make the
-  // noise visible — a silently dropped event is how a payment goes missing.
-  console.warn('[Najiki Webhook] Unrecognised payload shape, acknowledging without processing:', JSON.stringify(payload).slice(0, 500));
-  return NextResponse.json({ received: true, ignored: true });
+  // Do not acknowledge an unknown signed shape: a payment payload contract
+  // change must be surfaced for reconciliation rather than silently dropped.
+  console.warn('[Najiki Webhook] Unrecognised signed payload shape; refusing to acknowledge it.');
+  return NextResponse.json({ error: 'Unsupported webhook payload' }, { status: 400 });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -112,57 +143,72 @@ async function handlePost(request: Request) {
 
 async function handleSmsDelivery(payload: any) {
   const notification = parseSmsDeliveryNotification(payload)!;
-  const { smsId, reference: smsRef, status: smsStatus, providerId } = notification;
+  const { smsId, reference: smsRef, status: smsStatus } = notification;
 
   console.log(`[Najiki Webhook] SMS Delivery Update for ${smsRef || smsId}: ${smsStatus}`);
 
   // Validate before use — these values arrive in the request body.
   const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-  const KEY_RE = /^[A-Za-z0-9_.:-]{1,80}$/;
-  const safeId = typeof smsId === 'string' && UUID_RE.test(smsId) ? smsId : null;
+  // Na'jiki returns opaque non-UUID smsId values; accept only URL/filter-safe IDs.
+  const SAFE_SMS_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
+  const KEY_RE = /^[A-Za-z0-9_.:-]{1,255}$/;
+  const safeId = typeof smsId === 'string' && (UUID_RE.test(smsId) || SAFE_SMS_ID_RE.test(smsId)) ? smsId : null;
   const safeRef = typeof smsRef === 'string' && KEY_RE.test(smsRef) ? smsRef : null;
 
   if (!safeId && !safeRef) {
-    console.warn('[Najiki Webhook] SMS delivery update without a usable id/reference');
-    return NextResponse.json({ received: true });
+    console.warn('[Najiki Webhook] SMS delivery update has no usable id/reference.');
+    return NextResponse.json({ error: 'Malformed SMS delivery notification' }, { status: 400 });
+  }
+
+  const normalizedProviderStatus = typeof smsStatus === 'string' ? smsStatus.trim().toLowerCase() : '';
+  if (!['delivered', 'failed'].includes(normalizedProviderStatus)) {
+    console.warn('[Najiki Webhook] Ignoring unsupported SMS delivery status:', normalizedProviderStatus || '(empty)');
+    return NextResponse.json({ error: 'Unsupported SMS delivery status' }, { status: 422 });
   }
 
   const db = getServiceDb();
+  const normalisedStatus = normalizedProviderStatus;
 
-  const normalisedStatus =
-    smsStatus?.toUpperCase() === 'DELIVERED'
-      ? 'DELIVERED'
-      : smsStatus?.toUpperCase() === 'FAILED'
-        ? 'FAILED'
-        : smsStatus;
-
-  const updateObj = {
+  const updateObj: Record<string, unknown> = {
     status: normalisedStatus,
     message_provider_status: smsStatus,
-    // Na'jiki's provider message id is the Africa's Talking id.
-    provider_message_id: providerId || smsId,
-    updated_at: new Date().toISOString()
+    updated_at: new Date().toISOString(),
   };
+  if (safeId) {
+    // Keep Na'jiki's own smsId as the stable callback key. providerId is an
+    // opaque downstream carrier ID and is not the ID sent in future callbacks.
+    updateObj.provider_message_id = safeId;
+    updateObj.najiki_sms_id = safeId;
+  }
+  if (safeRef) updateObj.najiki_reference = safeRef;
 
-  // Resolve the owning tenant from the row itself, then update with an
-  // explicit predicate on each candidate column — no string-built filters.
   const orConditions = [
     safeId ? `provider_message_id.eq.${safeId}` : null,
-    safeRef ? `idempotency_key.eq.${safeRef}` : null,
+    safeId ? `najiki_sms_id.eq.${safeId}` : null,
+    safeRef ? `najiki_reference.eq.${safeRef}` : null,
   ].filter(Boolean).join(',');
 
-  const { data: owners } = await db
+  // Resolve owner(s) first, then keep every update tenant-scoped.
+  const { data: owners, error: ownerError } = await db
     .schema('church')
     .from('sms_logs')
-    .select('tenant_id, provider_message_id, idempotency_key')
+    .select('tenant_id')
     .or(orConditions)
-    .limit(1);
+    .limit(10);
+
+  if (ownerError) {
+    console.error('[Najiki Webhook] Failed to resolve SMS delivery owner:', ownerError.message);
+    return NextResponse.json({ error: 'Delivery update could not be recorded' }, { status: 500 });
+  }
 
   for (const owner of owners ?? []) {
-    let q = db.schema('church').from('sms_logs').update(updateObj)
-      .eq('tenant_id', owner.tenant_id); // tenant scope, always
-    q = safeId ? q.eq('provider_message_id', safeId) : q.eq('idempotency_key', safeRef!);
-    await q;
+    const { error: updateError } = await db.schema('church').from('sms_logs').update(updateObj)
+      .eq('tenant_id', owner.tenant_id)
+      .or(orConditions);
+    if (updateError) {
+      console.error('[Najiki Webhook] Failed to record SMS delivery update:', updateError.message);
+      return NextResponse.json({ error: 'Delivery update could not be recorded' }, { status: 500 });
+    }
   }
 
   return NextResponse.json({ received: true, eventType: 'SMS_DELIVERY_UPDATE' });
@@ -174,13 +220,117 @@ async function handleSmsDelivery(payload: any) {
 
 async function handlePaymentNotification(payload: any) {
   const notification = parsePaymentNotification(payload);
-  if (!notification || !notification.paymentIntentId) {
-    console.warn('[Najiki Webhook] Payment notification without a paymentIntentId');
-    return NextResponse.json({ received: true });
+  if (!notification || !notification.paymentIntentId || !notification.status) {
+    console.warn('[Najiki Webhook] Malformed payment notification; required identifiers/status missing.');
+    return NextResponse.json({ error: 'Malformed payment notification' }, { status: 400 });
   }
 
   const { reference, status, amount } = notification;
   const db = getServiceDb();
+
+  // Activation payments are settled here too: there is no separate public
+  // callback that can activate a church. This branch runs only after the
+  // shared Na'jiki signature verification above succeeds.
+  if (notification.metadata.type === 'church_activation') {
+    const merchantReference = activationMerchantReference(notification);
+    if (!merchantReference) {
+      return NextResponse.json({ error: 'Missing activation merchant reference' }, { status: 400 });
+    }
+
+    const { data: activationPayment, error: activationLookupError } = await db
+      .schema('church')
+      .from('activation_payments')
+      .select('church_id, provider')
+      .eq('merchant_reference', merchantReference)
+      .maybeSingle();
+    if (activationLookupError) {
+      console.error('[Najiki Webhook] Activation ledger lookup failed:', activationLookupError.message);
+      return NextResponse.json({ error: 'Activation settlement is temporarily unavailable' }, { status: 500 });
+    }
+    if (!activationPayment) {
+      return NextResponse.json({ error: 'Activation ledger transaction not found' }, { status: 500 });
+    }
+    if (activationPayment.provider !== 'najiki') {
+      return NextResponse.json({ error: 'Activation provider mismatch' }, { status: 403 });
+    }
+
+    const churchId = notificationChurchId(notification);
+    if (!churchId || churchId !== activationPayment.church_id) {
+      console.error('[Najiki Webhook] Activation church identity mismatch; rejecting settlement.');
+      return NextResponse.json({ error: 'Activation church mismatch' }, { status: 403 });
+    }
+    const tenantCode = notificationTenantCode(notification);
+    if (!tenantCode) {
+      return NextResponse.json({ error: 'Activation tenant code missing' }, { status: 422 });
+    }
+    const { data: tenant, error: tenantError } = await db
+      .from('tenants')
+      .select('id')
+      .eq('code', tenantCode.trim())
+      .maybeSingle();
+    if (tenantError) {
+      return NextResponse.json({ error: 'Activation tenant verification is temporarily unavailable' }, { status: 500 });
+    }
+    if (!tenant || tenant.id !== activationPayment.church_id) {
+      return NextResponse.json({ error: 'Activation tenant mismatch' }, { status: 403 });
+    }
+
+    const isSuccess = String(status).trim().toLowerCase() === 'success';
+    let providerTransactionId = activationProviderTransactionId(notification);
+
+    if (isSuccess &&
+        (!Number.isSafeInteger(amount) || (amount ?? 0) <= 0 || !notification.currency?.trim())) {
+      return NextResponse.json({ error: 'Activation payment amount and currency are required' }, { status: 422 });
+    }
+
+    // Never substitute Na'jiki's paymentIntentId for the downstream transaction
+    // ID. If the signed callback omits providerPaymentId, reconcile by Na'jiki's
+    // reference and require the status endpoint to confirm the same successful
+    // intent, church, amount, currency, and canonical provider ID.
+    if (isSuccess && !providerTransactionId) {
+      try {
+        if (!reference) throw new Error('Missing Na\'jiki payment reference');
+        const reconciled = await getNajikiPayment(reference);
+        const reconciledProviderId = reconciled.providerPaymentId?.trim() || null;
+        const matchesCallback =
+          reconciled.id === notification.paymentIntentId &&
+          reconciled.reference === reference &&
+          reconciled.status.trim().toLowerCase() === 'success' &&
+          reconciled.externalEntityId === churchId &&
+          reconciled.amount === amount &&
+          reconciled.currency.trim().toUpperCase() === notification.currency?.trim().toUpperCase();
+
+        if (matchesCallback && reconciledProviderId) {
+          providerTransactionId = reconciledProviderId;
+        }
+      } catch (reconcileError) {
+        console.warn('[Najiki Webhook] Could not reconcile activation providerPaymentId yet:', reconcileError instanceof Error ? reconcileError.message : reconcileError);
+      }
+
+      if (!providerTransactionId) {
+        return NextResponse.json(
+          { error: 'Canonical providerPaymentId is not available yet; activation settlement deferred' },
+          { status: 503, headers: { 'Retry-After': '30' } },
+        );
+      }
+    }
+
+    const outcome = await confirmActivationPayment({
+      merchantReference,
+      providerTransactionId: providerTransactionId ?? undefined,
+      paidAmount: Number(amount ?? 0),
+      currency: notification.currency || 'UGX',
+      status: String(status).toUpperCase(),
+    });
+
+    if (!outcome.success) {
+      return NextResponse.json(
+        { error: outcome.error || 'Activation settlement failed' },
+        { status: outcome.retryable ? 500 : 422 },
+      );
+    }
+    return NextResponse.json({ received: true, type: 'church_activation' });
+  }
 
   // Na'jiki never echoes our own reference back at the top level, so the
   // lookup order matters: our reference (carried in metadata.churchReference),
@@ -188,11 +338,15 @@ async function handlePaymentNotification(payload: any) {
   // the idempotency key.
   let tx: any = null;
   for (const candidate of transactionLookupCandidates(notification)) {
-    const { data } = await db
+    const { data, error: lookupError } = await db
       .from('wallet_transactions')
       .select('*')
       .eq(candidate.column, candidate.value)
       .maybeSingle();
+    if (lookupError) {
+      console.error('[Najiki Webhook] Ledger lookup failed:', lookupError.message);
+      return NextResponse.json({ error: 'Payment settlement is temporarily unavailable' }, { status: 500 });
+    }
     if (data) {
       tx = data;
       break;
@@ -200,55 +354,54 @@ async function handlePaymentNotification(payload: any) {
   }
 
   if (!tx) {
-    console.warn(
-      '[Najiki Webhook] Transaction not found for reference:', reference,
-      'or paymentIntentId:', notification.paymentIntentId
-    );
-    return NextResponse.json({ received: true });
+    console.warn('[Najiki Webhook] Signed payment notification did not match a ledger transaction.');
+    // Retry: the ledger row may be temporarily unavailable/replicated late.
+    return NextResponse.json({ error: 'Payment ledger transaction not found' }, { status: 500 });
   }
 
-  // Keep Na'jiki's reference on the row so a later manual reconciliation (or a
-  // GET /api/payments/:reference status check) can find it.
-  if (reference && tx.reference !== reference) {
-    await db.from('wallet_transactions').update({ reference }).eq('id', tx.id);
-  }
-
-  // Tenant guard. Na'jiki puts tenantCode in the *metadata* we sent, not at the
-  // top level of the notification.
+  // Prefer Na'jiki's resolved top-level tenantCode; fall back to our metadata
+  // for compatibility with older notifications.
   const tenantCode = notificationTenantCode(notification);
-  if (tenantCode) {
-    const { data: tenant } = await db
-      .from('tenants')
-      .select('id')
-      .eq('code', tenantCode.trim())
-      .maybeSingle();
+  if (!tenantCode) {
+    return NextResponse.json({ error: 'Payment tenant code missing' }, { status: 422 });
+  }
+  const { data: tenant, error: tenantError } = await db
+    .from('tenants')
+    .select('id')
+    .eq('code', tenantCode.trim())
+    .maybeSingle();
 
-    if (tenant && tenant.id !== tx.tenant_id) {
-      console.error(`[Najiki Webhook] Tenant mismatch! Payload tenant ${tenant.id} != tx tenant ${tx.tenant_id}`);
-      return NextResponse.json({ error: 'Tenant mismatch' }, { status: 403 });
-    }
+  if (tenantError) {
+    console.error('[Najiki Webhook] Tenant verification failed:', tenantError.message);
+    return NextResponse.json({ error: 'Payment settlement is temporarily unavailable' }, { status: 500 });
+  }
+  if (!tenant || tenant.id !== tx.tenant_id) {
+    console.error('[Najiki Webhook] Tenant identity mismatch; rejecting settlement.');
+    return NextResponse.json({ error: 'Tenant mismatch' }, { status: 403 });
   }
 
   // Cross-check the church id we sent as `externalEntityId` / metadata.churchId
   // against the row we are about to credit.
   const churchId = notificationChurchId(notification);
-  if (churchId && churchId !== tx.tenant_id) {
-    console.error(`[Najiki Webhook] Church mismatch! Payload church ${churchId} != tx tenant ${tx.tenant_id}`);
+  if (!churchId || churchId !== tx.tenant_id) {
+    console.error('[Najiki Webhook] Church identity mismatch; rejecting settlement.');
     return NextResponse.json({ error: 'Tenant mismatch' }, { status: 403 });
   }
 
-  // Underpayment guard: never credit more than the member actually paid.
-  if (amount !== null && amount !== undefined) {
-    const incomingAmount = Number(amount);
-    if (!isNaN(incomingAmount) && incomingAmount < tx.amount) {
-      console.error(`[Najiki Webhook] Underpayment detected! Expected ${tx.amount}, got ${incomingAmount}`);
-      return NextResponse.json({ error: 'Amount mismatch' }, { status: 400 });
+  // Persist the provider reference only after identity checks have passed.
+  if (reference && tx.reference !== reference) {
+    const { error: referenceError } = await db.from('wallet_transactions')
+      .update({ reference })
+      .eq('id', tx.id);
+    if (referenceError) {
+      console.error('[Najiki Webhook] Failed to persist provider reference:', referenceError.message);
+      return NextResponse.json({ error: 'Payment settlement is temporarily unavailable' }, { status: 500 });
     }
   }
 
   // ── Terminal failure ───────────────────────────────────────────────────────
   if (TERMINAL_FAILURE_STATUSES.includes(String(status).toLowerCase())) {
-    await db
+    const { error: failureUpdateError } = await db
       .from('wallet_transactions')
       .update({
         status: 'failed',
@@ -259,42 +412,90 @@ async function handlePaymentNotification(payload: any) {
       .eq('id', tx.id)
       .eq('status', 'pending');
 
-    console.log(`[Najiki Webhook] Payment ${status}: ${notification.failureReason}, ref: ${reference}`);
+    if (failureUpdateError) {
+      console.error('[Najiki Webhook] Could not persist terminal payment failure:', failureUpdateError.message);
+      return NextResponse.json({ error: 'Payment status could not be recorded' }, { status: 500 });
+    }
+    console.log(`[Najiki Webhook] Payment ${status} received for ledger transaction.`);
     return NextResponse.json({ received: true });
   }
 
   // ── Success ────────────────────────────────────────────────────────────────
   if (String(status).toLowerCase() === 'success') {
-    try {
-      // Credit the wallet first. The receipt SMS is only ever sent after this
-      // has succeeded — see planPaymentReceiptSms() and the sequencing note in
-      // NAJIKI_INTEGRATION.md.
-      const { data: rpcResult, error: rpcErr } = await db.rpc('process_topup_webhook', {
-        p_reference: tx.reference_code || reference,
-        p_tenant_id: tx.tenant_id,
-        p_amount: tx.amount,
-        p_payload: payload
-      });
-
-      if (rpcErr) {
-        console.warn('[Najiki Webhook] process_topup_webhook RPC failed, falling back to manual:', rpcErr);
-        await handleSuccessManually(db, tx, payload);
-      } else {
-        console.log('[Najiki Webhook] RPC succeeded:', rpcResult);
-      }
-
-      revalidatePath('/', 'layout');
-      console.log('[Najiki Webhook] Success! Wallet credited. Amount:', tx.amount);
-
-      await sendPaymentReceipt(db, notification, tx);
-
-      return NextResponse.json({ received: true });
-    } catch (fallbackErr) {
-      await handleSuccessManually(db, tx, payload);
-      revalidatePath('/', 'layout');
-      await sendPaymentReceipt(db, notification, tx).catch(() => undefined);
-      return NextResponse.json({ received: true });
+    // This RPC is specifically scoped to public BUY_SMS payment intents. Do not
+    // route donations or unrelated payment products through it.
+    if (notification.paymentTypeCode !== 'BUY_SMS') {
+      return NextResponse.json({ error: 'Only BUY_SMS payments can settle the SMS wallet' }, { status: 422 });
     }
+
+    const amountCheck = validateWalletPaymentAmount({
+      receivedAmount: notification.amount,
+      receivedCurrency: notification.currency,
+      expectedAmount: tx.amount,
+      expectedCurrency: tx.currency || 'UGX',
+    });
+    if (!amountCheck.ok) {
+      return NextResponse.json({ error: 'Amount or currency mismatch' }, { status: 422 });
+    }
+
+    // The RPC finds the app's ledger row by payment_intent_id. Normally the
+    // initiation action persists this link before the member approves the
+    // handset prompt. If the webhook wins that race, repair the link only for a
+    // matching signed callback and a still-pending row.
+    if (!tx.payment_intent_id) {
+      const { data: linkedRow, error: linkError } = await db
+        .from('wallet_transactions')
+        .update({ payment_intent_id: notification.paymentIntentId })
+        .eq('id', tx.id)
+        .eq('tenant_id', tx.tenant_id)
+        .eq('status', 'pending')
+        .is('payment_intent_id', null)
+        .select('payment_intent_id')
+        .maybeSingle();
+      if (linkError) {
+        console.error('[Najiki Webhook] Could not link callback payment intent to ledger row:', linkError.message);
+        return NextResponse.json({ error: 'Payment settlement is temporarily unavailable' }, { status: 500 });
+      }
+      if (linkedRow?.payment_intent_id !== notification.paymentIntentId) {
+        // The initiation action may have won the race and attached the same
+        // intent between our initial read and the conditional update.
+        const { data: currentRow, error: currentRowError } = await db
+          .from('wallet_transactions')
+          .select('payment_intent_id')
+          .eq('id', tx.id)
+          .maybeSingle();
+        if (currentRowError) {
+          return NextResponse.json({ error: 'Payment settlement is temporarily unavailable' }, { status: 500 });
+        }
+        if (currentRow?.payment_intent_id !== notification.paymentIntentId) {
+          return NextResponse.json({ error: 'Payment intent does not match the pending wallet transaction' }, { status: 409 });
+        }
+        tx.payment_intent_id = currentRow.payment_intent_id;
+      } else {
+        tx.payment_intent_id = linkedRow.payment_intent_id;
+      }
+    }
+    if (tx.payment_intent_id !== notification.paymentIntentId) {
+      return NextResponse.json({ error: 'Payment intent does not match the pending wallet transaction' }, { status: 409 });
+    }
+
+    // Wallet status and balance must change in the same database transaction;
+    // there is deliberately no manual non-atomic fallback.
+    const settlement = await settleWalletPayment({
+      db,
+      notification,
+      transaction: tx,
+      payload,
+    });
+    if (!settlement.ok) {
+      console.error('[Najiki Webhook] Wallet settlement refused:', settlement.error);
+      return NextResponse.json({ error: settlement.error }, { status: settlement.status });
+    }
+
+    revalidatePath('/', 'layout');
+    console.log('[Najiki Webhook] Wallet settlement confirmed:', settlement.settlement, 'amount:', tx.amount);
+    await sendPaymentReceipt(db, notification, tx);
+    return NextResponse.json({ received: true, settlement: settlement.settlement });
   }
 
   // Na'jiki only notifies on terminal statuses; anything else is unexpected.
@@ -326,64 +527,22 @@ async function sendPaymentReceipt(db: any, notification: any, tx: any) {
 
     if (!plan) return;
 
-    const { data: wallet } = await db
-      .from('wallets')
-      .select('balance, sms_rate')
-      .eq('tenant_id', tx.tenant_id)
-      .maybeSingle();
+    // The Edge dispatcher checks balance through the explicitly verified wallet
+    // mapping and keeps the receipt queued if the church needs a top-up.
 
-    if (!wallet || wallet.balance < wallet.sms_rate) {
-      console.warn('[Najiki Webhook] Skipping receipt SMS: insufficient wallet balance');
-      return;
-    }
+    const senderId = church?.sender_id?.trim() || '';
 
-    const isSandbox = process.env.AT_USERNAME?.toLowerCase() === 'sandbox';
-    const senderId = !isSandbox && church?.sender_id ? church.sender_id.trim() : '';
-
-    const result = await sendSingleSMS({
+    await sendSingleSMS({
       supabase: db,
       phoneNumber: plan.to,
       message: plan.message,
       churchId: tx.tenant_id,
       idempotencyKey: plan.idempotencyKey,
-      senderId,
-      balance: wallet
+      senderId
     });
 
-    if (!result.success) {
-      console.warn('[Najiki Webhook] Receipt SMS was not delivered:', result.error);
-    } else {
-      console.log(`[Najiki Webhook] Receipt SMS queued for ${plan.to} (${plan.idempotencyKey})`);
-    }
+    console.log(`[Najiki Webhook] Receipt SMS queued for ${plan.to} (${plan.idempotencyKey})`);
   } catch (err: any) {
     console.error('[Najiki Webhook] Receipt SMS failed (payment is unaffected):', err?.message ?? err);
   }
-}
-
-async function handleSuccessManually(db: any, tx: any, payload: any) {
-  // Idempotency guard: update status from 'pending' to 'success' atomically
-  const { data: updatedTx, error: updateErr } = await db
-    .from('wallet_transactions')
-    .update({
-      status: 'success',
-      raw_provider_response: payload,
-      updated_at: new Date().toISOString()
-    })
-    .eq('id', tx.id)
-    .eq('status', 'pending')
-    .select('id')
-    .maybeSingle();
-
-  if (updateErr || !updatedTx) {
-    console.warn('[Najiki Webhook] Transaction already processed or cannot transition from pending:', tx.id);
-    return;
-  }
-
-  // Increment wallet balance ONLY for the transaction's verified tenant
-  await db.rpc('increment_wallet_balance', {
-    p_tenant_id: tx.tenant_id,
-    p_amount: tx.amount
-  });
-
-  console.log('[Najiki Webhook] Manual processing successful for tenant:', tx.tenant_id);
 }

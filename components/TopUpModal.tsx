@@ -3,6 +3,7 @@
 import { useState, useEffect } from 'react';
 import { X, Smartphone, CreditCard, Loader2, CheckCircle2, AlertCircle } from 'lucide-react';
 import { initiateNajikiPayment } from '@/lib/wallet-actions';
+import { SMS_TOPUP_MAX_UGX, SMS_TOPUP_MIN_UGX } from '@/lib/money';
 import { toast } from 'sonner';
 
 interface TopUpModalProps {
@@ -14,6 +15,7 @@ interface TopUpModalProps {
 export default function TopUpModal({ churchId, isOpen, onClose }: TopUpModalProps) {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isSuccess, setIsSuccess] = useState(false);
+  const [pendingConfirmationMessage, setPendingConfirmationMessage] = useState<string | null>(null);
   const [amount, setAmount] = useState('5000');
   const [customAmount, setCustomAmount] = useState('');
   const [phone, setPhone] = useState('');
@@ -27,6 +29,7 @@ export default function TopUpModal({ churchId, isOpen, onClose }: TopUpModalProp
       document.addEventListener('keydown', handleEscape);
       document.body.style.overflow = 'hidden';
       setIsSuccess(false); // Reset success state when opening
+      setPendingConfirmationMessage(null);
     }
 
     return () => {
@@ -40,10 +43,18 @@ export default function TopUpModal({ churchId, isOpen, onClose }: TopUpModalProp
   async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     
-    const finalAmount = customAmount ? parseInt(customAmount, 10) : parseInt(amount, 10);
+    const rawAmount = customAmount || amount;
+    const finalAmount = Number(rawAmount);
     
-    if (isNaN(finalAmount) || finalAmount < 2000) {
-      toast.error('Please enter a valid amount (minimum 2,000 UGX)');
+    if (
+      !/^\d+$/.test(rawAmount) ||
+      !Number.isSafeInteger(finalAmount) ||
+      finalAmount < SMS_TOPUP_MIN_UGX ||
+      finalAmount > SMS_TOPUP_MAX_UGX
+    ) {
+      toast.error(
+        `Please enter a whole amount between ${SMS_TOPUP_MIN_UGX.toLocaleString()} and ${SMS_TOPUP_MAX_UGX.toLocaleString()} UGX`,
+      );
       return;
     }
 
@@ -59,10 +70,9 @@ export default function TopUpModal({ churchId, isOpen, onClose }: TopUpModalProp
       const formData = new FormData(e.currentTarget);
       formData.set('amount', finalAmount.toString());
       
-      console.log('Submitting top-up for amount:', finalAmount, 'phone:', phone);
-
       const result = await initiateNajikiPayment(formData);
       if (result?.success) {
+        setPendingConfirmationMessage(result.status === 'pending_confirmation' ? result.message ?? null : null);
         setIsSuccess(true);
         toast.success(result.message || 'Payment prompt sent!');
         // Don't close immediately, show the success state
@@ -115,7 +125,9 @@ export default function TopUpModal({ churchId, isOpen, onClose }: TopUpModalProp
             <div className="space-y-2">
               <h3 className="text-xl font-bold text-[#1E1208]">Prompt Sent!</h3>
               <p className="text-sm text-[#9A7E65] leading-relaxed">
-                Please check your phone (<strong>{phone}</strong>) and enter your Mobile Money PIN to complete the payment of <strong>UGX {(customAmount ? parseInt(customAmount) : parseInt(amount)).toLocaleString()}</strong>.
+                {pendingConfirmationMessage || (
+                  <>Please check your phone (<strong>{phone}</strong>) and enter your Mobile Money PIN to complete the payment of <strong>UGX {(customAmount ? Number(customAmount) : Number(amount)).toLocaleString()}</strong>.</>
+                )}
               </p>
             </div>
             <button
@@ -155,7 +167,7 @@ export default function TopUpModal({ churchId, isOpen, onClose }: TopUpModalProp
               {/* Amount Selection */}
               <div className="space-y-1.5">
                 <label className="text-[10px] font-bold text-[#C8B89A] uppercase tracking-widest ml-1">
-                  Select or Enter Amount (Min 2,000 UGX)
+                  Select or Enter Amount (Min {SMS_TOPUP_MIN_UGX.toLocaleString()} UGX)
                 </label>
                 <div className="grid grid-cols-2 gap-3">
                   {['5000', '10000', '20000', '50000'].map((amt) => (

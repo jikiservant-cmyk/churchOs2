@@ -22,6 +22,7 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { getBroadcastStatus } from '@/lib/queue-actions';
+import { CHURCH_ADMIN_ROLES, hasAllowedRole } from '@/lib/auth-security';
 
 export async function GET(
   _req: Request,
@@ -38,15 +39,18 @@ export async function GET(
   // Get the admin's tenant (multi-tenancy check)
   const { data: profile } = await supabase
     .from('admin_profiles')
-    .select('tenant_id')
+    .select('tenant_id, role')
     .eq('id', user.id)
     .maybeSingle();
 
-  if (!profile?.tenant_id) {
+  if (!profile?.tenant_id || !hasAllowedRole(profile.role, CHURCH_ADMIN_ROLES)) {
     return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
   }
 
   const { broadcastId } = await params;
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(broadcastId)) {
+    return NextResponse.json({ error: 'Invalid broadcast ID' }, { status: 400 });
+  }
   const status = await getBroadcastStatus(broadcastId, profile.tenant_id);
 
   if (!status) {

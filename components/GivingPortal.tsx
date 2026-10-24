@@ -49,7 +49,7 @@ export default function GivingPortal({ church }: { church: Church }) {
         return;
       }
 
-      // 1. Initiate the LivePay payment prompt via server action
+      // Initiate the payment prompt via Na'jiki (the app never calls providers directly).
       const result = await initiateDonationPayment({
         phoneNumber: fullPhone,
         amount: parseInt(amount.replace(/,/g, ''), 10),
@@ -63,10 +63,12 @@ export default function GivingPortal({ church }: { church: Church }) {
         return;
       }
 
-      // 2. Only notify the user AFTER the payment request is accepted by the provider
+      // Only acknowledge the request after Na'jiki accepts the payment initiation.
       // The confirmation SMS should be sent from the server-side webhook once payment
-      // is actually confirmed by the mobile money provider — NOT here on the client.
-      alert('Payment prompt sent to your phone! Please approve it on your handset.');
+      // is actually confirmed by Na'jiki via its signed webhook — NOT here on the client.
+      alert(result.status === 'pending_confirmation'
+        ? (result.message || 'Payment request is pending confirmation. Do not submit another payment yet.')
+        : (result.message || 'Payment prompt sent to your phone! Please approve it on your handset.'));
     } catch (err) {
       console.error('Error during submission:', err);
       alert('Something went wrong. Please try again.');

@@ -80,11 +80,11 @@ export default function ActivationClient({
   const [network, setNetwork] = useState<'mtn' | 'airtel'>('mtn');
   const [isLoading, setIsLoading] = useState(false);
   const [isPolling, setIsPolling] = useState(false);
+  const [initiationAmbiguous, setInitiationAmbiguous] = useState(false);
   const [merchantRef, setMerchantRef] = useState<string | null>(null);
   const [instructions, setInstructions] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isSuccess, setIsSuccess] = useState(false);
-  const [isSimulating, setIsSimulating] = useState(false);
   const [isCheckingStatus, setIsCheckingStatus] = useState(false);
 
   const pollIntervalRef = useRef<NodeJS.Timeout | null>(null);
@@ -107,6 +107,14 @@ export default function ActivationClient({
               router.replace(`/${churchSlug}/admin`);
               router.refresh();
             }, 1800);
+          } else if (
+            merchantRef && data.latestPayment?.merchantReference === merchantRef &&
+            ['failed', 'cancelled'].includes(String(data.latestPayment.status).toLowerCase())
+          ) {
+            setIsPolling(false);
+            setInitiationAmbiguous(false);
+            setErrorMessage('The payment was not completed. No activation was recorded; you may start a new payment.');
+            if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
           }
         }
       } catch (err) {
@@ -118,7 +126,7 @@ export default function ActivationClient({
     return () => {
       if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
     };
-  }, [isPolling, churchSlug, churchId, router]);
+  }, [isPolling, churchSlug, churchId, merchantRef, router]);
 
   const handleStartPayment = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -131,9 +139,7 @@ export default function ActivationClient({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           phoneNumber,
-          provider: 'najiki',
           network,
-          amount: plan.price,
           plan: selected,
           churchId,
           churchSlug
@@ -158,40 +164,13 @@ export default function ActivationClient({
       }
 
       setMerchantRef(data.merchantReference);
+      setInitiationAmbiguous(data.status === 'pending_confirmation');
       setInstructions(data.instructions || 'Please enter your Mobile Money PIN on your handset to approve the transaction.');
       setIsPolling(true);
     } catch (err: any) {
       setErrorMessage(err.message || 'Network connection failed. Please try again.');
     } finally {
       setIsLoading(false);
-    }
-  };
-
-  // Test Simulation Helper
-  const handleSimulatePayment = async () => {
-    if (!merchantRef) return;
-    setIsSimulating(true);
-    try {
-      const res = await fetch('/api/church/activation/simulate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ merchantReference: merchantRef })
-      });
-      const data = await res.json();
-      if (data.success) {
-        setIsPolling(false);
-        setIsSuccess(true);
-        setTimeout(() => {
-          router.replace(`/${churchSlug}/admin`);
-          router.refresh();
-        }, 1500);
-      } else {
-        setErrorMessage(data.error || 'Simulation failed');
-      }
-    } catch (err: any) {
-      setErrorMessage(err.message || 'Simulation error');
-    } finally {
-      setIsSimulating(false);
     }
   };
 
@@ -225,7 +204,7 @@ export default function ActivationClient({
     } catch {
       // Fallback
     }
-    window.location.href = '/';
+    router.replace('/');
   };
 
   return (
@@ -442,7 +421,7 @@ export default function ActivationClient({
         <div 
           className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in duration-200"
           onClick={() => {
-            if (!isLoading && !isPolling) setShowCheckoutModal(false);
+            if (!isLoading) setShowCheckoutModal(false);
           }}
         >
           <div 
@@ -461,7 +440,7 @@ export default function ActivationClient({
               </div>
               <button 
                 onClick={() => setShowCheckoutModal(false)}
-                disabled={isLoading || isPolling}
+                disabled={isLoading}
                 className="p-1.5 text-gray-400 hover:text-black rounded-full hover:bg-gray-100 transition-colors disabled:opacity-40 cursor-pointer"
               >
                 <X size={20} />
@@ -497,7 +476,7 @@ export default function ActivationClient({
 
                 <div>
                   <h4 className="text-lg font-semibold text-[#111827]">
-                    Prompt Sent to Handset
+                    {initiationAmbiguous ? 'Confirming Payment Request' : 'Prompt Sent to Handset'}
                   </h4>
                   <p className="text-xs text-[#788598] mt-1.5 leading-relaxed">
                     {instructions || `Please enter your Mobile Money PIN on ${phoneNumber} to complete the payment of ${money(plan.price)}.`}
@@ -512,28 +491,9 @@ export default function ActivationClient({
 
                 <div className="flex items-center justify-center gap-2 text-xs text-[#788598]">
                   <Loader2 size={14} className="animate-spin text-[#191919]" />
-                  <span>Waiting for PIN confirmation...</span>
+                  <span>{initiationAmbiguous ? 'Waiting for provider confirmation; please do not submit another payment.' : 'Waiting for PIN confirmation...'}</span>
                 </div>
 
-                <div className="space-y-2 pt-2">
-                  <button
-                    type="button"
-                    onClick={handleSimulatePayment}
-                    disabled={isSimulating}
-                    className="w-full py-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-[15px] font-medium text-xs tracking-wider uppercase transition-all shadow flex items-center justify-center gap-2 cursor-pointer"
-                  >
-                    {isSimulating ? <Loader2 size={14} className="animate-spin" /> : <CheckCircle2 size={14} />}
-                    <span>Simulate PIN Approval (Instant Test)</span>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => setIsPolling(false)}
-                    className="text-xs text-[#788598] hover:text-black transition-colors cursor-pointer"
-                  >
-                    Change Number or Cancel
-                  </button>
-                </div>
               </div>
             ) : (
               /* Form to start payment */

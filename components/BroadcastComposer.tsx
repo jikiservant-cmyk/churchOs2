@@ -99,7 +99,7 @@ export default function BroadcastComposer({ members, churchId }: {
     setProgress({ active: true, total: finalMembers.length, sent: 0, failed: 0 });
     
     try {
-      const response = await fetch('/api/sms/broadcast', {
+      const response = await fetch('/api/sms/enqueue', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -117,49 +117,16 @@ export default function BroadcastComposer({ members, churchId }: {
         })
       });
 
-      if (!response.ok) throw new Error('Failed to start broadcast');
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(result.error || 'Failed to queue broadcast');
 
-      const reader = response.body?.getReader();
-      if (!reader) throw new Error('No reader available');
-
-      const decoder = new TextDecoder();
-      let buffer = '';
-      let stopReading = false;
-
-      while (!stopReading) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
-
-        for (const line of lines) {
-          if (!line.trim()) continue;
-          try {
-            const update = JSON.parse(line);
-
-            if (update.type === 'success') {
-            setProgress(p => ({ ...p, sent: p.sent + 1 }));
-          } else if (update.type === 'error') {
-            setProgress(p => ({ ...p, failed: p.failed + 1 }));
-            console.error(`Broadcast error for ${update.recipient}:`, update.error);
-          } else if (update.type === 'halt') {
-              setStatus({ type: 'error', message: `Halted: ${update.reason}` });
-              stopReading = true;
-              break;
-            }
-          } catch (e) {
-            console.warn("Error parsing stream chunk", e);
-          }
-        }
-      }
-
-      if (!stopReading) {
-        setStatus({ type: 'success', message: 'Broadcast Complete! 🚀' });
-        setMessage('');
-        router.refresh();
-      }
+      setProgress(p => ({ ...p, active: false, total: result.enqueued ?? p.total }));
+      setStatus({
+        type: 'success',
+        message: `${result.enqueued ?? 0} SMS messages queued. Delivery will continue in the background.`,
+      });
+      setMessage('');
+      router.refresh();
     } catch (err: any) {
       console.error(err);
       setStatus({ type: 'error', message: err.message || "Failed to complete broadcast." });

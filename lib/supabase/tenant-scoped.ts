@@ -48,11 +48,11 @@ export async function tenantScopedAdmin(tenantId: string) {
 
     /**
      * Query a table in the church schema, automatically applying the correct tenant filter.
-     * Tables with 'tenant_id': sms_logs, broadcasts, sms_queue.
+     * Tables with 'tenant_id': sms_logs, sms_queue.
      * Tables with 'church_id': members, events, attendance_logs, attendance_flags, visitors, new_converts, etc.
      */
     church<T = any>(table: string) {
-      const TENANT_ID_TABLES = new Set(['sms_logs', 'broadcasts', 'sms_queue']);
+      const TENANT_ID_TABLES = new Set(['sms_logs', 'sms_queue']);
       const tenantColumn = TENANT_ID_TABLES.has(table) ? 'tenant_id' : 'church_id';
       const query = admin.schema('church').from(table);
 

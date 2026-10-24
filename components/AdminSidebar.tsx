@@ -3,7 +3,7 @@
 import { useState } from 'react';
 import Link from 'next/link';
 import Image from 'next/image';
-import { usePathname } from 'next/navigation';
+import { usePathname, useRouter } from 'next/navigation';
 import { LayoutDashboard, Users, UserPlus, MessageSquare, ClipboardList, Settings, LogOut, Menu, X, UserCheck } from 'lucide-react';
 import type { Church } from '@/lib/db';
 
@@ -11,6 +11,7 @@ export default function AdminSidebar({ church, churchSlug }: { church: Church, c
   const [isOpen, setIsOpen] = useState(false);
   const [isLoggingOut, setIsLoggingOut] = useState(false);
   const pathname = usePathname();
+  const router = useRouter();
 
   const handleSignOut = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -35,7 +36,7 @@ export default function AdminSidebar({ church, churchSlug }: { church: Church, c
       // Fallback
     }
 
-    window.location.href = '/';
+    router.replace('/');
   };
 
   const toggleSidebar = () => setIsOpen(!isOpen);

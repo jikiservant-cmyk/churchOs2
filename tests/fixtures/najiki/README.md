@@ -1,6 +1,6 @@
 # Na'jiki Finance — vendored contract fixtures
 
-These three files are copied **verbatim** from the Na'jiki Finance repository so
+These five files are copied **verbatim** from the Na'jiki Finance repository so
 the church app's contract tests validate against Na'jiki's real code rather than
 a hand-written paraphrase of it.
 
@@ -9,9 +9,11 @@ a hand-written paraphrase of it.
 | `money.ts` | `src/lib/money.ts` | `7d6cebe8d1084459fd795a77bde24c82e2553a04` |
 | `schemas.ts` | `src/lib/schemas.ts` | `34614895883b80e5664341ed8e87662c9c085e7e` |
 | `notification-signature.ts` | `src/lib/notification-signature.ts` | `b9381b3e82a134e0ee159fe113a439392ce14b47` |
+| `sms-policy.ts` | `src/lib/sms-policy.ts` | `252ef8c32e951b04107456807457f9e1e358fbae` |
+| `constants.ts` | `src/lib/constants.ts` | `98e62dd6fd7170bc3ef3af5ec82ee51cc07911a2` |
 
 - Repository: <https://github.com/jikiservant-cmyk/najiki-finance2>
-- Pinned commit: `1155fc375047dd2e2f3b937441c1de93b13cd7f9`
+- Pinned commit: `b73a82b9e4411dd27b559927a3b455f833cfb2a7`
 
 **One intentional difference:** `schemas.ts` imports `./money.ts` with an
 explicit extension. Upstream uses the extensionless `./money`, which Node's
@@ -25,9 +27,9 @@ implementation. When Na'jiki's schema changes:
 ```bash
 git clone https://github.com/jikiservant-cmyk/najiki-finance2 /tmp/najiki
 cd /tmp/najiki && git rev-parse HEAD
-cp /tmp/najiki/src/lib/{money,schemas,notification-signature}.ts \
-   /home/user/churchOs1/tests/fixtures/najiki/
-sed -i 's|from "./money"|from "./money.ts"|' /home/user/churchOs1/tests/fixtures/najiki/schemas.ts
+cp /tmp/najiki/src/lib/{money,schemas,notification-signature,sms-policy,constants}.ts \
+   /home/user/churchOs2/tests/fixtures/najiki/
+sed -i 's|from "./money"|from "./money.ts"|' /home/user/churchOs2/tests/fixtures/najiki/schemas.ts
 ```
 
 Then update the pinned commit and blob hashes in the table above and run

@@ -24,15 +24,18 @@ import {
   getNajikiPayment,
   isNajikiConfigured,
   najikiApplicationCode,
+  najikiPaymentTypeCode,
+  NAJIKI_PLATFORM_PAYMENT_TYPE_CODES,
   NajikiApiError,
   NajikiConfigError,
   sendNajikiSms,
-  shouldFallBackToAfricasTalking,
   NAJIKI_DEFAULT_APPLICATION_CODE,
   NAJIKI_DEFAULT_BASE_URL,
 } from '../lib/najiki/client.ts'
 import {
   classifyNajikiWebhook,
+  activationMerchantReference,
+  activationProviderTransactionId,
   notificationChurchId,
   notificationTenantCode,
   parsePaymentNotification,
@@ -40,6 +43,8 @@ import {
   planPaymentReceiptSms,
   transactionLookupCandidates,
   verifyNajikiWebhook,
+  classifyWalletSettlementResult,
+  validateWalletPaymentAmount,
 } from '../lib/najiki/webhook.ts'
 import { MockNajikiServer } from './helpers/mock-najiki-server.ts'
 import {
@@ -47,6 +52,7 @@ import {
   verifyNotificationSignature,
 } from './fixtures/najiki/notification-signature.ts'
 import { toMinorUnits } from './fixtures/najiki/money.ts'
+import { PLATFORM_FEE_TYPES } from './fixtures/najiki/constants.ts'
 
 const CHURCH_ID = '11111111-2222-3333-4444-555555555555'
 const TENANT_CODE = 'grace-church' // seeded in najiki-finance2 scripts/seed.ts
@@ -66,6 +72,7 @@ before(async () => {
   process.env.NAJIKI_WEBHOOK_SECRET = server.webhookSecret
   delete process.env.NAJIKI_PAYMENT_TYPE_TOPUP
   delete process.env.NAJIKI_PAYMENT_TYPE_DONATION
+  delete process.env.NAJIKI_PAYMENT_TYPE_ACTIVATION
   delete process.env.NAJIKI_TENANT_CODE
 })
 
@@ -74,6 +81,8 @@ after(async () => {
   process.env = { ...originalEnv }
 })
 
+// Keep env-mutating contract tests serialized: they share process.env and one mock gateway.
+describe('Na’jiki partner contract', { concurrency: false }, () => {
 // ─────────────────────────────────────────────────────────────────────────────
 // Configuration
 // ─────────────────────────────────────────────────────────────────────────────
@@ -109,6 +118,29 @@ describe('configuration', () => {
     process.env.NAJIKI_APPLICATION_CODE = 'church-ug'
     assert.equal(najikiApplicationCode(), 'church-ug')
     process.env.NAJIKI_APPLICATION_CODE = 'church'
+  })
+
+  test('defaults platform-fee products to Na’jiki routing codes and validates overrides', () => {
+    assert.deepEqual([...PLATFORM_FEE_TYPES], [...NAJIKI_PLATFORM_PAYMENT_TYPE_CODES])
+    assert.equal(najikiPaymentTypeCode('topup'), 'BUY_SMS')
+    assert.equal(najikiPaymentTypeCode('activation'), 'ACCOUNT_ACTIVATION')
+    assert.equal(najikiPaymentTypeCode('donation'), 'donation')
+
+    process.env.NAJIKI_PAYMENT_TYPE_TOPUP = 'topup'
+    assert.equal(najikiPaymentTypeCode('topup'), 'BUY_SMS')
+    delete process.env.NAJIKI_PAYMENT_TYPE_TOPUP
+
+    process.env.NAJIKI_PAYMENT_TYPE_ACTIVATION = 'church_activation'
+    assert.equal(najikiPaymentTypeCode('activation'), 'ACCOUNT_ACTIVATION')
+    delete process.env.NAJIKI_PAYMENT_TYPE_ACTIVATION
+
+    process.env.NAJIKI_PAYMENT_TYPE_TOPUP = 'tenant_topup'
+    assert.throws(() => najikiPaymentTypeCode('topup'), /must be a Na'jiki platform-fee payment type/)
+    delete process.env.NAJIKI_PAYMENT_TYPE_TOPUP
+
+    process.env.NAJIKI_PAYMENT_TYPE_DONATION = 'BUY_SMS'
+    assert.throws(() => najikiPaymentTypeCode('donation'), /must be a tenant collection type/)
+    delete process.env.NAJIKI_PAYMENT_TYPE_DONATION
   })
 })
 
@@ -168,42 +200,60 @@ describe('SMS: POST /api/messaging/send', () => {
       (err: unknown) => {
         assert.ok(err instanceof NajikiApiError)
         assert.equal(err.status, 400)
-        assert.match(err.error, /Recipient \(to\) and message content are required/)
+        assert.equal(err.error, 'Invalid SMS payload or idempotency key')
         // The message a human would see must name the reason.
-        assert.match(err.message, /Recipient/)
+        assert.match(err.message, /Invalid SMS payload/)
         return true
       }
     )
+  })
+
+  test('enforces Na’jiki phone, message, sender-ID and idempotency constraints', async () => {
+    server.reset()
+    for (const request of [
+      { to: '+256 772 123456', message: 'hello', idempotencyKey: 'sms_bad_phone_1' },
+      { to: PHONE_E164, message: 'x'.repeat(919), idempotencyKey: 'sms_long_body_1' },
+      { to: PHONE_E164, message: '😀'.repeat(400), idempotencyKey: 'sms_many_parts_1' },
+      { to: PHONE_E164, message: 'hello', from: 'Grace Church', idempotencyKey: 'sms_bad_sender_1' },
+      { to: PHONE_E164, message: 'hello', idempotencyKey: 'short' },
+      { to: PHONE_E164, message: 'hello', idempotencyKey: 'k'.repeat(256) },
+    ]) {
+      await assert.rejects(
+        () => sendNajikiSms(request),
+        (err: unknown) => err instanceof NajikiApiError && err.status === 400 &&
+          err.error === 'Invalid SMS payload or idempotency key'
+      )
+    }
+    assert.equal(server.smsSends, 0)
   })
 
   test('surfaces Na\u2019jiki\u2019s 403 when the application code does not match', async () => {
-    // This is what NAJIKI_APPLICATION_CODE="CHURCH" (the old .env.example value)
-    // produced: Na'jiki seeds the church application as lowercase 'church'.
-    process.env.NAJIKI_APPLICATION_CODE = 'CHURCH'
-    await assert.rejects(
-      () => sendNajikiSms({ to: PHONE_E164, message: 'hi', idempotencyKey: 'y' }),
-      (err: unknown) => {
-        assert.ok(err instanceof NajikiApiError)
-        assert.equal(err.status, 403)
-        assert.equal(err.error, 'Application code mismatch')
-        return true
-      }
-    )
-    process.env.NAJIKI_APPLICATION_CODE = 'church'
+    // Na'jiki seeds the church application as lowercase 'church'.
+    const response = await fetch(`${server.url}/api/messaging/send`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${server.apiKey}`,
+        'Content-Type': 'application/json',
+        'Idempotency-Key': 'sms_wrong_app_code',
+      },
+      body: JSON.stringify({ to: PHONE_E164, message: 'hi', applicationCode: 'CHURCH' }),
+    })
+    assert.equal(response.status, 403)
+    assert.deepEqual(await response.json(), { error: 'Application code mismatch' })
   })
 
-  test('surfaces Na\u2019jiki\u2019s 401 when the API key is wrong', async () => {
-    process.env.NAJIKI_API_KEY = 'njk_wrong_key'
-    await assert.rejects(
-      () => sendNajikiSms({ to: PHONE_E164, message: 'hi' }),
-      (err: unknown) => {
-        assert.ok(err instanceof NajikiApiError)
-        assert.equal(err.status, 401)
-        assert.equal(err.error, 'Invalid or missing API key')
-        return true
-      }
-    )
-    process.env.NAJIKI_API_KEY = server.apiKey
+  test('rejects a wrong API key with Na’jiki’s 401 response', async () => {
+    const response = await fetch(`${server.url}/api/messaging/send`, {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer njk_wrong_key',
+        'Content-Type': 'application/json',
+        'Idempotency-Key': 'sms_wrong_api_key',
+      },
+      body: JSON.stringify({ to: PHONE_E164, message: 'hi', applicationCode: 'church' }),
+    })
+    assert.equal(response.status, 401)
+    assert.deepEqual(await response.json(), { error: 'Invalid or missing API key' })
   })
 })
 
@@ -228,18 +278,20 @@ describe('payments: POST /api/payments', () => {
     const result = await createNajikiPayment(request)
 
     assert.equal(result.status, 'processing')
-    assert.match(result.paymentId, /^pay_/)
-    assert.match(result.reference, /^CHURCH-TOP-/)
+    assert.match(result.paymentId, /^c[a-f0-9]{24}$/)
+    assert.match(result.reference, /^CHURCH-BUY-/)
 
     // The intent Na'jiki stored, field by field, against its schema.
     const stored = server.payments.at(-1)!
     assert.equal(stored.body.applicationCode, 'church')
-    assert.equal(stored.body.paymentTypeCode, 'topup')
+    assert.equal(stored.body.paymentTypeCode, 'BUY_SMS')
+    assert.equal('providerCode' in stored.body, false)
     assert.equal(stored.body.externalEntityId, CHURCH_ID)
     assert.equal(stored.body.tenantCode, TENANT_CODE)
     assert.equal(stored.body.currency, 'UGX')
     assert.equal(stored.body.phoneNumber, PHONE_NAJIKI)
     assert.equal(stored.body.idempotencyKey, 'ik_church_9f8e7d6c')
+    assert.equal(server.requests.at(-1)!.headers['idempotency-key'], undefined)
     assert.equal(stored.amount, 20_000)
     assert.equal(stored.body.metadata?.churchReference, 'CHURCH-9f8e7d6c-5b4a')
     assert.equal(stored.body.metadata?.churchId, CHURCH_ID)
@@ -302,6 +354,29 @@ describe('payments: POST /api/payments', () => {
     assert.equal(stored.body.metadata?.donorPhone, PHONE_NAJIKI)
     assert.equal(stored.body.metadata?.churchReference, 'DON-abc123')
     assert.equal(stored.body.metadata?.category, 'tithe')
+    assert.ok(server.paymentTypes.some((type) => type.applicationId === 'app_church' && type.code === 'donation'))
+  })
+
+  test('activation uses a platform-fee code and carries its ledger reference in metadata', async () => {
+    server.reset()
+    const merchantReference = 'ACT-contract-test-0001'
+    await createNajikiPayment({
+      applicationCode: 'church',
+      tenantCode: TENANT_CODE,
+      paymentTypeCode: najikiPaymentTypeCode('activation'),
+      externalEntityId: CHURCH_ID,
+      amount: 17_000,
+      currency: 'UGX',
+      phoneNumber: PHONE_NAJIKI,
+      idempotencyKey: merchantReference,
+      metadata: { type: 'church_activation', merchantReference, tenantCode: TENANT_CODE },
+    })
+
+    const payment = server.payments.at(-1)!
+    assert.equal(payment.body.paymentTypeCode, 'ACCOUNT_ACTIVATION')
+    assert.equal(payment.body.metadata?.type, 'church_activation')
+    assert.equal(payment.body.metadata?.merchantReference, merchantReference)
+    assert.ok(server.paymentTypes.some((type) => type.code === 'ACCOUNT_ACTIVATION'))
   })
 
   test('the idempotency key makes a retry return the same intent', async () => {
@@ -354,27 +429,24 @@ describe('payments: POST /api/payments', () => {
   })
 
   test('is rejected when the application code does not match the API key', async () => {
-    process.env.NAJIKI_APPLICATION_CODE = 'CHURCH'
-    await assert.rejects(
-      () =>
-        createNajikiPayment(
-          buildChurchTopupPayment({
-            churchId: CHURCH_ID,
-            tenantCode: TENANT_CODE,
-            reference: 'CHURCH-appcode',
-            idempotencyKey: 'ik_church_appcode',
-            amount: 10_000,
-            phoneNumber: PHONE_NAJIKI,
-          })
-        ),
-      (err: unknown) => {
-        assert.ok(err instanceof NajikiApiError)
-        assert.equal(err.status, 401)
-        assert.match(err.error, /Invalid or inactive application/)
-        return true
-      }
-    )
-    process.env.NAJIKI_APPLICATION_CODE = 'church'
+    const body = buildChurchTopupPayment({
+      churchId: CHURCH_ID,
+      tenantCode: TENANT_CODE,
+      reference: 'CHURCH-appcode',
+      idempotencyKey: 'ik_church_appcode',
+      amount: 10_000,
+      phoneNumber: PHONE_NAJIKI,
+    })
+    const response = await fetch(`${server.url}/api/payments`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${server.apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ ...body, applicationCode: 'CHURCH' }),
+    })
+    assert.equal(response.status, 401)
+    assert.match((await response.json() as { error: string }).error, /Invalid or inactive application/)
   })
 
   test('is rejected when authenticated with x-api-key instead of Bearer', async () => {
@@ -464,6 +536,10 @@ function buildNajikiPaymentNotification(input: {
     providerPaymentId: 'prov_123',
     failureReason: null,
     externalEntityId: CHURCH_ID,
+    tenantId: 'tenant_grace',
+    tenantCode: TENANT_CODE,
+    paymentType: 'BUY_SMS',
+    paymentTypeCode: 'BUY_SMS',
     metadata: input.metadata,
   })
 }
@@ -482,7 +558,7 @@ describe('inbound webhook verification', () => {
     const headers = buildNotificationHeaders(secret, body, 1_700_000_000_000)
     const result = verifyNajikiWebhook({
       rawBody: body,
-      headers: { 'X-Najiki-Timestamp': headers['X-Najiki-Timestamp'], 'X-Najiki-Signature': headers['X-Najiki-Signature'] },
+      headers,
       secret,
       now: 1_700_000_000_000,
     })
@@ -498,6 +574,41 @@ describe('inbound webhook verification', () => {
       }),
       true
     )
+  })
+
+  test('requires Na’jiki’s notification marker and timestamp inside the signature', () => {
+    const headers = buildNotificationHeaders(secret, body, 1_700_000_000_000)
+    const withoutMarker = { ...headers }
+    delete withoutMarker['X-Najiki-Notification']
+    assert.match(
+      verifyNajikiWebhook({ rawBody: body, headers: withoutMarker, secret, now: 1_700_000_000_000 }).reason!,
+      /x-najiki-notification/i
+    )
+
+    const withoutSignedTimestamp = {
+      ...headers,
+      'X-Najiki-Signature': `v=${headers['X-Najiki-Signature'].split('v=')[1]}`,
+    }
+    assert.match(
+      verifyNajikiWebhook({ rawBody: body, headers: withoutSignedTimestamp, secret, now: 1_700_000_000_000 }).reason!,
+      /signature|timestamp/i
+    )
+  })
+
+  test('rejects non-canonical timestamps and duplicate signature fields', () => {
+    const headers = buildNotificationHeaders(secret, body, 1_700_000_000_000)
+    assert.equal(verifyNajikiWebhook({
+      rawBody: body,
+      headers: { ...headers, 'X-Najiki-Timestamp': '1.7e12' },
+      secret,
+      now: 1_700_000_000_000,
+    }).ok, false)
+    assert.equal(verifyNajikiWebhook({
+      rawBody: body,
+      headers: { ...headers, 'X-Najiki-Signature': `${headers['X-Najiki-Signature']},v=${headers['X-Najiki-Signature'].split('v=')[1]}` },
+      secret,
+      now: 1_700_000_000_000,
+    }).ok, false)
   })
 
   test('rejects a tampered body', () => {
@@ -585,8 +696,52 @@ describe('inbound webhook payload handling', () => {
       ['reference_code', 'reference', 'idempotency_key']
     )
 
+    assert.equal(notification.tenantId, 'tenant_grace')
+    assert.equal(notification.tenantCode, TENANT_CODE)
+    assert.equal(notification.paymentTypeCode, 'BUY_SMS')
     assert.equal(notificationTenantCode(notification), TENANT_CODE)
+    assert.equal(notificationTenantCode({ ...notification, tenantCode: null }), TENANT_CODE)
     assert.equal(notificationChurchId(notification), CHURCH_ID)
+    assert.equal(activationMerchantReference(notification), null)
+  })
+
+  test('only identifies activation settlements from Na\u2019jiki metadata with a merchant reference', () => {
+    const payload = buildNajikiPaymentNotification({
+      paymentIntentId: 'pay_activation',
+      reference: 'CHURCH-ACT-1234',
+      status: 'success',
+      amount: 17_000,
+      metadata: {
+        type: 'church_activation',
+        merchantReference: 'ACT-activation-merchant-ref',
+      },
+    })
+    const notification = parsePaymentNotification(JSON.parse(payload))!
+    assert.equal(activationMerchantReference(notification), 'ACT-activation-merchant-ref')
+
+    const withCanonicalProviderId = parsePaymentNotification({
+      paymentIntentId: 'pay_najiki_intent',
+      providerPaymentId: ' livepay-txn-456 ',
+      status: 'success',
+      metadata: { type: 'church_activation', merchantReference: 'ACT-activation-merchant-ref' },
+    })!
+    assert.equal(activationProviderTransactionId(withCanonicalProviderId), 'livepay-txn-456')
+
+    const withoutCanonicalProviderId = parsePaymentNotification({
+      paymentIntentId: 'pay_najiki_intent',
+      providerPaymentId: null,
+      status: 'success',
+      metadata: { type: 'church_activation', merchantReference: 'ACT-activation-merchant-ref' },
+    })!
+    // Never substitute the distinct Na’jiki paymentIntentId.
+    assert.equal(activationProviderTransactionId(withoutCanonicalProviderId), null)
+
+    const malformed = parsePaymentNotification({
+      paymentIntentId: 'pay_activation',
+      status: 'success',
+      metadata: { type: 'church_activation' },
+    })!
+    assert.equal(activationMerchantReference(malformed), null)
   })
 
   test('parses SMS delivery updates', () => {
@@ -663,22 +818,28 @@ describe('inbound webhook payload handling', () => {
     )
   })
 })
+})
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Fallback policy
-// ─────────────────────────────────────────────────────────────────────────────
-
-describe('fallback policy', () => {
-  test('a 4xx from Na\u2019jiki must NOT silently fall back to another provider', () => {
-    const rejection = new NajikiApiError(403, { error: 'Application code mismatch' }, '/api/messaging/send')
-    assert.equal(shouldFallBackToAfricasTalking(rejection), false)
-    assert.equal(shouldFallBackToAfricasTalking(new NajikiApiError(400, { error: 'Validation failed' }, '/x')), false)
-    assert.equal(shouldFallBackToAfricasTalking(new NajikiApiError(429, { error: 'Too many requests' }, '/x')), false)
+describe('wallet webhook settlement guards', () => {
+  test('accepts only a new credit or a confirmed duplicate success from the atomic RPC', () => {
+    assert.equal(classifyWalletSettlementResult({ success: true, already_processed: false }), 'credited')
+    assert.equal(
+      classifyWalletSettlementResult({ success: true, already_processed: true }),
+      'already_credited',
+    )
+    assert.equal(classifyWalletSettlementResult({ result: 'credited' }), 'retry')
+    assert.equal(classifyWalletSettlementResult({ success: false }), 'retry')
+    assert.equal(classifyWalletSettlementResult(null), 'retry')
   })
 
-  test('a missing config or a 5xx/network failure may fall back', () => {
-    assert.equal(shouldFallBackToAfricasTalking(new NajikiConfigError(['NAJIKI_API_KEY'])), true)
-    assert.equal(shouldFallBackToAfricasTalking(new NajikiApiError(503, { error: 'unavailable' }, '/x')), true)
-    assert.equal(shouldFallBackToAfricasTalking(new Error('fetch failed')), true)
+  test('requires exact positive whole-UGX amount and explicit matching currency', () => {
+    const expected = { receivedAmount: 20_000, receivedCurrency: 'UGX', expectedAmount: '20000', expectedCurrency: 'UGX' }
+    assert.deepEqual(validateWalletPaymentAmount(expected), { ok: true })
+    assert.deepEqual(validateWalletPaymentAmount({ ...expected, receivedAmount: null }), { ok: false, reason: 'missing_amount' })
+    assert.deepEqual(validateWalletPaymentAmount({ ...expected, receivedAmount: 19_999 }), { ok: false, reason: 'amount_mismatch' })
+    assert.deepEqual(validateWalletPaymentAmount({ ...expected, receivedAmount: 20_001 }), { ok: false, reason: 'amount_mismatch' })
+    assert.deepEqual(validateWalletPaymentAmount({ ...expected, receivedAmount: 20_000.5 }), { ok: false, reason: 'invalid_amount' })
+    assert.deepEqual(validateWalletPaymentAmount({ ...expected, receivedCurrency: null }), { ok: false, reason: 'missing_currency' })
+    assert.deepEqual(validateWalletPaymentAmount({ ...expected, receivedCurrency: 'KES' }), { ok: false, reason: 'currency_mismatch' })
   })
 })

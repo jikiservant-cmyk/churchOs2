@@ -1,21 +1,14 @@
 /**
  * POST /api/sms/enqueue
  *
- * Accepts the same body as /api/sms/broadcast but instead of streaming
- * sends one-by-one, it:
- *   1. Validates auth & balance
- *   2. Persists all recipients to the sms_queue table
- *   3. Returns immediately with a broadcastId
- *   4. Fires off /api/sms/process-queue in the background
- *
- * The existing /api/sms/broadcast route is NOT changed or removed.
- * Update BroadcastComposer to hit /api/sms/enqueue instead to opt into
- * the queue system.
+ * Validates the authenticated church admin, persists one `pending` row per
+ * recipient, then invokes church-najiki-dispatch once per queue ID after commit.
  */
 
-import { NextResponse } from 'next/server';
+import { after, NextResponse } from 'next/server';
 import { createClient as createServerClient } from '@/lib/supabase/server';
-import { enqueueBroadcast, processQueueBatch } from '@/lib/queue-actions';
+import { enqueueBroadcast } from '@/lib/queue-actions';
+import { dispatchSmsQueueItems } from '@/lib/sms-dispatch';
 import { normalizeUgPhone } from '@/lib/utils';
 
 export async function POST(req: Request) {
@@ -112,35 +105,14 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'No valid authorized recipients found for this church.' }, { status: 400 });
     }
 
-    // ── Balance pre-flight ──────────────────────────────────────────────────
-    const { data: wallet } = await supabase
-      .from('wallets')
-      .select('balance, sms_rate')
-      .eq('tenant_id', churchId)
-      .maybeSingle();
-
-    if (!wallet) {
-      return NextResponse.json({ error: 'Billing account not found.' }, { status: 400 });
-    }
-
-    if (wallet.balance < wallet.sms_rate) {
-      return NextResponse.json(
-        {
-          error: 'Insufficient SMS balance.',
-          balance: wallet.balance,
-          rate: wallet.sms_rate,
-          remaining: Math.floor(wallet.balance / wallet.sms_rate),
-        },
-        { status: 402 },
-      );
-    }
+    // The existing Edge debit RPC performs the authoritative wallet check; no
+    // preflight balance read is used to decide whether to enqueue.
 
     // ── Sender ID ───────────────────────────────────────────────────────────
-    const isSandbox = process.env.AT_USERNAME?.toLowerCase() === 'sandbox';
-    const senderId  = (!isSandbox && church.sender_id?.trim()) ? church.sender_id.trim() : '';
+    const senderId = church.sender_id?.trim() || '';
 
     // ── Enqueue ─────────────────────────────────────────────────────────────
-    const { broadcastId, enqueued, skipped } = await enqueueBroadcast({
+    const { broadcastId, enqueued, skipped, queueIds } = await enqueueBroadcast({
       tenantId:   churchId,
       message,
       audience:   audience ?? 'all',
@@ -149,11 +121,15 @@ export async function POST(req: Request) {
       createdBy:  user.id,
     });
 
-    // ── Kick off processing in the background ───────────────────────────────
-    // This means delivery starts immediately without waiting for a cron tick.
-    // Executed in-process asynchronously to prevent exposing secrets to untrusted host headers.
-    processQueueBatch({ tenantId: churchId, batchSize: 15 })
-      .catch(err => console.warn('[Enqueue] Background trigger failed (non-fatal):', err));
+    const { data: { session } } = await supabase.auth.getSession();
+    const accessToken = session?.access_token ?? null;
+
+    // Dispatch each durable queue row separately; the Edge request body is only its ID.
+    after(async () => {
+      const outcomes = await dispatchSmsQueueItems(queueIds, 5, accessToken);
+      const deferred = outcomes.filter((outcome) => !outcome.ok || outcome.status === 'pending').length;
+      if (deferred) console.warn(`[Enqueue] ${deferred} SMS rows remain queued for retry.`);
+    });
 
     // ── Respond ─────────────────────────────────────────────────────────────
     return NextResponse.json({

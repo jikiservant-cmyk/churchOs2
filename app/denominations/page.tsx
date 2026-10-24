@@ -3,6 +3,8 @@ import Link from 'next/link';
 import Image from 'next/image';
 import { Building2, Search, ArrowRight, Shield, Church, ExternalLink } from 'lucide-react';
 
+export const dynamic = 'force-dynamic';
+
 export default async function DenominationsDirectoryPage() {
   const denominations = await getPublicDenominations();
 

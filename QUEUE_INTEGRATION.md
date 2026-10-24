@@ -1,138 +1,61 @@
-# SMS Queue — Integration Guide
+# SMS queue and Na'jiki Edge dispatch
 
-## 1. Run the migration
+This integration uses the **existing database tables and RPCs**. It does not require a new migration or SQL to run.
 
-Paste `sql/sms_queue_migration.sql` into your **Supabase SQL Editor** and click
-Run. It creates two new tables (`church.broadcasts`, `church.sms_queue`) and a
-Postgres function (`public.claim_sms_queue_batch`) used for atomic batch claiming.
+## Dispatch flow
 
----
+1. The authenticated backend validates the church/recipient and inserts one row per recipient into `church.sms_queue` using the existing enqueue path.
+2. Once the insert succeeds, the backend calls `church-najiki-dispatch` once for each row, with JSON containing only `sms_id`. Retries reuse that same queue row and idempotency key.
+3. The Edge Function claims the row, prepares/verifies the corresponding `church.sms_logs` row, reserves the debit with the existing RPC, calls Na'jiki, then records or schedules the outcome through the existing RPCs.
 
-## 2. Add environment variables
+The active `church-najiki-dispatch` function requires both a valid Supabase JWT (platform verification is enabled) and `x-dispatch-secret`. The request headers are:
 
+```text
+Authorization: Bearer <user access token, or server-only service-role JWT>
+apikey: <Supabase publishable key>
+x-dispatch-secret: <DISPATCH_SECRET>
+Content-Type: application/json
 ```
-# .env.local
-QUEUE_PROCESSOR_SECRET=replace_with_a_long_random_string
-NEXT_PUBLIC_APP_URL=https://your-deployed-url.com   # needed for fire-and-forget trigger
-```
 
----
-
-## 3. Optional — Vercel Cron (recommended for retries)
-
-Create `vercel.json` in the project root:
+The request body is exactly:
 
 ```json
-{
-  "crons": [
-    {
-      "path": "/api/sms/process-queue",
-      "schedule": "* * * * *"
-    }
-  ]
-}
+{ "sms_id": "<sms_queue UUID>" }
 ```
 
-The cron fires every minute and picks up any items that weren't processed
-by the immediate trigger (network hiccups, retries after back-off, etc.).
+The Edge Function loads phone, message, tenant, sender, attempts, and idempotency key from the existing queue row. It does not accept those fields from the caller and does not enqueue messages.
 
----
+## Existing database RPCs used
 
-## 4. Switch BroadcastComposer to the queue
+- `claim_sms_queue_item(p_sms_id uuid, p_lock_token uuid, p_lease_seconds integer)` → `SETOF church.sms_queue`
+- `reserve_sms_queue_debit(p_sms_id uuid, p_lock_token uuid)` → `jsonb`
+- `release_sms_queue_item(p_sms_id uuid, p_lock_token uuid, p_retry_at timestamptz, p_error text, p_restore_attempt boolean)` → `boolean`
+- `fail_sms_queue_item(p_sms_id uuid, p_lock_token uuid, p_error text)` → `jsonb`
+- `complete_sms_queue_item(p_sms_id uuid, p_lock_token uuid, p_najiki_sms_id text, p_najiki_reference text, p_gateway_status text)` → `boolean`
 
-**Only two changes are needed in `components/BroadcastComposer.tsx`:**
+The log upsert uses the existing unique conflict target `tenant_id,idempotency_key`. The debit results handled by the dispatcher are `debited`, `already_debited`, `insufficient_balance`, and `wallet_missing`.
 
-### Change A — hit `/api/sms/enqueue` instead of `/api/sms/broadcast`
+## Runtime configuration
 
-```diff
-- const response = await fetch('/api/sms/broadcast', {
-+ const response = await fetch('/api/sms/enqueue', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      message,
-      churchId,
-+     audience,               // pass the audience string too (optional but useful for history)
-      recipients: finalMembers
-        .map(m => ({
-+         id: m.id,           // now required for idempotency key generation
-          full_name: m.full_name,
-          phone_number: normalizeUgPhone(m.phone_number)
-        }))
-        .filter(m => m.phone_number !== null)
-    })
-  });
-```
+Supabase provides `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` to the Edge Function. The function uses the service-role key only inside the Edge runtime to access the database. Never expose it in browser code.
 
-### Change B — replace SSE streaming with polling
+Required application-specific Edge secrets:
 
-The new endpoint returns JSON immediately, not an SSE stream.
-Replace the reader/decoder block with a simple poll loop:
+- `DISPATCH_SECRET` — at least 32 bytes; set the same value as the Next.js server's `SMS_DISPATCH_SECRET`.
+- `NAJIKI_API_KEY` — Na'jiki API credential.
 
-```typescript
-// After fetch('/api/sms/enqueue', ...)
-const { broadcastId, enqueued } = await response.json();
-setProgress({ active: true, total: enqueued, sent: 0, failed: 0 });
+Optional Edge variables:
 
-// Poll for progress every 2 seconds
-const interval = setInterval(async () => {
-  const statusRes  = await fetch(`/api/sms/broadcast-status/${broadcastId}`);
-  const statusData = await statusRes.json();
+- `NAJIKI_API_URL` — defaults to `https://najiki.netlify.app`; must use HTTPS.
+- `NAJIKI_APPLICATION_CODE` — defaults to `church`.
 
-  setProgress({
-    active:  statusData.status !== 'COMPLETED' && statusData.status !== 'FAILED' && statusData.status !== 'PARTIAL',
-    total:   statusData.total,
-    sent:    statusData.sent,
-    failed:  statusData.failed,
-  });
+The server-side caller also needs the Supabase project URL, a publishable key for the `apikey` header, and a JWT for the `Authorization` header. Prefer the initiating user's access token when available; a service-role JWT is acceptable only for a trusted server-to-server call. Never put `DISPATCH_SECRET` or the service-role JWT in browser code or chat.
 
-  if (['COMPLETED', 'PARTIAL', 'FAILED'].includes(statusData.status)) {
-    clearInterval(interval);
-    setStatus({
-      type:    statusData.failed === statusData.total ? 'error' : 'success',
-      message: statusData.status === 'COMPLETED'
-        ? 'Broadcast Complete! 🚀'
-        : `Broadcast finished with ${statusData.failed} failure(s).`,
-    });
-    setIsSending(false);
-    setProgress(p => ({ ...p, active: false }));
-    sendingRef.current = false;
-    router.refresh();
-  }
-}, 2000);
-```
+## Responses and retry notes
 
----
+- `sent`: Na'jiki accepted the SMS and the completion RPC succeeded.
+- `pending`: retry later; includes transient provider errors and wallet/balance conditions.
+- `failed`: terminal provider rejection was finalized.
+- `skipped`: the item was not due or was already claimed.
 
-## How it all fits together
-
-```
-BroadcastComposer
-  │  POST /api/sms/enqueue
-  │    ├── auth + balance check
-  │    ├── enqueueBroadcast()
-  │    │     creates church.broadcasts row
-  │    │     inserts N rows into church.sms_queue
-  │    ├── fire-and-forget POST /api/sms/process-queue
-  │    └── returns { broadcastId, enqueued }
-  │
-  └── polls GET /api/sms/broadcast-status/:id  every 2 s
-        returns { status, sent, failed, pending, percentComplete }
-
-/api/sms/process-queue  (also hit by Vercel Cron every minute)
-  ├── claim_sms_queue_batch()   ← atomic SELECT FOR UPDATE SKIP LOCKED
-  ├── sendSingleSMS() × batch
-  ├── marks items SENT / FAILED (with exponential back-off for retries)
-  └── updates church.broadcasts counts
-```
-
----
-
-## Existing routes — unchanged
-
-| Route                        | Status       |
-| ---------------------------- | ------------ |
-| `POST /api/sms/broadcast`    | Untouched ✅ |
-| `POST /api/sms/send`         | Untouched ✅ |
-| `lib/sms-actions.ts`         | Untouched ✅ |
-| `supabase-schema.sql`        | Untouched ✅ |
+The provider call has a 25-second timeout and retries reuse the same idempotency key. The handler receives `max_attempts` from the queue row but does not enforce that limit itself; confirm the existing database queue RPC or other queue process enforces it.

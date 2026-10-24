@@ -25,8 +25,8 @@ churchOs-fixes/
 │   └── 004_cron_jobs.sql                     → Run in Supabase SQL Editor
 └── supabase/
     └── functions/
-        └── process-sms-queue/
-            └── index.ts                      → Deploy as Supabase Edge Function
+        ├── church-najiki-dispatch/index.ts   → Single queue-row Na'jiki dispatcher
+        └── church-najiki-queue-worker/index.ts → Due/expired-row recovery worker
 ```
 
 ---
@@ -67,24 +67,19 @@ If any passkeys start with `$2`, they're already hashed — skip 002.
 
 **Before running 004:** Enable pg_cron in Supabase Dashboard → Database → Extensions.
 
-### 5 — Deploy the Edge Function
-```bash
-supabase functions deploy process-sms-queue
-supabase secrets set AFRICASTALKING_API_KEY=your-key
-supabase secrets set AFRICASTALKING_USERNAME=your-username
-```
+### 5 — Configure Na'jiki
+Set `NAJIKI_API_KEY`, `NAJIKI_APPLICATION_CODE`, and the signed webhook path
+in the app environment and Na'jiki Setup. All SMS and payment initiation goes
+through Na'jiki; do not add downstream carrier or payment-provider credentials
+to churchOs. See `NAJIKI_INTEGRATION.md` for the full contract.
 
-### 6 — Replace direct Africa's Talking calls with queueSms()
-In any file that currently calls `at.SMS.send()` directly, replace it:
-
-```typescript
-// Before (blocks the HTTP response for 500–2000ms):
-await at.SMS.send({ to: [phone], message: body });
-
-// After (returns immediately, sends async):
-import { queueSms } from '@/lib/sms-queue';
-await queueSms(supabase, { tenantId, recipients: [phone], message: body });
-```
+### 6 — Route all application SMS through the Supabase Edge queue
+Application code persists a row in `church.sms_queue`; the `church-najiki-dispatch`
+Supabase Edge Function sends it through Na'jiki using the stable queue ID and
+idempotency key. Do not add synchronous provider calls or downstream-provider
+fallbacks. Deploy/configure the functions and apply
+`migrations/009_najiki_sms_edge_dispatch.sql` as described in `QUEUE_INTEGRATION.md`.
+See `NAJIKI_INTEGRATION.md` for the Na'jiki contract and signed webhook setup.
 
 ### 7 — Replace unbounded member queries with paginated ones
 ```typescript

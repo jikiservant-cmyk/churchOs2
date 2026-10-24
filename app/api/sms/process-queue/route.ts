@@ -1,109 +1,68 @@
-/**
- * POST /api/sms/process-queue  (also handles GET for Vercel Cron)
- *
- * Claims and processes a batch of PENDING sms_queue items.
- * This route is designed to be:
- *   • Called by /api/sms/enqueue immediately after queuing (fire-and-forget)
- *   • Called by Vercel Cron every minute as a safety net for retries
- *
- * Protected by QUEUE_PROCESSOR_SECRET env variable.
- * Add to your .env:
- *   QUEUE_PROCESSOR_SECRET=<a long random string>
- *
- * And to vercel.json for the cron (optional but recommended):
- * {
- *   "crons": [{
- *     "path": "/api/sms/process-queue",
- *     "schedule": "* * * * *"
- *   }]
- * }
- */
-
 import { NextResponse } from 'next/server';
-import { processQueueBatch } from '@/lib/queue-actions';
-import crypto from 'crypto';
+import crypto from 'node:crypto';
+import { createAdminClient } from '@/lib/supabase/server';
+import { dispatchSmsQueueItems } from '@/lib/sms-dispatch';
 
 const QUEUE_SECRET = process.env.QUEUE_PROCESSOR_SECRET;
 
-function isAuthorised(req: Request): { authorized: boolean; reason?: string } {
-  // Fail closed if no secret is configured
+function isAuthorized(request: Request): boolean {
+  if (!QUEUE_SECRET) return false;
+  const provided = request.headers.get('x-queue-secret')
+    ?? request.headers.get('authorization')?.replace(/^Bearer\s+/i, '');
+  if (!provided) return false;
+  const a = Buffer.from(provided);
+  const b = Buffer.from(QUEUE_SECRET);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+async function run(request: Request) {
   if (!QUEUE_SECRET) {
-    return { authorized: false, reason: 'Queue processor secret not configured' };
+    return NextResponse.json({ error: 'Queue processor secret not configured.' }, { status: 503 });
   }
-
-  // POST: secret in header x-queue-secret
-  const headerSecret = req.headers.get('x-queue-secret');
-  if (headerSecret) {
-    const a = Buffer.from(headerSecret);
-    const b = Buffer.from(QUEUE_SECRET);
-    if (a.length === b.length && crypto.timingSafeEqual(a, b)) {
-      return { authorized: true };
-    }
-  }
-
-  // GET (Vercel Cron): secret in Authorization: Bearer <secret>
-  const bearerSecret = req.headers.get('authorization')?.replace(/^Bearer\s+/i, '');
-  if (bearerSecret) {
-    const a = Buffer.from(bearerSecret);
-    const b = Buffer.from(QUEUE_SECRET);
-    if (a.length === b.length && crypto.timingSafeEqual(a, b)) {
-      return { authorized: true };
-    }
-  }
-
-  return { authorized: false, reason: 'Unauthorized' };
-}
-
-// ── POST — called programmatically (fire-and-forget from /api/sms/enqueue) ──
-export async function POST(req: Request) {
-  const auth = isAuthorised(req);
-  if (!auth.authorized) {
-    const status = auth.reason === 'Queue processor secret not configured' ? 503 : 401;
-    return NextResponse.json({ error: auth.reason }, { status });
-  }
+  if (!isAuthorized(request)) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
   try {
-    const body      = await req.json().catch(() => ({}));
-    const batchSize = Math.min(Math.max(Number(body?.batchSize ?? 15) || 15, 1), 20);
+    const admin = await createAdminClient();
+    const now = new Date().toISOString();
+    const [pendingResult, expiredResult] = await Promise.all([
+      admin.schema('church').from('sms_queue').select('id')
+        .eq('status', 'pending')
+        .or(`scheduled_at.is.null,scheduled_at.lte.${now}`)
+        .order('scheduled_at', { ascending: true })
+        .limit(20),
+      admin.schema('church').from('sms_queue').select('id')
+        .eq('status', 'processing')
+        .or(`locked_until.is.null,locked_until.lte.${now}`)
+        .order('locked_until', { ascending: true })
+        .limit(20),
+    ]);
 
-    // F-11: per-tenant triggers must match tenant secret or global processor secret
-    const tenantId = req.headers.get('x-queue-tenant') ?? undefined;
-    if (tenantId) {
-      const expected = process.env[`QUEUE_SECRET_${tenantId.toUpperCase()}`] || process.env.QUEUE_PROCESSOR_SECRET;
-      const provided = req.headers.get('x-queue-secret');
-      if (!expected || !provided) {
-        return NextResponse.json({ error: 'Unauthorized for tenant' }, { status: 401 });
-      }
-      const a = Buffer.from(provided);
-      const b = Buffer.from(expected);
-      if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
-        return NextResponse.json({ error: 'Unauthorized for tenant' }, { status: 401 });
-      }
-    }
+    if (pendingResult.error) throw new Error(`Pending queue lookup failed: ${pendingResult.error.message}`);
+    if (expiredResult.error) throw new Error(`Expired lease lookup failed: ${expiredResult.error.message}`);
 
-    const result = await processQueueBatch({ tenantId, batchSize });
-
-    return NextResponse.json({ success: true, ...result });
-  } catch (err: any) {
-    console.error('[ProcessQueue] Error:', err);
-    return NextResponse.json({ error: err.message ?? 'Processing failed' }, { status: 500 });
+    const ids = [...new Set([
+      ...(pendingResult.data ?? []).map((row) => row.id),
+      ...(expiredResult.data ?? []).map((row) => row.id),
+    ])];
+    const outcomes = await dispatchSmsQueueItems(ids, 5);
+    return NextResponse.json({
+      success: true,
+      candidates: ids.length,
+      sent: outcomes.filter((result) => result.status === 'sent').length,
+      pending: outcomes.filter((result) => result.status === 'pending' || !result.ok).length,
+      failed: outcomes.filter((result) => result.status === 'failed').length,
+      skipped: outcomes.filter((result) => result.status === 'not_due_or_already_claimed').length,
+    });
+  } catch (error) {
+    console.error('[ProcessQueue] Queue dispatch failed:', error);
+    return NextResponse.json({ error: error instanceof Error ? error.message : 'Queue dispatch failed.' }, { status: 502 });
   }
 }
 
-// ── GET — called by Vercel Cron ─────────────────────────────────────────────
-export async function GET(req: Request) {
-  const auth = isAuthorised(req);
-  if (!auth.authorized) {
-    const status = auth.reason === 'Queue processor secret not configured' ? 503 : 401;
-    return NextResponse.json({ error: auth.reason }, { status });
-  }
+export async function POST(request: Request) {
+  return run(request);
+}
 
-  try {
-    // Cron invocation processes ALL tenants, no filtering
-    const result = await processQueueBatch({ batchSize: 15 });
-    return NextResponse.json({ success: true, ...result });
-  } catch (err: any) {
-    console.error('[ProcessQueue/Cron] Error:', err);
-    return NextResponse.json({ error: err.message ?? 'Processing failed' }, { status: 500 });
-  }
+export async function GET(request: Request) {
+  return run(request);
 }

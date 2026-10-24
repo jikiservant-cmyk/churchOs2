@@ -86,6 +86,11 @@ export function verifyNajikiWebhook(input: {
     return { ok: false, reason: 'Webhook secret is not configured' }
   }
 
+  const markerHeader = readHeader(headers, NAJIKI_MARKER_HEADER)
+  if (markerHeader?.trim().toLowerCase() !== 'true') {
+    return { ok: false, reason: `Missing or invalid ${NAJIKI_MARKER_HEADER} header` }
+  }
+
   const timestampHeader = readHeader(headers, NAJIKI_TIMESTAMP_HEADER)
   const signatureHeader = readHeader(headers, NAJIKI_SIGNATURE_HEADER)
 
@@ -96,32 +101,31 @@ export function verifyNajikiWebhook(input: {
     }
   }
 
-  const timestamp = Number(timestampHeader)
-  if (!Number.isFinite(timestamp)) {
+  if (!/^\d{10,13}$/.test(timestampHeader)) {
     return { ok: false, reason: 'Malformed X-Najiki-Timestamp' }
   }
+  const timestamp = Number(timestampHeader)
 
   if (Math.abs(now - timestamp) > maxSkewMs) {
     return { ok: false, reason: 'Timestamp outside the 5-minute replay window' }
   }
 
-  // `t=<timestamp>,v=<hmac>`
-  const parts = String(signatureHeader)
-    .split(',')
-    .map((p) => p.trim())
-  const t = parts.find((p) => p.startsWith('t='))?.slice(2)
-  const v = parts.find((p) => p.startsWith('v='))?.slice(2)
-
-  if (!v || !/^[0-9a-f]+$/i.test(v)) {
+  // Require the single canonical timestamp/signature pair. Duplicate fields,
+  // extra parameters, and timestamp normalization are intentionally rejected.
+  const match = /^t=(\d{10,13}),v=([0-9a-f]{64})$/i.exec(signatureHeader)
+  if (!match) {
+    if (!/(?:^|,)\s*t=/.test(signatureHeader)) {
+      return { ok: false, reason: 'Missing signed timestamp in X-Najiki-Signature' }
+    }
     return { ok: false, reason: 'Malformed X-Najiki-Signature' }
   }
-  // The timestamp in the header must be the one that was signed.
-  if (t !== undefined && Number(t) !== timestamp) {
+  if (match[1] !== timestampHeader) {
     return { ok: false, reason: 'Signature timestamp does not match the header' }
   }
+  const v = match[2]
 
   const expected = createHmac('sha256', secret)
-    .update(`${timestamp}.${rawBody}`)
+    .update(`${timestampHeader}.${rawBody}`)
     .digest('hex')
 
   const a = Buffer.from(expected, 'utf8')
@@ -154,7 +158,12 @@ export interface NajikiPaymentNotification {
   failureReason: string | null
   /** churchOs' church id, echoed back opaquely. */
   externalEntityId: string | null
-  /** Opaque passthrough of whatever metadata we sent with the payment. */
+  /** Resolved tenant and payment-type fields included by current Na'jiki. */
+  tenantId: string | null
+  tenantCode: string | null
+  paymentType: string | null
+  paymentTypeCode: string | null
+  /** Metadata echo, including gateway-owned values such as credentialSource. */
   metadata: Record<string, unknown>
 }
 
@@ -166,6 +175,41 @@ export interface NajikiSmsDeliveryNotification {
   providerId: string | null
   recipient: string | null
   applicationCode: string | null
+}
+
+export type WalletSettlementDecision = 'credited' | 'already_credited' | 'retry'
+
+/** Interpret the atomic settlement RPC response fail-closed. */
+export function classifyWalletSettlementResult(result: unknown): WalletSettlementDecision {
+  if (!result || typeof result !== 'object' || Array.isArray(result)) return 'retry'
+  const response = result as Record<string, unknown>
+  if (response.success === true && response.already_processed === false) return 'credited'
+  if (response.success === true && response.already_processed === true) return 'already_credited'
+  return 'retry'
+}
+
+/** Require an exact amount and currency match before invoking the credit RPC. */
+export function validateWalletPaymentAmount(input: {
+  receivedAmount: number | null
+  receivedCurrency: string | null
+  expectedAmount: unknown
+  expectedCurrency?: unknown
+}): { ok: true } | { ok: false; reason: 'missing_amount' | 'invalid_amount' | 'amount_mismatch' | 'missing_currency' | 'currency_mismatch' } {
+  const expectedAmount = Number(input.expectedAmount)
+  if (input.receivedAmount === null || input.receivedAmount === undefined) {
+    return { ok: false, reason: 'missing_amount' }
+  }
+  if (!Number.isSafeInteger(expectedAmount) || expectedAmount <= 0 ||
+      !Number.isSafeInteger(input.receivedAmount) || input.receivedAmount <= 0) {
+    return { ok: false, reason: 'invalid_amount' }
+  }
+  if (input.receivedAmount !== expectedAmount) return { ok: false, reason: 'amount_mismatch' }
+  if (!input.receivedCurrency?.trim()) return { ok: false, reason: 'missing_currency' }
+  const expectedCurrency = String(input.expectedCurrency ?? 'UGX').trim().toUpperCase()
+  if (input.receivedCurrency.trim().toUpperCase() !== expectedCurrency) {
+    return { ok: false, reason: 'currency_mismatch' }
+  }
+  return { ok: true }
 }
 
 export type NajikiWebhookKind = 'sms_delivery' | 'payment' | 'unknown'
@@ -204,8 +248,27 @@ export function parsePaymentNotification(
     providerPaymentId: str(p.providerPaymentId),
     failureReason: str(p.failureReason),
     externalEntityId: str(p.externalEntityId),
+    tenantId: str(p.tenantId),
+    tenantCode: str(p.tenantCode),
+    paymentType: str(p.paymentType),
+    paymentTypeCode: str(p.paymentTypeCode),
     metadata,
   }
+}
+
+/** Extract an activation ledger reference only from our typed Na'jiki metadata. */
+export function activationMerchantReference(
+  notification: NajikiPaymentNotification
+): string | null {
+  if (notification.metadata.type !== 'church_activation') return null
+  return str(notification.metadata.merchantReference)
+}
+
+/** Only return Na'jiki's canonical downstream transaction ID; never substitute paymentIntentId. */
+export function activationProviderTransactionId(
+  notification: NajikiPaymentNotification
+): string | null {
+  return str(notification.providerPaymentId)?.trim() || null
 }
 
 export function parseSmsDeliveryNotification(
@@ -264,15 +327,13 @@ export function transactionLookupCandidates(
 }
 
 /**
- * The tenant code we sent in `metadata`. Na'jiki does not put `tenantCode` at
- * the top level of the notification, so reading it from the top level (as the
- * church app used to) always yielded undefined and silently disabled the
- * tenant-mismatch guard.
+ * Prefer Na'jiki's resolved top-level tenant code; retain the request metadata
+ * fallback for older notifications and records without a resolved tenant.
  */
 export function notificationTenantCode(
   notification: NajikiPaymentNotification
 ): string | null {
-  return str(notification.metadata.tenantCode)
+  return notification.tenantCode ?? str(notification.metadata.tenantCode)
 }
 
 /** The church id we sent as `externalEntityId`, when present. */

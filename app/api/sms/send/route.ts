@@ -44,58 +44,20 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'Church configuration not found.' }, { status: 404 });
     }
 
-    // 3. Prepaid Balance Guard
-    let { data: balance, error: balanceError } = await supabaseUserClient
-      .schema('public')
-      .from('wallets')
-      .select('balance, sms_rate')
-      .eq('tenant_id', churchId)
-      .maybeSingle();
-
-    if (balanceError) {
-      return NextResponse.json({ error: 'Billing lookup error. Please try again later.' }, { status: 500 });
-    }
-
-    // Auto-provision tenant & wallet for backward compatibility if missing
-    if (!balance) {
-      const { error: tenantInsertError } = await supabaseUserClient
-        .schema('public')
-        .from('tenants')
-        .upsert({ id: churchId, app_type: 'church', name: authorizedChurch.sender_id || 'Church' })
-        .select()
-        .single();
-      
-      if (!tenantInsertError) {
-        const { data: newBalance, error: initError } = await supabaseUserClient
-          .schema('public')
-          .from('wallets')
-          .upsert({ tenant_id: churchId, balance: 0, sms_rate: 70, app_type: 'church' })
-          .select('balance, sms_rate')
-          .single();
-          
-        if (!initError && newBalance) {
-          balance = newBalance;
-        }
-      }
-    }
-
-    if (!balance) {
-      return NextResponse.json({ error: 'Billing account not found.' }, { status: 400 });
-    }
-
-    if (balance.balance < balance.sms_rate) {
-      return NextResponse.json({ 
-        error: 'Insufficient SMS balance.', 
-        balance: balance.balance, 
-        rate: balance.sms_rate,
-        remaining: Math.floor(balance.balance / balance.sms_rate)
-      }, { status: 402 });
-    }
-
-    // 4. Validate Input & Normalize Ugandan Phone
+    // 3. Validate Input & Normalize Ugandan Phone
     if (!phoneNumber || !message) {
       return NextResponse.json(
         { error: 'Missing required fields: phoneNumber or message' },
+        { status: 400 }
+      );
+    }
+
+    const idempotencyKey = typeof body.idempotencyKey === 'string'
+      ? body.idempotencyKey.trim()
+      : req.headers.get('idempotency-key')?.trim() ?? '';
+    if (idempotencyKey.length < 8 || idempotencyKey.length > 255) {
+      return NextResponse.json(
+        { error: 'Provide a stable idempotencyKey (8–255 characters) and reuse it when retrying this request.' },
         { status: 400 }
       );
     }
@@ -120,11 +82,7 @@ export async function POST(req: Request) {
     }
 
     // 6. Determine Sender ID
-    const isSandbox = process.env.AT_USERNAME?.toLowerCase() === 'sandbox';
-    let senderId = '';
-    if (!isSandbox && authorizedChurch.sender_id && authorizedChurch.sender_id.trim() !== '') {
-       senderId = authorizedChurch.sender_id.trim();
-    }
+    const senderId = authorizedChurch.sender_id?.trim() || '';
 
     // 7. Use the shared sending logic
     try {
@@ -133,9 +91,9 @@ export async function POST(req: Request) {
         phoneNumber: normalizedPhone,
         message,
         churchId,
-        idempotencyKey: body.idempotencyKey,
+        idempotencyKey,
         senderId,
-        balance
+        recipientId: body.recipientId
       });
 
       return NextResponse.json(result);
