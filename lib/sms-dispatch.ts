@@ -7,7 +7,6 @@ export type EnqueueSmsInput = {
   message: string;
   senderId?: string | null;
   recipientId?: string | null;
-  broadcastId?: string | null;
   idempotencyKey: string;
 };
 
@@ -34,13 +33,12 @@ export async function enqueueSmsDispatch(input: EnqueueSmsInput): Promise<Enqueu
   const admin = await createAdminClient();
   const row = {
     tenant_id: input.tenantId,
-    broadcast_id: input.broadcastId ?? null,
     recipient_id: input.recipientId ?? null,
     recipient_phone: phone,
     message,
     sender_id: input.senderId?.trim() || null,
     idempotency_key: idempotencyKey,
-    status: 'PENDING',
+    status: 'pending',
     scheduled_at: new Date().toISOString(),
   };
 
@@ -81,22 +79,42 @@ export async function enqueueSmsDispatch(input: EnqueueSmsInput): Promise<Enqueu
   throw new Error(`Failed to insert SMS queue item: ${insertError?.message ?? 'unknown database error'}`);
 }
 
+/** Return the initiating user's access token when the server-side client has one. */
+async function getSupabaseAccessToken(supabase: unknown): Promise<string | null> {
+  const auth = (supabase as { auth?: { getSession?: () => Promise<{ data?: { session?: { access_token?: string } | null } }> } } | undefined)?.auth;
+  if (!auth?.getSession) return null;
+  try {
+    const { data } = await auth.getSession();
+    return data?.session?.access_token ?? null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Calls the deployed Edge Function with only the durable queue ID as payload.
  * If the HTTP call times out, callers must retry this ID, never enqueue another row.
  */
-export async function dispatchSmsQueueItem(smsId: string, timeoutMs = 12_000): Promise<Record<string, unknown>> {
-  const projectUrl = process.env.NEXT_PUBLIC_SUPABASE_URL?.replace(/\/$/, '');
-  const publishableKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+export async function dispatchSmsQueueItem(
+  smsId: string,
+  timeoutMs = 35_000,
+  accessToken?: string | null,
+): Promise<Record<string, unknown>> {
+  const projectUrl = (process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL)?.replace(/\/$/, '');
+  const publishableKey = process.env.SUPABASE_PUBLISHABLE_KEY
+    || process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY
+    || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
   const dispatchSecret = process.env.SMS_DISPATCH_SECRET;
+  const bearerToken = accessToken || process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-  if (!projectUrl || !publishableKey || !dispatchSecret) {
-    throw new Error('SMS Edge dispatch is not configured. Set Supabase URL/key and SMS_DISPATCH_SECRET.');
+  if (!projectUrl || !publishableKey || !dispatchSecret || !bearerToken) {
+    throw new Error('SMS Edge dispatch requires Supabase URL, publishable key, server-side JWT, and SMS_DISPATCH_SECRET.');
   }
 
   const response = await fetch(`${projectUrl}/functions/v1/church-najiki-dispatch`, {
     method: 'POST',
     headers: {
+      authorization: `Bearer ${bearerToken}`,
       apikey: publishableKey,
       'content-type': 'application/json',
       'x-dispatch-secret': dispatchSecret,
@@ -113,41 +131,20 @@ export async function dispatchSmsQueueItem(smsId: string, timeoutMs = 12_000): P
   return result as Record<string, unknown>;
 }
 
-export async function dispatchSmsQueueWorker(timeoutMs = 60_000): Promise<Record<string, unknown>> {
-  const projectUrl = process.env.NEXT_PUBLIC_SUPABASE_URL?.replace(/\/$/, '');
-  const publishableKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-  const dispatchSecret = process.env.SMS_DISPATCH_SECRET;
-  if (!projectUrl || !publishableKey || !dispatchSecret) {
-    throw new Error('SMS Edge worker is not configured. Set Supabase URL/key and SMS_DISPATCH_SECRET.');
-  }
-
-  const response = await fetch(`${projectUrl}/functions/v1/church-najiki-queue-worker`, {
-    method: 'POST',
-    headers: {
-      apikey: publishableKey,
-      'content-type': 'application/json',
-      'x-dispatch-secret': dispatchSecret,
-    },
-    body: '{}',
-    signal: AbortSignal.timeout(timeoutMs),
-    cache: 'no-store',
-  });
-  const result = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    throw new Error(`SMS Edge queue worker returned ${response.status}: ${String((result as any)?.error ?? 'request failed')}`);
-  }
-  return result as Record<string, unknown>;
-}
-
-export async function dispatchSmsQueueItems(ids: string[], concurrency = 10) {
-  const results: Array<{ id: string; ok: boolean; error?: string }> = [];
+export async function dispatchSmsQueueItems(
+  ids: string[],
+  concurrency = 10,
+  accessToken?: string | null,
+) {
+  const results: Array<{ id: string; ok: boolean; status?: string; error?: string }> = [];
   let cursor = 0;
   const workers = Array.from({ length: Math.min(Math.max(concurrency, 1), ids.length) }, async () => {
     while (cursor < ids.length) {
       const id = ids[cursor++];
       try {
-        await dispatchSmsQueueItem(id);
-        results.push({ id, ok: true });
+        const result = await dispatchSmsQueueItem(id, 35_000, accessToken);
+        const status = typeof result.status === 'string' ? result.status : undefined;
+        results.push({ id, ok: status !== 'failed', status });
       } catch (error) {
         // The row is already durable; lease recovery will safely retry this same ID.
         results.push({ id, ok: false, error: error instanceof Error ? error.message : String(error) });
@@ -164,6 +161,7 @@ export async function dispatchSmsQueueItems(ids: string[], concurrency = 10) {
  * during migration; wallet debit is performed transactionally by the Edge Function.
  */
 export async function sendSingleSMS({
+  supabase,
   phoneNumber,
   message,
   churchId,
@@ -188,14 +186,15 @@ export async function sendSingleSMS({
     recipientId,
     idempotencyKey,
   });
-  if (queued.status === 'FAILED') {
-    throw new Error('This SMS idempotency key is already attached to a FAILED queue item. Use a new key for a deliberate resend.');
+  if (queued.status === 'failed' || queued.status === 'cancelled') {
+    throw new Error('This SMS idempotency key is already attached to a failed queue item. Use a new key for a deliberate resend.');
   }
 
   let dispatched: Record<string, unknown> | null = null;
   let dispatchPending = false;
   try {
-    dispatched = await dispatchSmsQueueItem(queued.id);
+    const accessToken = await getSupabaseAccessToken(supabase);
+    dispatched = await dispatchSmsQueueItem(queued.id, 35_000, accessToken);
   } catch (error) {
     // Do not discard or recreate the row after an invocation timeout/error.
     dispatchPending = true;
@@ -203,7 +202,7 @@ export async function sendSingleSMS({
   }
 
   if (dispatched?.status === 'failed') {
-    throw new Error('Na’jiki permanently rejected the SMS; the queue item was marked FAILED.');
+    throw new Error('Na’jiki permanently rejected the SMS; the queue item was marked failed.');
   }
 
   return {

@@ -217,7 +217,11 @@ export async function startActivationPayment({
 
     requestDispatched = true;
     const najikiResponse = await createNajikiPayment(paymentRequest);
-    providerTxId = najikiResponse.paymentId || najikiResponse.reference || null;
+    // `paymentId` is Na'jiki's own intent ID. The settlement RPC's
+    // provider_transaction_id is the downstream provider ID that arrives later
+    // as webhook `providerPaymentId`; persisting the intent ID here would make
+    // the successful callback look like a conflicting transaction.
+    providerTxId = najikiResponse.providerPaymentId?.trim() || null;
     if (providerTxId) {
       await supabase
         .schema('church')

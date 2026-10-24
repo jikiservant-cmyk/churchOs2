@@ -1,8 +1,15 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseWholeUgxAmount } from '../lib/money.ts';
+import { parseWholeUgxAmount, SMS_TOPUP_MAX_UGX, SMS_TOPUP_MIN_UGX } from '../lib/money.ts';
 
 describe('UGX amount validation', () => {
+  test('shares the SMS top-up minimum and maximum between client and server', () => {
+    assert.equal(SMS_TOPUP_MIN_UGX, 1_000);
+    assert.equal(SMS_TOPUP_MAX_UGX, 2_000_000);
+    assert.equal(parseWholeUgxAmount('1000', SMS_TOPUP_MIN_UGX, SMS_TOPUP_MAX_UGX), 1_000);
+    assert.equal(parseWholeUgxAmount('999', SMS_TOPUP_MIN_UGX, SMS_TOPUP_MAX_UGX), null);
+  });
+
   test('accepts only positive whole amounts inside the server-owned bounds', () => {
     assert.equal(parseWholeUgxAmount('1,000', 1_000, 2_000_000), null);
     assert.equal(parseWholeUgxAmount('1000', 1_000, 2_000_000), 1_000);

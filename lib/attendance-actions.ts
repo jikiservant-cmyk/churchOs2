@@ -832,34 +832,12 @@ export async function sendMissedYouMessages(churchId: string, churchSlug: string
       .eq('id', churchId)
       .maybeSingle();
 
-    const { data: balance } = await supabase
-      .schema('public')
-      .from('wallets')
-      .select('balance, sms_rate')
-      .eq('tenant_id', churchId)
-      .maybeSingle();
-
-    if (!balance) return { error: 'Billing account not found' };
-
     const senderId = church?.sender_id?.trim() || '';
 
     let sentCount = 0;
 
     for (const member of members) {
       if (!member.phone_number) continue;
-
-      // Re-fetch balance from DB each iteration to avoid stale reads from concurrent deductions
-      const { data: freshBalance } = await supabase
-        .schema('public')
-        .from('wallets')
-        .select('balance, sms_rate')
-        .eq('tenant_id', churchId)
-        .maybeSingle();
-
-      if (!freshBalance || freshBalance.balance < freshBalance.sms_rate) {
-        console.warn('[sendMissedYouMessages] Halted: Insufficient balance');
-        break;
-      }
 
       const firstName = member.full_name.split(' ')[0] || 'there';
       const defaultMessage = `Hello ${firstName}! we missed you  at church today. We pray you are well and hope to see you again next time. Blessings from your church family.`;
@@ -879,8 +857,7 @@ export async function sendMissedYouMessages(churchId: string, churchSlug: string
           message,
           churchId,
           idempotencyKey: deterministicKey,
-          senderId,
-          balance: freshBalance
+          senderId
         });
 
         if (result.success) {

@@ -48,6 +48,9 @@ export async function GET(
   }
 
   const { broadcastId } = await params;
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(broadcastId)) {
+    return NextResponse.json({ error: 'Invalid broadcast ID' }, { status: 400 });
+  }
   const status = await getBroadcastStatus(broadcastId, profile.tenant_id);
 
   if (!status) {

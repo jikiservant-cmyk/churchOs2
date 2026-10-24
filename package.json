@@ -1,5 +1,5 @@
 {
-  "name": "ai-studio-applet",
+  "name": "churchos-app",
   "version": "0.1.0",
   "private": true,
   "scripts": {
@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint .",
-    "test": "node --test tests/*.test.ts",
+    "test": "node --test tests/*.test.ts && tsx --test tests/sms-topup-e2e.ts",
     "clean": "next clean",
     "typecheck": "tsc --noEmit",
     "check": "npm run typecheck && npm run lint && npm test && npm run security:audit && npm run build",
@@ -16,7 +16,6 @@
   "dependencies": {
     "@fontsource/outfit": "^5.3.0",
     "@fontsource/playfair-display": "^5.3.0",
-    "@google/genai": "^1.17.0",
     "@hookform/resolvers": "^5.2.1",
     "@supabase/ssr": "^0.10.2",
     "@supabase/supabase-js": "^2.103.2",
@@ -49,6 +48,7 @@
     "eslint": "^9.39.5",
     "eslint-config-next": "^16.4.2",
     "tailwindcss": "4.1.11",
+    "tsx": "^4.23.15",
     "tw-animate-css": "^1.4.0",
     "typescript": "5.9.3",
     "zod": "^4.6.7"

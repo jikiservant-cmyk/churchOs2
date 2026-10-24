@@ -36,7 +36,8 @@ export interface OverseerTotals {
 
 export interface OverseerInvite {
   id?: string;
-  code: string;
+  label?: string;
+  code?: string;
   max_uses?: number | null;
   uses_count?: number;
   expires_at?: string | null;
@@ -119,11 +120,21 @@ export async function getOverseerDashboardData() {
  * Creates a new pastor invite code for the overseer's denomination.
  */
 export async function createOverseerInvite(formData: FormData) {
-  const code = (formData.get('code') as string || '').trim().toUpperCase();
-  const maxUsesStr = formData.get('max_uses') as string;
-  const expiresAt = (formData.get('expires_at') as string || '').trim();
+  const label = (formData.get('label') as string || '').trim();
+  const maxUsesRaw = (formData.get('max_uses') as string || '').trim();
+  const expiresInDaysRaw = (formData.get('expires_in_days') as string || '14').trim();
+  const maxUses = maxUsesRaw ? Number(maxUsesRaw) : null;
+  const expiresInDays = Number(expiresInDaysRaw);
 
-  const maxUses = maxUsesStr ? parseInt(maxUsesStr, 10) : null;
+  if (!label || label.length > 100) {
+    return { error: 'Invite label must be between 1 and 100 characters.' };
+  }
+  if (maxUses !== null && (!Number.isSafeInteger(maxUses) || maxUses < 1)) {
+    return { error: 'Maximum uses must be a positive whole number or left blank for unlimited uses.' };
+  }
+  if (!Number.isSafeInteger(expiresInDays) || expiresInDays < 1) {
+    return { error: 'Expiration must be a positive number of days.' };
+  }
 
   const supabase = await createClient();
   const { data: { user }, error: authError } = await supabase.auth.getUser();
@@ -136,19 +147,34 @@ export async function createOverseerInvite(formData: FormData) {
   }
 
   try {
-    const params: Record<string, any> = {};
-    if (code) params.p_code = code;
-    if (maxUses && !isNaN(maxUses)) params.p_max_uses = maxUses;
-    if (expiresAt) params.p_expires_at = expiresAt;
-
-    const { data, error } = await supabase.rpc('overseer_create_invite', params);
+    const { data, error } = await supabase.rpc('overseer_create_invite', {
+      p_label: label,
+      p_max_uses: maxUses,
+      p_expires_in_days: expiresInDays,
+    });
 
     if (error) {
       return { error: error.message };
     }
 
+    const row = Array.isArray(data) ? data[0] : data;
+    if (!row || typeof row.code !== 'string' || !row.code.trim()) {
+      console.error('[Overseer] Invite RPC returned no generated code.');
+      return { error: 'The invite was created, but no code was returned. Please contact support before creating another.' };
+    }
+
+    const invite: OverseerInvite = {
+      id: row.invite_id ? String(row.invite_id) : undefined,
+      label,
+      code: row.code,
+      max_uses: maxUses,
+      uses_count: 0,
+      expires_at: row.expires_at ?? null,
+      created_at: new Date().toISOString(),
+    };
+
     revalidatePath('/overseer');
-    return { success: true, invite: data };
+    return { success: true, invite };
   } catch (err: any) {
     return { error: err?.message || 'Failed to create invite' };
   }

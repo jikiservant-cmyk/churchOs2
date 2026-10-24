@@ -1,5 +1,2 @@
 [functions.church-najiki-dispatch]
-verify_jwt = false
-
-[functions.church-najiki-queue-worker]
-verify_jwt = false
+verify_jwt = true

@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import crypto from 'node:crypto';
-import { dispatchSmsQueueWorker } from '@/lib/sms-dispatch';
+import { createAdminClient } from '@/lib/supabase/server';
+import { dispatchSmsQueueItems } from '@/lib/sms-dispatch';
 
 const QUEUE_SECRET = process.env.QUEUE_PROCESSOR_SECRET;
 
@@ -21,12 +22,39 @@ async function run(request: Request) {
   if (!isAuthorized(request)) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
   try {
-    // This route only wakes the Edge worker. The worker scans due PENDING rows
-    // and expired PROCESSING leases, then calls the single-row dispatcher by ID.
-    const result = await dispatchSmsQueueWorker();
-    return NextResponse.json({ success: true, ...result });
+    const admin = await createAdminClient();
+    const now = new Date().toISOString();
+    const [pendingResult, expiredResult] = await Promise.all([
+      admin.schema('church').from('sms_queue').select('id')
+        .eq('status', 'pending')
+        .or(`scheduled_at.is.null,scheduled_at.lte.${now}`)
+        .order('scheduled_at', { ascending: true })
+        .limit(20),
+      admin.schema('church').from('sms_queue').select('id')
+        .eq('status', 'processing')
+        .or(`locked_until.is.null,locked_until.lte.${now}`)
+        .order('locked_until', { ascending: true })
+        .limit(20),
+    ]);
+
+    if (pendingResult.error) throw new Error(`Pending queue lookup failed: ${pendingResult.error.message}`);
+    if (expiredResult.error) throw new Error(`Expired lease lookup failed: ${expiredResult.error.message}`);
+
+    const ids = [...new Set([
+      ...(pendingResult.data ?? []).map((row) => row.id),
+      ...(expiredResult.data ?? []).map((row) => row.id),
+    ])];
+    const outcomes = await dispatchSmsQueueItems(ids, 5);
+    return NextResponse.json({
+      success: true,
+      candidates: ids.length,
+      sent: outcomes.filter((result) => result.status === 'sent').length,
+      pending: outcomes.filter((result) => result.status === 'pending' || !result.ok).length,
+      failed: outcomes.filter((result) => result.status === 'failed').length,
+      skipped: outcomes.filter((result) => result.status === 'not_due_or_already_claimed').length,
+    });
   } catch (error) {
-    console.error('[ProcessQueue] Edge worker invocation failed:', error);
+    console.error('[ProcessQueue] Queue dispatch failed:', error);
     return NextResponse.json({ error: error instanceof Error ? error.message : 'Queue dispatch failed.' }, { status: 502 });
   }
 }

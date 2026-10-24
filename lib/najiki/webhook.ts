@@ -177,17 +177,14 @@ export interface NajikiSmsDeliveryNotification {
   applicationCode: string | null
 }
 
-export type WalletSettlementDecision = 'credited' | 'already_credited' | 'conflict' | 'retry'
+export type WalletSettlementDecision = 'credited' | 'already_credited' | 'retry'
 
 /** Interpret the atomic settlement RPC response fail-closed. */
 export function classifyWalletSettlementResult(result: unknown): WalletSettlementDecision {
   if (!result || typeof result !== 'object' || Array.isArray(result)) return 'retry'
   const response = result as Record<string, unknown>
-  if (response.result === 'credited') return 'credited'
-  if (response.result === 'duplicate' && response.previous_status === 'success') {
-    return 'already_credited'
-  }
-  if (response.result === 'duplicate') return 'conflict'
+  if (response.success === true && response.already_processed === false) return 'credited'
+  if (response.success === true && response.already_processed === true) return 'already_credited'
   return 'retry'
 }
 
@@ -265,6 +262,13 @@ export function activationMerchantReference(
 ): string | null {
   if (notification.metadata.type !== 'church_activation') return null
   return str(notification.metadata.merchantReference)
+}
+
+/** Only return Na'jiki's canonical downstream transaction ID; never substitute paymentIntentId. */
+export function activationProviderTransactionId(
+  notification: NajikiPaymentNotification
+): string | null {
+  return str(notification.providerPaymentId)?.trim() || null
 }
 
 export function parseSmsDeliveryNotification(

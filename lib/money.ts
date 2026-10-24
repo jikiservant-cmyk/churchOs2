@@ -1,3 +1,7 @@
+/** Shared server/client bounds for purchasing SMS wallet credits. */
+export const SMS_TOPUP_MIN_UGX = 1_000;
+export const SMS_TOPUP_MAX_UGX = 2_000_000;
+
 /** Parse a monetary amount expressed in whole UGX without accepting prefixes or fractions. */
 export function parseWholeUgxAmount(
   value: unknown,

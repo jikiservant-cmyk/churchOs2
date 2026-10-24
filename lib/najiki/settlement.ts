@@ -8,7 +8,12 @@ import {
 export interface WalletSettlementInput {
   db: any;
   notification: NajikiPaymentNotification;
-  transaction: { tenant_id: string; amount: unknown; currency?: unknown; reference_code?: string | null; reference?: string | null };
+  transaction: {
+    tenant_id: string;
+    amount: unknown;
+    currency?: unknown;
+    payment_intent_id?: string | null;
+  };
   payload: unknown;
 }
 
@@ -28,19 +33,27 @@ export async function settleWalletPayment({ db, notification, transaction, paylo
     return { ok: false, status: 422, error: 'Amount or currency mismatch' };
   }
 
-  const { data: wallet, error: walletError } = await db
-    .from('wallets')
-    .select('id')
-    .eq('tenant_id', transaction.tenant_id)
-    .maybeSingle();
-  if (walletError || !wallet) {
-    return { ok: false, status: 500, error: 'Wallet settlement is temporarily unavailable' };
+  const reference = notification.reference.trim();
+  const tenantId = transaction.tenant_id.trim();
+  const paymentIntentId = notification.paymentIntentId.trim();
+  const persistedAmount = Number(transaction.amount);
+
+  if (!reference || !tenantId || !paymentIntentId) {
+    return { ok: false, status: 422, error: 'Payment reference, tenant, and intent are required' };
+  }
+  if (transaction.payment_intent_id !== paymentIntentId) {
+    return { ok: false, status: 409, error: 'Payment intent does not match the pending wallet transaction' };
   }
 
   const { data: rpcResult, error: rpcError } = await db.rpc('process_topup_webhook', {
-    p_reference: transaction.reference_code || transaction.reference || notification.reference,
-    p_tenant_id: transaction.tenant_id,
-    p_amount: transaction.amount,
+    // The RPC resolves public.payment_intents.reference, not the app's
+    // wallet_transactions.reference_code / churchReference.
+    p_reference: reference,
+    // The deployed function signature deliberately accepts tenant IDs as text.
+    p_tenant_id: tenantId,
+    // Pass the verified, persisted ledger amount; the RPC also checks it against
+    // the payment intent before changing any wallet state.
+    p_amount: persistedAmount,
     p_payload: payload,
   });
   if (rpcError) {
@@ -50,9 +63,6 @@ export async function settleWalletPayment({ db, notification, transaction, paylo
   const decision = classifyWalletSettlementResult(rpcResult);
   if (decision === 'credited' || decision === 'already_credited') {
     return { ok: true, settlement: decision };
-  }
-  if (decision === 'conflict') {
-    return { ok: false, status: 409, error: 'Payment transaction is in a conflicting state' };
   }
   return { ok: false, status: 500, error: 'Payment settlement result is unknown' };
 }

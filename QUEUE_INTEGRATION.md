@@ -1,94 +1,61 @@
-# SMS Queue + Supabase Edge Dispatch
+# SMS queue and Na'jiki Edge dispatch
 
-All application SMS is persisted as one row in `church.sms_queue` and sent only by the `church-najiki-dispatch` Supabase Edge Function. The backend passes only `sms_id`; the function loads the row itself, claims it under a lease, performs the wallet debit exactly once, and calls Na'jiki. No route, browser, or database trigger calls an SMS carrier directly.
+This integration uses the **existing database tables and RPCs**. It does not require a new migration or SQL to run.
 
-## 1. Apply the database migration
+## Dispatch flow
 
-Apply `migrations/009_najiki_sms_edge_dispatch.sql` after the existing church/SMS schema. It:
+1. The authenticated backend validates the church/recipient and inserts one row per recipient into `church.sms_queue` using the existing enqueue path.
+2. Once the insert succeeds, the backend calls `church-najiki-dispatch` once for each row, with JSON containing only `sms_id`. Retries reuse that same queue row and idempotency key.
+3. The Edge Function claims the row, prepares/verifies the corresponding `church.sms_logs` row, reserves the debit with the existing RPC, calls Na'jiki, then records or schedules the outcome through the existing RPCs.
 
-- adds `locked_until` and a fencing `lock_token` so abandoned `PROCESSING` rows can be reclaimed safely;
-- adds Na'jiki callback-correlation fields and backfills stable keys for older queue rows;
-- installs single-row claim, lease-release, idempotent debit, completion, and refund RPCs;
-- retires the former batch claim RPC.
+The active `church-najiki-dispatch` function requires both a valid Supabase JWT (platform verification is enabled) and `x-dispatch-secret`. The request headers are:
 
-The wallet mapping is confirmed by this repository's schema: the church creation trigger writes `NEW.id` into `public.tenants.id`, and `public.wallets.tenant_id` references that tenant ID. Thus `church.churches.id = public.tenants.id = public.wallets.tenant_id` is a direct UUID mapping. Validate legacy production data before deploying if those tables were populated outside the provided registration path.
-
-## 2. Deploy the Edge Functions
-
-Install the Supabase CLI if needed, link it to the existing project, and deploy:
-
-```sh
-supabase functions deploy church-najiki-dispatch
-supabase functions deploy church-najiki-queue-worker
+```text
+Authorization: Bearer <user access token, or server-only service-role JWT>
+apikey: <Supabase publishable key>
+x-dispatch-secret: <DISPATCH_SECRET>
+Content-Type: application/json
 ```
 
-Both functions have `verify_jwt = false` in `supabase/config.toml`; they require the independent shared dispatch secret on every request. Do not expose that secret in browser code.
+The request body is exactly:
 
-Set the following in Supabase Edge Function secrets (use the current Supabase **secret API key**, not a deprecated service-role key):
-
-```sh
-supabase secrets set \
-  SUPABASE_SECRET_API_KEY='…' \
-  DISPATCH_SECRET='…' \
-  NAJIKI_API_KEY='…' \
-  NAJIKI_API_URL='https://najiki.netlify.app' \
-  NAJIKI_APPLICATION_CODE='church'
+```json
+{ "sms_id": "<sms_queue UUID>" }
 ```
 
-Use the same high-entropy `DISPATCH_SECRET` value as the app server's `SMS_DISPATCH_SECRET`. `NAJIKI_API_KEY` and the Supabase secret API key belong only in Edge Function secrets. The function uses Na'jiki's audited contract: `POST /api/messaging/send`, Bearer auth, `to`, `message`, optional `from`, `applicationCode: "church"`, and `Idempotency-Key`; it parses `smsId` and `reference` from the response.
+The Edge Function loads phone, message, tenant, sender, attempts, and idempotency key from the existing queue row. It does not accept those fields from the caller and does not enqueue messages.
 
-## 3. Configure the app server
+## Existing database RPCs used
 
-Set these on the Next.js server environment (for example, Vercel Project Settings):
+- `claim_sms_queue_item(p_sms_id uuid, p_lock_token uuid, p_lease_seconds integer)` → `SETOF church.sms_queue`
+- `reserve_sms_queue_debit(p_sms_id uuid, p_lock_token uuid)` → `jsonb`
+- `release_sms_queue_item(p_sms_id uuid, p_lock_token uuid, p_retry_at timestamptz, p_error text, p_restore_attempt boolean)` → `boolean`
+- `fail_sms_queue_item(p_sms_id uuid, p_lock_token uuid, p_error text)` → `jsonb`
+- `complete_sms_queue_item(p_sms_id uuid, p_lock_token uuid, p_najiki_sms_id text, p_najiki_reference text, p_gateway_status text)` → `boolean`
 
-```dotenv
-NEXT_PUBLIC_SUPABASE_URL=https://<project-ref>.supabase.co
-NEXT_PUBLIC_SUPABASE_ANON_KEY=<publishable-key>
-SMS_DISPATCH_SECRET=<same value as Edge DISPATCH_SECRET>
-QUEUE_PROCESSOR_SECRET=<separate random secret for /api/sms/process-queue>
-```
+The log upsert uses the existing unique conflict target `tenant_id,idempotency_key`. The debit results handled by the dispatcher are `debited`, `already_debited`, `insufficient_balance`, and `wallet_missing`.
 
-The publishable key is used only as the Edge Function gateway `apikey`; the shared secret authenticates the dispatch request. The Na'jiki key and Supabase secret key are not needed by the Next.js app server for dispatch.
+## Runtime configuration
 
-## 4. Schedule recovery of due and abandoned rows
+Supabase provides `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` to the Edge Function. The function uses the service-role key only inside the Edge runtime to access the database. Never expose it in browser code.
 
-The enqueue/send backend invokes the worker immediately after it commits queue rows. A scheduled worker is still required for timeouts, transient Na'jiki errors, rate limiting, and expired leases. Enable `pg_cron`, `pg_net`, and Vault in the Supabase project, then store the worker URL, publishable key, and the shared dispatch secret in Vault (substitute secrets in the SQL Editor; do not commit them):
+Required application-specific Edge secrets:
 
-```sql
-select vault.create_secret('https://<project-ref>.supabase.co', 'churchos_sms_project_url');
-select vault.create_secret('<publishable-key>', 'churchos_sms_publishable_key');
-select vault.create_secret('<same-dispatch-secret>', 'churchos_sms_dispatch_secret');
+- `DISPATCH_SECRET` — at least 32 bytes; set the same value as the Next.js server's `SMS_DISPATCH_SECRET`.
+- `NAJIKI_API_KEY` — Na'jiki API credential.
 
-select cron.schedule(
-  'churchos-najiki-sms-queue-worker',
-  '* * * * *',
-  $job$
-    select net.http_post(
-      url := (select decrypted_secret from vault.decrypted_secrets where name = 'churchos_sms_project_url')
-        || '/functions/v1/church-najiki-queue-worker',
-      headers := jsonb_build_object(
-        'content-type', 'application/json',
-        'apikey', (select decrypted_secret from vault.decrypted_secrets where name = 'churchos_sms_publishable_key'),
-        'x-dispatch-secret', (select decrypted_secret from vault.decrypted_secrets where name = 'churchos_sms_dispatch_secret')
-      ),
-      body := '{}'::jsonb
-    );
-  $job$
-);
-```
+Optional Edge variables:
 
-If the project uses an existing cron/secret setup, adapt the call rather than creating duplicate schedules. The authenticated fallback endpoint `GET /api/sms/process-queue` (or `POST` with `x-queue-secret`) can also wake the Edge worker with `QUEUE_PROCESSOR_SECRET`.
+- `NAJIKI_API_URL` — defaults to `https://najiki.netlify.app`; must use HTTPS.
+- `NAJIKI_APPLICATION_CODE` — defaults to `church`.
 
-## 5. Request and retry behavior
+The server-side caller also needs the Supabase project URL, a publishable key for the `apikey` header, and a JWT for the `Authorization` header. Prefer the initiating user's access token when available; a service-role JWT is acceptable only for a trusted server-to-server call. Never put `DISPATCH_SECRET` or the service-role JWT in browser code or chat.
 
-- `POST /api/sms/send`, `/api/sms/broadcast`, `/api/sms/enqueue`, attendance follow-ups, and payment receipt SMS now create/reuse a queue row before invoking the Edge Function.
-- The Edge Function accepts only `{ "sms_id": "<queue UUID>" }`; it never trusts message, recipient, tenant, or price data from the invocation.
-- Queue IDs and idempotency keys remain stable across timeouts. A duplicate idempotency key returns the existing queue ID rather than creating another SMS job. `POST /api/sms/send` requires a caller-supplied `idempotencyKey` (or `Idempotency-Key` header, 8–255 characters); callers must reuse it when retrying the HTTP request.
-- `claim_sms_queue_item` atomically claims one due `PENDING` item or an expired `PROCESSING` lease. The `lock_token` fences off old workers after lease recovery.
-- Wallet debit and ledger insertion are transactional and idempotent by queue ID. A definitive Na'jiki 4xx rejection marks the job failed and refunds once. Network timeouts, 5xx responses, and 429 rate limits are treated as ambiguous/transient and retried with the same key; they are not refunded while acceptance is unknown.
-- `church.sms_logs` is created before dispatch and correlated to Na'jiki `smsId`/`reference`, preserving signed webhook delivery updates.
-- Broadcast status is derived from the authoritative queue rows; the existing `GET /api/sms/broadcast-status/:broadcastId` endpoint remains available.
+## Responses and retry notes
 
-## Throughput note
+- `sent`: Na'jiki accepted the SMS and the completion RPC succeeded.
+- `pending`: retry later; includes transient provider errors and wallet/balance conditions.
+- `failed`: terminal provider rejection was finalized.
+- `skipped`: the item was not due or was already claimed.
 
-The audited Na'jiki deployment rate-limits SMS requests to **60 per application API key per minute**. A 5,000-recipient broadcast therefore cannot complete in under two minutes under that gateway policy; the theoretical lower bound is about 84 minutes, before delivery and retry overhead. Increase the Na'jiki application/API-key rate limit and confirm carrier capacity there before promising a higher throughput. The Edge queue prevents request timeouts and duplicate sends; it cannot bypass the gateway's rate limit.
+The provider call has a 25-second timeout and retries reuse the same idempotency key. The handler receives `max_attempts` from the queue row but does not enforce that limit itself; confirm the existing database queue RPC or other queue process enforces it.

@@ -1,14 +1,28 @@
 import type {NextConfig} from 'next';
 
-// Origins allowed to call Server Actions and to access the dev server.
-// Covers local dev, Google Cloud Run / Studio previews, and Arena (e2b) previews.
+// Next.js normally accepts same-origin Server Actions. Only add an exact
+// configured application host for reverse-proxy deployments; broad provider
+// wildcards would let unrelated tenants on those providers submit authenticated
+// Server Action requests (CSRF).
+const configuredAppHost = (() => {
+  const appUrl = process.env.APP_URL;
+  if (!appUrl) return null;
+  try {
+    return new URL(appUrl).host;
+  } catch {
+    return null;
+  }
+})();
+const localDevOrigins = ['localhost:3000', '127.0.0.1:3000'];
+// Arena preview host is derived from this sandbox's ID, rather than trusting
+// every tenant on the shared e2b.app domain.
+const arenaPreviewHost = process.env.NODE_ENV === 'development' && process.env.E2B_SANDBOX_ID
+  ? `3000-${process.env.E2B_SANDBOX_ID}.e2b.app`
+  : null;
 const allowedOrigins = [
-  'localhost:3000',
-  '127.0.0.1:3000',
-  '*.run.app',
-  '*.google.com',
-  '*.googleusercontent.com',
-  '*.e2b.app',
+  ...localDevOrigins,
+  ...(configuredAppHost ? [configuredAppHost] : []),
+  ...(arenaPreviewHost ? [arenaPreviewHost] : []),
 ];
 
 const nextConfig: NextConfig = {

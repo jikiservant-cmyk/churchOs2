@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { normalizeUgPhone } from '@/lib/utils';
 import { tenantScopedAdmin } from '@/lib/supabase/tenant-scoped';
 
@@ -11,6 +12,7 @@ export interface EnqueueBroadcastParams {
 }
 
 export interface EnqueueResult {
+  /** API-compatible name; this is a queue batch ID, not a church.broadcasts row. */
   broadcastId: string;
   enqueued: number;
   skipped: number;
@@ -29,27 +31,17 @@ export interface BroadcastStatus {
   completedAt: string | null;
 }
 
-/** Persist a broadcast and its one-row-per-recipient queue. No SMS is sent here. */
+/**
+ * Persist one lowercase-pending queue row per recipient. The batch UUID is
+ * embedded in each row's idempotency key, avoiding any assumed batch column
+ * or dependency on church.broadcasts/church.broadcast_sessions.
+ */
 export async function enqueueBroadcast(params: EnqueueBroadcastParams): Promise<EnqueueResult> {
   const scopedDb = await tenantScopedAdmin(params.tenantId);
-  const { data: broadcast, error: broadcastError } = await scopedDb
-    .church('broadcasts')
-    .insert({
-      message_template: params.message,
-      audience: params.audience ?? 'all',
-      total_recipients: 0,
-      status: 'QUEUED',
-      created_by: params.createdBy ?? null,
-    })
-    .select('id')
-    .single();
-
-  if (broadcastError || !broadcast) {
-    throw new Error(`Failed to create broadcast: ${broadcastError?.message ?? 'unknown database error'}`);
-  }
-
+  const batchId = randomUUID();
   const rows: Array<Record<string, unknown>> = [];
   let skipped = 0;
+
   for (let i = 0; i < params.recipients.length; i++) {
     const recipient = params.recipients[i];
     const phone = normalizeUgPhone(recipient.phone_number);
@@ -65,14 +57,13 @@ export async function enqueueBroadcast(params: EnqueueBroadcastParams): Promise<
 
     rows.push({
       tenant_id: params.tenantId,
-      broadcast_id: broadcast.id,
       recipient_id: recipient.id,
       recipient_phone: phone,
       message,
       sender_id: params.senderId?.trim() || null,
-      status: 'PENDING',
+      status: 'pending',
       scheduled_at: new Date().toISOString(),
-      idempotency_key: `bcast_${broadcast.id}_${recipient.id}_${i}`,
+      idempotency_key: `bcast_${batchId}_${recipient.id}_${i}`,
     });
   }
 
@@ -82,65 +73,47 @@ export async function enqueueBroadcast(params: EnqueueBroadcastParams): Promise<
       .church('sms_queue')
       .insert(rows.slice(offset, offset + 100))
       .select('id');
-    if (error) {
-      throw new Error(`Queue insert failed at offset ${offset}: ${error.message}`);
-    }
+    if (error) throw new Error(`Queue insert failed at offset ${offset}: ${error.message}`);
     queueIds.push(...(data ?? []).map((row: { id: string }) => row.id));
   }
 
-  const now = new Date().toISOString();
-  await scopedDb
-    .church('broadcasts')
-    .update({
-      total_recipients: queueIds.length,
-      status: queueIds.length ? 'QUEUED' : 'COMPLETED',
-      completed_at: queueIds.length ? null : now,
-      updated_at: now,
-    })
-    .eq('id', broadcast.id);
-
-  return { broadcastId: broadcast.id, enqueued: queueIds.length, skipped, queueIds };
+  return { broadcastId: batchId, enqueued: queueIds.length, skipped, queueIds };
 }
 
-/** Tenant-scoped live progress derived from the queue's authoritative states. */
+/** Progress is computed from the live queue only; no church.broadcasts schema is assumed. */
 export async function getBroadcastStatus(
-  broadcastId: string,
+  batchId: string,
   tenantId: string,
 ): Promise<BroadcastStatus | null> {
   const scopedDb = await tenantScopedAdmin(tenantId);
-  const { data: broadcast } = await scopedDb
-    .church('broadcasts')
-    .select('id, created_at')
-    .eq('id', broadcastId)
-    .maybeSingle();
-  if (!broadcast) return null;
-
   const { data: rows, error } = await scopedDb
     .church('sms_queue')
-    .select('status, updated_at')
-    .eq('broadcast_id', broadcastId);
-  if (error || !rows) throw new Error(`Could not read broadcast queue status: ${error?.message ?? 'unknown error'}`);
+    .select('status, created_at, processed_at')
+    .like('idempotency_key', `bcast_${batchId}_%`);
 
-  const sent = rows.filter((row: { status: string }) => row.status === 'SENT').length;
-  const failed = rows.filter((row: { status: string }) => row.status === 'FAILED').length;
+  if (error) throw new Error(`Could not read queue batch status: ${error.message}`);
+  if (!rows?.length) return null;
+
+  const sent = rows.filter((row: { status: string }) => row.status === 'sent').length;
+  const failed = rows.filter((row: { status: string }) => row.status === 'failed' || row.status === 'cancelled').length;
   const pending = rows.length - sent - failed;
   const status: BroadcastStatus['status'] = pending > 0
     ? sent + failed === 0 ? 'QUEUED' : 'PROCESSING'
     : failed === 0 ? 'COMPLETED' : sent === 0 ? 'FAILED' : 'PARTIAL';
-  const complete = pending === 0;
-  const completedAt = complete && rows.length
-    ? rows.map((row: { updated_at: string }) => row.updated_at).sort().at(-1) ?? null
+  const createdAt = rows.map((row: { created_at: string }) => row.created_at).sort()[0];
+  const completedAt = pending === 0
+    ? rows.map((row: { processed_at: string | null }) => row.processed_at).filter(Boolean).sort().at(-1) ?? null
     : null;
 
   return {
-    broadcastId,
+    broadcastId: batchId,
     status,
     total: rows.length,
     sent,
     failed,
     pending,
-    percentComplete: rows.length ? Math.round(((sent + failed) / rows.length) * 100) : 100,
-    createdAt: broadcast.created_at,
+    percentComplete: Math.round(((sent + failed) / rows.length) * 100),
+    createdAt,
     completedAt,
   };
 }

@@ -26,9 +26,9 @@ export function hasValidDispatchSecret(request: Request): boolean {
 
 export function requireSupabaseSecrets() {
   const url = Deno.env.get('SUPABASE_URL')?.replace(/\/$/, '');
-  const secretKey = Deno.env.get('SUPABASE_SECRET_API_KEY');
-  if (!url || !secretKey) throw new Error('SUPABASE_URL and SUPABASE_SECRET_API_KEY must be configured as Edge Function secrets.');
-  return { url, secretKey };
+  const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+  if (!url || !serviceRoleKey) throw new Error('SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be configured for the Edge Function.');
+  return { url, secretKey: serviceRoleKey };
 }
 
 export function exponentialBackoffMs(attempt: number): number {

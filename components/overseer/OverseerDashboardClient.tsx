@@ -164,9 +164,21 @@ export default function OverseerDashboardClient({
 
   // Invite modal state
   const [isInviteModalOpen, setIsInviteModalOpen] = useState(false);
-  const [inviteCodeInput, setInviteCodeInput] = useState('');
+  const [inviteLabel, setInviteLabel] = useState('Church onboarding');
   const [inviteMaxUses, setInviteMaxUses] = useState('');
+  const [inviteExpiresInDays, setInviteExpiresInDays] = useState('14');
+  const [newlyCreatedInvite, setNewlyCreatedInvite] = useState<OverseerInvite | null>(null);
   const [isCreatingInvite, setIsCreatingInvite] = useState(false);
+
+  const openInviteModal = () => {
+    setNewlyCreatedInvite(null);
+    setIsInviteModalOpen(true);
+  };
+
+  const closeInviteModal = () => {
+    setIsInviteModalOpen(false);
+    setNewlyCreatedInvite(null);
+  };
 
   // Detach confirmation modal
   const [detachingChurch, setDetachingChurch] = useState<OverseerChurchItem | null>(null);
@@ -216,22 +228,22 @@ export default function OverseerDashboardClient({
 
     try {
       const formData = new FormData();
-      if (inviteCodeInput.trim()) {
-        formData.set('code', inviteCodeInput.trim().toUpperCase());
-      }
-      if (inviteMaxUses.trim()) {
-        formData.set('max_uses', inviteMaxUses.trim());
-      }
+      formData.set('label', inviteLabel.trim());
+      formData.set('max_uses', inviteMaxUses.trim());
+      formData.set('expires_in_days', inviteExpiresInDays.trim());
 
       const res = await createOverseerInvite(formData);
       if (res.error) {
         toast.error(res.error);
+      } else if (res.invite) {
+        setNewlyCreatedInvite(res.invite);
+        setInvites((current) => [
+          res.invite!,
+          ...current.filter((invite) => invite.id !== res.invite?.id),
+        ]);
+        toast.success('Pastor invite created. Copy the generated code now; it may only be shown once.');
       } else {
-        toast.success('Pastor invite created successfully!');
-        setIsInviteModalOpen(false);
-        setInviteCodeInput('');
-        setInviteMaxUses('');
-        window.location.reload();
+        toast.error('The invite was created, but its generated code was not returned.');
       }
     } catch (err: any) {
       toast.error(err?.message || 'Failed to create invite');
@@ -365,7 +377,7 @@ export default function OverseerDashboardClient({
           <button
             onClick={() => {
               setActiveTab('invites');
-              setIsInviteModalOpen(true);
+              openInviteModal();
             }}
             className="flex-1 md:flex-initial px-4 py-3 bg-[#B5622A] hover:bg-[#C6733B] text-white rounded-xl text-xs font-bold uppercase tracking-wider transition-all shadow-sm flex items-center justify-center gap-2"
           >
@@ -580,7 +592,7 @@ export default function OverseerDashboardClient({
               <button
                 onClick={() => {
                   setActiveTab('invites');
-                  setIsInviteModalOpen(true);
+                  openInviteModal();
                 }}
                 className="mt-6 px-5 py-2.5 bg-[#B5622A] hover:bg-[#C6733B] text-white rounded-xl text-xs font-bold uppercase tracking-wider inline-flex items-center gap-2 shadow-sm"
               >
@@ -713,7 +725,7 @@ export default function OverseerDashboardClient({
               </p>
             </div>
             <button
-              onClick={() => setIsInviteModalOpen(true)}
+              onClick={openInviteModal}
               className="px-4 py-2.5 bg-[#B5622A] hover:bg-[#C6733B] text-white rounded-xl font-bold text-xs uppercase tracking-wider transition-all shadow-sm flex items-center gap-1.5"
             >
               <Plus className="w-4 h-4" />
@@ -731,7 +743,7 @@ export default function OverseerDashboardClient({
                 Generate invite codes for pastors to link their churches during signup or via their Church Settings.
               </p>
               <button
-                onClick={() => setIsInviteModalOpen(true)}
+                onClick={openInviteModal}
                 className="mt-6 px-5 py-2.5 bg-[#B5622A] hover:bg-[#C6733B] text-white rounded-xl text-xs font-bold uppercase tracking-wider inline-flex items-center gap-2"
               >
                 <Plus className="w-4 h-4" />
@@ -740,9 +752,9 @@ export default function OverseerDashboardClient({
             </div>
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
-              {invites.map((inv) => {
-                const identifier = inv.id || inv.code;
-                const isCopied = copiedCode === inv.code;
+              {invites.map((inv, index) => {
+                const identifier = inv.id || inv.code || `${inv.label || 'invite'}-${index}`;
+                const isCopied = Boolean(inv.code && copiedCode === inv.code);
 
                 return (
                   <div 
@@ -752,7 +764,7 @@ export default function OverseerDashboardClient({
                     <div>
                       <div className="flex items-center justify-between mb-3">
                         <span className="px-3 py-1 bg-[#2B1A0E] text-[#F5E6CE] font-mono font-bold text-sm rounded-xl uppercase tracking-wider shadow-xs">
-                          {inv.code}
+                          {inv.code || inv.label || 'Invite code shown once at creation'}
                         </span>
                         <span className="text-[10px] uppercase font-bold text-[#B5622A] bg-[rgba(181,98,42,0.1)] px-2 py-0.5 rounded-full">
                           {inv.max_uses ? `${inv.uses_count || 0}/${inv.max_uses} used` : `${inv.uses_count || 0} uses`}
@@ -781,18 +793,20 @@ export default function OverseerDashboardClient({
                     <div className="mt-5 pt-4 border-t border-[rgba(90,55,20,0.08)] flex items-center justify-between gap-2">
                       <div className="flex gap-2">
                         <button
-                          onClick={() => handleCopyCode(inv.code)}
-                          title="Copy Code"
-                          className="px-3 py-1.5 bg-white/70 hover:bg-white rounded-lg text-xs font-bold text-[#1E1208] flex items-center gap-1.5 transition-colors shadow-xs"
+                          onClick={() => inv.code && handleCopyCode(inv.code)}
+                          disabled={!inv.code}
+                          title={inv.code ? 'Copy Code' : 'Code is only available when the invite is created'}
+                          className="px-3 py-1.5 bg-white/70 hover:bg-white rounded-lg text-xs font-bold text-[#1E1208] flex items-center gap-1.5 transition-colors shadow-xs disabled:cursor-not-allowed disabled:opacity-50"
                         >
                           {isCopied ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
                           <span>{isCopied ? 'Copied' : 'Copy Code'}</span>
                         </button>
 
                         <button
-                          onClick={() => handleCopyInviteLink(inv.code)}
-                          title="Copy Direct Signup Link"
-                          className="px-2.5 py-1.5 bg-white/70 hover:bg-white rounded-lg text-xs font-bold text-[#B5622A] flex items-center gap-1 transition-colors shadow-xs"
+                          onClick={() => inv.code && handleCopyInviteLink(inv.code)}
+                          disabled={!inv.code}
+                          title={inv.code ? 'Copy Direct Signup Link' : 'Code is only available when the invite is created'}
+                          className="px-2.5 py-1.5 bg-white/70 hover:bg-white rounded-lg text-xs font-bold text-[#B5622A] flex items-center gap-1 transition-colors shadow-xs disabled:cursor-not-allowed disabled:opacity-50"
                         >
                           <Link2 className="w-3.5 h-3.5" />
                           <span className="hidden sm:inline">Link</span>
@@ -801,8 +815,9 @@ export default function OverseerDashboardClient({
 
                       <button
                         onClick={() => handleRevokeInvite(identifier)}
+                        disabled={!inv.id && !inv.code}
                         title="Revoke Invite Code"
-                        className="p-2 text-rose-700 hover:bg-rose-100 rounded-lg transition-colors"
+                        className="p-2 text-rose-700 hover:bg-rose-100 rounded-lg transition-colors disabled:cursor-not-allowed disabled:opacity-50"
                       >
                         <Trash2 className="w-3.5 h-3.5" />
                       </button>
@@ -891,7 +906,7 @@ export default function OverseerDashboardClient({
               <button
                 onClick={() => {
                   setActiveTab('invites');
-                  setIsInviteModalOpen(true);
+                  openInviteModal();
                 }}
                 className="w-full py-3 bg-[#B5622A] hover:bg-[#C6733B] text-white rounded-xl text-xs font-bold uppercase tracking-wider transition-colors"
               >
@@ -911,58 +926,118 @@ export default function OverseerDashboardClient({
             </div>
 
             <h3 style={{ fontFamily: "'Playfair Display', serif" }} className="text-2xl font-bold text-[#1E1208] mb-1">
-              Generate Pastor Invite
+              {newlyCreatedInvite ? 'Invite code ready' : 'Generate Pastor Invite'}
             </h3>
             <p className="text-xs text-[#9A7E65] leading-relaxed mb-6">
-              Create a secure invite code for pastors to connect their church to <strong className="text-[#1E1208]">{denominationName}</strong>.
+              {newlyCreatedInvite
+                ? 'Save this generated code now. The database stores only its hash, so the raw code cannot be recovered after this page is reloaded.'
+                : <>Create a secure invite code for pastors to connect their church to <strong className="text-[#1E1208]">{denominationName}</strong>.</>}
             </p>
 
-            <form onSubmit={handleCreateInviteSubmit} className="space-y-4">
-              <div>
-                <label className="block text-[11px] font-bold text-[#6B513E] uppercase tracking-wider mb-1">
-                  Custom Code (Optional)
-                </label>
-                <input
-                  type="text"
-                  placeholder="e.g. DIOCESE-EAST-2026"
-                  value={inviteCodeInput}
-                  onChange={(e) => setInviteCodeInput(e.target.value.toUpperCase())}
-                  className="w-full px-4 py-3 bg-white/70 border border-[rgba(90,55,20,0.15)] rounded-xl text-sm font-mono text-[#1E1208] uppercase focus:border-[#B5622A] outline-none"
-                />
-                <span className="text-[10px] text-[#9A7E65] mt-1 block">Leave empty to auto-generate a secure random code.</span>
-              </div>
-
-              <div>
-                <label className="block text-[11px] font-bold text-[#6B513E] uppercase tracking-wider mb-1">
-                  Maximum Uses (Optional)
-                </label>
-                <input
-                  type="number"
-                  placeholder="Unlimited (or e.g. 5)"
-                  min="1"
-                  value={inviteMaxUses}
-                  onChange={(e) => setInviteMaxUses(e.target.value)}
-                  className="w-full px-4 py-3 bg-white/70 border border-[rgba(90,55,20,0.15)] rounded-xl text-sm text-[#1E1208] focus:border-[#B5622A] outline-none"
-                />
-              </div>
-
-              <div className="flex gap-3 pt-4">
+            {newlyCreatedInvite ? (
+              <div className="space-y-4">
+                <div className="rounded-xl border border-[rgba(90,55,20,0.12)] bg-white/60 p-4">
+                  <span className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-[#9A7E65]">{newlyCreatedInvite.label}</span>
+                  <code className="block break-all font-mono text-lg font-bold tracking-wide text-[#1E1208]">
+                    {newlyCreatedInvite.code}
+                  </code>
+                  <p className="mt-2 text-[11px] text-[#9A7E65]">
+                    {newlyCreatedInvite.expires_at
+                      ? `Expires ${new Date(newlyCreatedInvite.expires_at).toLocaleDateString()}`
+                      : 'No expiry date returned'}
+                  </p>
+                </div>
+                <div className="flex flex-col gap-2 sm:flex-row">
+                  <button
+                    type="button"
+                    onClick={() => newlyCreatedInvite.code && handleCopyCode(newlyCreatedInvite.code)}
+                    className="flex-1 inline-flex items-center justify-center gap-2 rounded-xl bg-[#B5622A] px-4 py-3 text-xs font-bold uppercase tracking-wider text-white hover:bg-[#C6733B]"
+                  >
+                    <Copy className="h-4 w-4" /> Copy code
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => newlyCreatedInvite.code && handleCopyInviteLink(newlyCreatedInvite.code)}
+                    className="flex-1 inline-flex items-center justify-center gap-2 rounded-xl bg-[#2B1A0E] px-4 py-3 text-xs font-bold uppercase tracking-wider text-[#F5E6CE] hover:bg-[#3D2614]"
+                  >
+                    <Link2 className="h-4 w-4" /> Copy signup link
+                  </button>
+                </div>
                 <button
                   type="button"
-                  onClick={() => setIsInviteModalOpen(false)}
-                  className="flex-1 py-3 bg-white/60 hover:bg-white text-[#6B513E] font-bold text-xs uppercase tracking-wider rounded-xl transition-colors"
+                  onClick={closeInviteModal}
+                  className="w-full rounded-xl bg-white/60 py-3 text-xs font-bold uppercase tracking-wider text-[#6B513E] hover:bg-white"
                 >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={isCreatingInvite}
-                  className="flex-1 py-3 bg-[#2B1A0E] hover:bg-[#3D2614] text-[#F5E6CE] font-bold text-xs uppercase tracking-wider rounded-xl transition-colors disabled:opacity-50"
-                >
-                  {isCreatingInvite ? 'Creating...' : 'Create Invite'}
+                  Done
                 </button>
               </div>
-            </form>
+            ) : (
+              <form onSubmit={handleCreateInviteSubmit} className="space-y-4">
+                <div>
+                  <label htmlFor="invite-label" className="mb-1 block text-[11px] font-bold uppercase tracking-wider text-[#6B513E]">
+                    Invite label
+                  </label>
+                  <input
+                    id="invite-label"
+                    type="text"
+                    value={inviteLabel}
+                    onChange={(event) => setInviteLabel(event.target.value)}
+                    maxLength={100}
+                    required
+                    className="w-full rounded-xl border border-[rgba(90,55,20,0.15)] bg-white/70 px-4 py-3 text-sm text-[#1E1208] outline-none focus:border-[#B5622A]"
+                  />
+                </div>
+
+                <div>
+                  <label htmlFor="invite-max-uses" className="mb-1 block text-[11px] font-bold uppercase tracking-wider text-[#6B513E]">
+                    Maximum uses (optional)
+                  </label>
+                  <input
+                    id="invite-max-uses"
+                    type="number"
+                    placeholder="Unlimited"
+                    min="1"
+                    step="1"
+                    value={inviteMaxUses}
+                    onChange={(event) => setInviteMaxUses(event.target.value)}
+                    className="w-full rounded-xl border border-[rgba(90,55,20,0.15)] bg-white/70 px-4 py-3 text-sm text-[#1E1208] outline-none focus:border-[#B5622A]"
+                  />
+                </div>
+
+                <div>
+                  <label htmlFor="invite-expiry-days" className="mb-1 block text-[11px] font-bold uppercase tracking-wider text-[#6B513E]">
+                    Expires after (days)
+                  </label>
+                  <input
+                    id="invite-expiry-days"
+                    type="number"
+                    min="1"
+                    step="1"
+                    value={inviteExpiresInDays}
+                    onChange={(event) => setInviteExpiresInDays(event.target.value)}
+                    required
+                    className="w-full rounded-xl border border-[rgba(90,55,20,0.15)] bg-white/70 px-4 py-3 text-sm text-[#1E1208] outline-none focus:border-[#B5622A]"
+                  />
+                </div>
+
+                <div className="flex gap-3 pt-2">
+                  <button
+                    type="button"
+                    onClick={closeInviteModal}
+                    className="flex-1 rounded-xl bg-white/60 py-3 text-xs font-bold uppercase tracking-wider text-[#6B513E] transition-colors hover:bg-white"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={isCreatingInvite}
+                    className="flex-1 rounded-xl bg-[#2B1A0E] py-3 text-xs font-bold uppercase tracking-wider text-[#F5E6CE] transition-colors hover:bg-[#3D2614] disabled:opacity-50"
+                  >
+                    {isCreatingInvite ? 'Creating...' : 'Create Invite'}
+                  </button>
+                </div>
+              </form>
+            )}
           </div>
         </div>
       )}

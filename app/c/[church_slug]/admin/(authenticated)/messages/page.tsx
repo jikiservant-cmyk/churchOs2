@@ -66,14 +66,14 @@ export default async function MessagesPage(props: {
     !churchObj || church.id === "placeholder" || church.id === "unknown";
 
   if (church && !isPlaceholder) {
-    // 1. Fetch balance from the unified wallet
+    // Existing wallet view; SMS dispatch itself performs the authoritative
+    // balance check and debit through reserve_sms_queue_debit.
     const { data: balance } = await supabase
-      .schema("public")
-      .from("wallets")
-      .select("*")
-      .eq("tenant_id", church.id)
+      .schema('public')
+      .from('wallets')
+      .select('*')
+      .eq('tenant_id', church.id)
       .maybeSingle();
-
     balanceData = balance;
 
     // 2. Fetch members

@@ -4,8 +4,8 @@ import { parsePaymentNotification } from '../lib/najiki/webhook.ts';
 import { settleWalletPayment } from '../lib/najiki/settlement.ts';
 
 const notification = parsePaymentNotification({
-  paymentIntentId: 'pay_abc',
-  reference: 'provider-ref-1',
+  paymentIntentId: '11111111-2222-4333-8444-555555555555',
+  reference: 'CHURCH-TOP-1234-ABCD',
   status: 'success',
   amount: 12_000,
   currency: 'UGX',
@@ -14,43 +14,31 @@ const transaction = {
   tenant_id: 'tenant-1',
   amount: 12_000,
   currency: 'UGX',
-  reference_code: 'CHURCH-ref-1',
-  reference: 'provider-ref-1',
+  payment_intent_id: notification.paymentIntentId,
 };
 
 function fakeDb(options: {
-  wallet?: { id: string } | null;
-  walletError?: { message: string } | null;
   rpcResult?: unknown;
   rpcError?: { message: string } | null;
 } = {}) {
   const calls: Array<{ rpc: string; args?: Record<string, unknown> } | { table: string }> = [];
   const db = {
-    from(table: string) {
-      calls.push({ table });
-      return {
-        select() { return this; },
-        eq() { return this; },
-        maybeSingle: async () => ({ data: options.wallet === undefined ? { id: 'wallet-1' } : options.wallet, error: options.walletError ?? null }),
-      };
-    },
     rpc: async (name: string, args: Record<string, unknown>) => {
       calls.push({ rpc: name, args });
-      return { data: options.rpcResult ?? { result: 'credited' }, error: options.rpcError ?? null };
+      return { data: options.rpcResult ?? { success: true, already_processed: false }, error: options.rpcError ?? null };
     },
   };
   return { db, calls };
 }
 
-describe('wallet webhook settlement', () => {
-  test('credits only through the atomic procedure with the persisted ledger amount and tenant', async () => {
+describe('wallet webhook settlement against the deployed process_topup_webhook contract', () => {
+  test('calls the exact four-argument RPC with Na’jiki intent reference and persisted payment data', async () => {
     const { db, calls } = fakeDb();
     const result = await settleWalletPayment({ db, notification, transaction, payload: { status: 'success' } });
     assert.deepEqual(result, { ok: true, settlement: 'credited' });
     assert.deepEqual(calls, [
-      { table: 'wallets' },
       { rpc: 'process_topup_webhook', args: {
-        p_reference: 'CHURCH-ref-1',
+        p_reference: 'CHURCH-TOP-1234-ABCD',
         p_tenant_id: 'tenant-1',
         p_amount: 12_000,
         p_payload: { status: 'success' },
@@ -77,37 +65,41 @@ describe('wallet webhook settlement', () => {
     assert.equal(calls.length, 0);
   });
 
-  test('fails retryably if the tenant wallet is unavailable', async () => {
-    const { db, calls } = fakeDb({ wallet: null });
-    const result = await settleWalletPayment({ db, notification, transaction, payload: {} });
-    assert.equal(result.ok, false);
-    assert.equal(calls.length, 1);
+  test('does not call the RPC if the provider intent differs from the ledger link', async () => {
+    const { db, calls } = fakeDb();
+    const result = await settleWalletPayment({
+      db,
+      notification,
+      transaction: { ...transaction, payment_intent_id: '99999999-2222-4333-8444-555555555555' },
+      payload: {},
+    });
+    assert.deepEqual(result, {
+      ok: false,
+      status: 409,
+      error: 'Payment intent does not match the pending wallet transaction',
+    });
+    assert.equal(calls.length, 0);
   });
 
   test('does not fall back to a separate balance increment after RPC failure', async () => {
     const { db, calls } = fakeDb({ rpcError: { message: 'temporary database error' } });
     const result = await settleWalletPayment({ db, notification, transaction, payload: {} });
     assert.deepEqual(result, { ok: false, status: 500, error: 'Payment settlement is temporarily unavailable' });
-    assert.deepEqual(calls.map((call) => 'rpc' in call ? call.rpc : call.table), ['wallets', 'process_topup_webhook']);
+    assert.deepEqual(calls.map((call) => 'rpc' in call ? call.rpc : call.table), ['process_topup_webhook']);
   });
 
-  test('only acknowledges duplicate success; missing or failed transactions do not receive receipts', async () => {
-    const duplicate = fakeDb({ rpcResult: { result: 'duplicate', previous_status: 'success' } });
+  test('maps the exact RPC success/already-processed result and fails closed on legacy or unknown shapes', async () => {
+    const duplicate = fakeDb({ rpcResult: { success: true, already_processed: true } });
     assert.deepEqual(await settleWalletPayment({ db: duplicate.db, notification, transaction, payload: {} }), {
       ok: true,
       settlement: 'already_credited',
     });
 
-    const failed = fakeDb({ rpcResult: { result: 'duplicate', previous_status: 'failed' } });
-    assert.deepEqual(await settleWalletPayment({ db: failed.db, notification, transaction, payload: {} }), {
+    const unknownShape = fakeDb({ rpcResult: { result: 'credited' } });
+    assert.deepEqual(await settleWalletPayment({ db: unknownShape.db, notification, transaction, payload: {} }), {
       ok: false,
-      status: 409,
-      error: 'Payment transaction is in a conflicting state',
+      status: 500,
+      error: 'Payment settlement result is unknown',
     });
-
-    const missing = fakeDb({ rpcResult: { result: 'not_found' } });
-    const missingResult = await settleWalletPayment({ db: missing.db, notification, transaction, payload: {} });
-    assert.equal(missingResult.ok, false);
-    assert.equal(missingResult.status, 500);
   });
 });

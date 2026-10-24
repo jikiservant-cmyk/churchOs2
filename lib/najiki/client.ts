@@ -428,6 +428,8 @@ export interface NajikiCreatePaymentResponse {
   paymentId: string
   reference: string
   status: string
+  /** Downstream provider transaction ID, distinct from Na'jiki's paymentId. */
+  providerPaymentId?: string | null
 }
 
 /** GET /api/payments/:reference — scoped to the calling application. */

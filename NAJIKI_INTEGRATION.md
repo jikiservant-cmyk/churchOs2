@@ -223,6 +223,30 @@ This is the only thing that can move an SMS from `queued` to `delivered`/`failed
 
 ---
 
+### SMS wallet settlement RPC contract
+
+The Church `BUY_SMS` webhook calls the deployed
+`public.process_topup_webhook(text, text, bigint, jsonb)` function with the
+contract supplied by the database owner:
+
+- `p_reference` is Na'jiki's payment-intent `reference` from the signed callback,
+  not ChurchOS's `metadata.churchReference` / wallet `reference_code`.
+- `p_tenant_id` is passed as text, matching the deployed function signature.
+- `p_amount` comes from the persisted pending wallet transaction, after an exact
+  amount/currency check against the signed callback.
+- The initiation action links that pending row using the returned
+  `paymentId` as `payment_intent_id`; the webhook confirms it matches the signed
+  `paymentIntentId` before calling the RPC.
+- The RPC validates the Church application and `BUY_SMS` intent, then atomically
+  creates or settles the linked `sms_topup` row, credits the wallet once, and
+  returns `{ success, already_processed, ... }`. The webhook acknowledges only
+  `{ success: true, already_processed: false|true }`.
+
+No wallet read/increment fallback is performed outside this RPC. Donations and
+other payment types must not be sent through this SMS-top-up procedure.
+
+---
+
 ## 3. Sequencing rules the church app respects
 
 1. **Payment confirmed before the receipt SMS.** Na'jiki only notifies on

@@ -22,8 +22,8 @@ export async function joinDenominationWithInvite(inviteCode: string, churchSlug?
     .select('tenant_id, role')
     .eq('id', user.id)
     .maybeSingle();
-  if (!profile?.tenant_id || !['pastor', 'admin'].includes(profile.role)) {
-    return { error: 'Forbidden: only church pastors or administrators can change denomination membership.' };
+  if (!profile?.tenant_id || profile.role !== 'pastor') {
+    return { error: 'Forbidden: only the church pastor can join a denomination.' };
   }
 
   if (churchSlug) {

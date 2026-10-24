@@ -3,7 +3,7 @@
 import { createClient, createAdminClient } from '@/lib/supabase/server';
 import { revalidatePath } from 'next/cache';
 import { normalizeUgPhone } from './utils';
-import { parseWholeUgxAmount } from './money';
+import { parseWholeUgxAmount, SMS_TOPUP_MAX_UGX, SMS_TOPUP_MIN_UGX } from './money';
 import crypto from 'crypto';
 import {
   buildChurchDonationPayment,
@@ -32,10 +32,9 @@ export async function initiateNajikiPayment(formData: FormData) {
   try {
     const churchId = String(formData.get('churchId') ?? '').trim();
     // F-06: never trust a client-supplied amount. Require whole UGX, not parseInt prefixes.
-    const TOPUP_MIN = 1_000, TOPUP_MAX = 2_000_000;
-    const amount = parseWholeUgxAmount(formData.get('amount'), TOPUP_MIN, TOPUP_MAX);
+    const amount = parseWholeUgxAmount(formData.get('amount'), SMS_TOPUP_MIN_UGX, SMS_TOPUP_MAX_UGX);
     if (amount === null) {
-      return { error: `Top-up must be a whole amount between ${TOPUP_MIN} and ${TOPUP_MAX} UGX` };
+      return { error: `Top-up must be a whole amount between ${SMS_TOPUP_MIN_UGX} and ${SMS_TOPUP_MAX_UGX} UGX` };
     }
     const phoneNumber = String(formData.get('phoneNumber') ?? '').trim();
     const normalizedPhone = normalizeUgPhone(phoneNumber);
@@ -142,7 +141,7 @@ export async function initiateNajikiPayment(formData: FormData) {
       amount: amount,
       direction: 'credit',
       currency: 'UGX',
-      type: 'TOPUP',
+      type: 'sms_topup',
       description: `Najiki Top-up for ${phoneNumber}`,
       reference_code: reference,
       idempotency_key: idempotencyKey,
@@ -218,16 +217,41 @@ export async function initiateNajikiPayment(formData: FormData) {
 
     console.log('[Najiki] Payment initiation response received.');
 
-    // 5. Update transaction with Najiki response.
-    // `reference` is Na'jiki's own payment reference; `reference_code` stays ours.
-    if (result.paymentId) {
-      await supabaseAdmin
-        .from('wallet_transactions')
-        .update({ 
-          raw_provider_response: result,
-          reference: result.reference ?? null
-        })
-        .eq('reference_code', reference);
+    // 5. Link the pending ledger row to the Na'jiki payment intent. The
+    // database settlement RPC locates the wallet transaction by this exact
+    // payment_intent_id and locates the intent by Na'jiki's `reference`.
+    if (!result.paymentId || !result.reference) {
+      console.error('[Najiki] Payment response omitted its intent ID or reference; leaving the ledger pending.');
+      return {
+        success: true,
+        status: 'pending_confirmation',
+        message: 'The payment request may have been received. We are waiting for a verifiable payment confirmation.',
+        reference,
+      };
+    }
+
+    const { error: linkError } = await supabaseAdmin
+      .from('wallet_transactions')
+      .update({
+        payment_intent_id: result.paymentId,
+        raw_provider_response: result,
+        reference: result.reference,
+      })
+      .eq('reference_code', reference)
+      .eq('status', 'pending');
+
+    if (linkError) {
+      // The provider may already have created the intent. Do not mark the
+      // transaction failed; the signed callback will retry/reconcile it.
+      console.error('[Najiki] Could not link the payment intent to the pending ledger row.');
+      return {
+        success: true,
+        status: 'pending_confirmation',
+        message: 'The payment request may have been received. We are waiting for a verifiable payment confirmation.',
+        paymentId: result.paymentId,
+        najikiReference: result.reference,
+        reference,
+      };
     }
 
     return {
@@ -236,7 +260,7 @@ export async function initiateNajikiPayment(formData: FormData) {
       paymentId: result.paymentId,
       najikiReference: result.reference,
       status: result.status,
-      reference: reference
+      reference,
     };
   } catch (err: any) {
     console.error('[Najiki] Unexpected error during initiation:', err);

@@ -1,15 +1,14 @@
 /**
  * POST /api/sms/enqueue
  *
- * Validates the authenticated church admin, persists one PENDING row per
- * recipient, and wakes the Supabase Edge queue worker after commit. All SMS
- * dispatch happens in church-najiki-dispatch through Na'jiki.
+ * Validates the authenticated church admin, persists one `pending` row per
+ * recipient, then invokes church-najiki-dispatch once per queue ID after commit.
  */
 
 import { after, NextResponse } from 'next/server';
 import { createClient as createServerClient } from '@/lib/supabase/server';
 import { enqueueBroadcast } from '@/lib/queue-actions';
-import { dispatchSmsQueueWorker } from '@/lib/sms-dispatch';
+import { dispatchSmsQueueItems } from '@/lib/sms-dispatch';
 import { normalizeUgPhone } from '@/lib/utils';
 
 export async function POST(req: Request) {
@@ -106,34 +105,14 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'No valid authorized recipients found for this church.' }, { status: 400 });
     }
 
-    // ── Balance pre-flight ──────────────────────────────────────────────────
-    const { data: wallet } = await supabase
-      .from('wallets')
-      .select('balance, sms_rate')
-      .eq('tenant_id', churchId)
-      .maybeSingle();
-
-    if (!wallet) {
-      return NextResponse.json({ error: 'Billing account not found.' }, { status: 400 });
-    }
-
-    if (wallet.balance < wallet.sms_rate) {
-      return NextResponse.json(
-        {
-          error: 'Insufficient SMS balance.',
-          balance: wallet.balance,
-          rate: wallet.sms_rate,
-          remaining: Math.floor(wallet.balance / wallet.sms_rate),
-        },
-        { status: 402 },
-      );
-    }
+    // The existing Edge debit RPC performs the authoritative wallet check; no
+    // preflight balance read is used to decide whether to enqueue.
 
     // ── Sender ID ───────────────────────────────────────────────────────────
     const senderId = church.sender_id?.trim() || '';
 
     // ── Enqueue ─────────────────────────────────────────────────────────────
-    const { broadcastId, enqueued, skipped } = await enqueueBroadcast({
+    const { broadcastId, enqueued, skipped, queueIds } = await enqueueBroadcast({
       tenantId:   churchId,
       message,
       audience:   audience ?? 'all',
@@ -142,15 +121,14 @@ export async function POST(req: Request) {
       createdBy:  user.id,
     });
 
-    // ── Wake the Edge queue worker after the durable rows have committed ────
-    // The worker dispatches each row by its existing queue ID; cron recovers
-    // anything that times out, is rate-limited, or has an expired lease.
+    const { data: { session } } = await supabase.auth.getSession();
+    const accessToken = session?.access_token ?? null;
+
+    // Dispatch each durable queue row separately; the Edge request body is only its ID.
     after(async () => {
-      try {
-        await dispatchSmsQueueWorker();
-      } catch (err) {
-        console.warn('[Enqueue] Edge worker wake-up deferred to scheduled recovery:', err);
-      }
+      const outcomes = await dispatchSmsQueueItems(queueIds, 5, accessToken);
+      const deferred = outcomes.filter((outcome) => !outcome.ok || outcome.status === 'pending').length;
+      if (deferred) console.warn(`[Enqueue] ${deferred} SMS rows remain queued for retry.`);
     });
 
     // ── Respond ─────────────────────────────────────────────────────────────

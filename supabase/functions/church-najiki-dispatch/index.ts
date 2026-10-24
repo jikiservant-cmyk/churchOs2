@@ -53,12 +53,13 @@ async function ensureSmsLog(db: ReturnType<typeof client>, row: QueueItem) {
     status: 'PENDING',
     idempotency_key: row.idempotency_key,
     sender_id: row.sender_id,
-  }, { onConflict: 'idempotency_key', ignoreDuplicates: true });
+  }, { onConflict: 'tenant_id,idempotency_key', ignoreDuplicates: true });
 
   if (insertError) throw new Error(`SMS log insert failed: ${insertError.message}`);
 
   const { data, error } = await db.from('sms_logs')
     .select('tenant_id, recipient_phone, body, sender_id, status')
+    .eq('tenant_id', row.tenant_id)
     .eq('idempotency_key', row.idempotency_key)
     .maybeSingle();
   if (error || !data) throw new Error(`SMS log lookup failed: ${error?.message ?? 'log not found'}`);
@@ -71,11 +72,12 @@ async function ensureSmsLog(db: ReturnType<typeof client>, row: QueueItem) {
     throw new Error('SMS idempotency key is already associated with a different log payload.');
   }
 
-  // A previous transient attempt may have left a legacy FAILED log even though
-  // the durable queue item is being retried. Never reset delivery callbacks.
+  // A previous transient attempt may have left a failed log even though the
+  // durable queue item is being retried. Never reset delivery callbacks.
   if (data.status === 'FAILED') {
     const { error: resetError } = await db.from('sms_logs')
       .update({ status: 'PENDING', error_message: null, updated_at: new Date().toISOString() })
+      .eq('tenant_id', row.tenant_id)
       .eq('idempotency_key', row.idempotency_key)
       .eq('status', 'FAILED');
     if (resetError) throw new Error(`SMS log reset failed: ${resetError.message}`);
@@ -90,6 +92,15 @@ Deno.serve(async (request: Request) => {
   const najikiApiKey = Deno.env.get('NAJIKI_API_KEY')?.trim();
   if (!najikiApiKey) return jsonResponse({ error: 'Na’jiki API key is not configured.' }, 503);
 
+  const apiUrl = (Deno.env.get('NAJIKI_API_URL')?.trim() || 'https://najiki.netlify.app').replace(/\/+$/, '');
+  try {
+    if (new URL(apiUrl).protocol !== 'https:') {
+      return jsonResponse({ error: 'NAJIKI_API_URL must use HTTPS.' }, 503);
+    }
+  } catch {
+    return jsonResponse({ error: 'NAJIKI_API_URL is invalid.' }, 503);
+  }
+
   let body: any;
   try {
     body = await request.json();
@@ -99,7 +110,7 @@ Deno.serve(async (request: Request) => {
   // The backend passes only this durable queue ID; message data never comes
   // from the caller and is always re-read from the database after the claim.
   const smsId = typeof body?.sms_id === 'string' ? body.sms_id : '';
-  if (!/^[0-9a-f]{8}-[0-9a-f-]{27}$/i.test(smsId)) {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(smsId)) {
     return jsonResponse({ error: 'A valid sms_id is required.' }, 400);
   }
 
@@ -133,11 +144,11 @@ Deno.serve(async (request: Request) => {
     if (debitError) throw new Error(`Wallet debit reservation failed: ${debitError.message}`);
 
     const debitResult = debit?.result;
-    if (debitResult === 'insufficient_balance' || debitResult === 'wallet_missing') {
+    if (['insufficient_balance', 'wallet_missing'].includes(debitResult)) {
       const delay = debitResult === 'insufficient_balance' ? 5 * 60_000 : 10 * 60_000;
       const errorText = debitResult === 'insufficient_balance'
         ? 'Insufficient SMS wallet balance; waiting for a top-up.'
-        : 'SMS wallet not found for church tenant.';
+        : 'SMS wallet is missing for this tenant.';
       const { error } = await db.rpc('release_sms_queue_item', {
         p_sms_id: row.id,
         p_lock_token: lockToken,
@@ -152,7 +163,6 @@ Deno.serve(async (request: Request) => {
       throw new Error(`Wallet debit could not be safely reserved (${String(debitResult)}).`);
     }
 
-    const apiUrl = (Deno.env.get('NAJIKI_API_URL')?.trim() || 'https://najiki.netlify.app').replace(/\/+$/, '');
     const applicationCode = Deno.env.get('NAJIKI_APPLICATION_CODE')?.trim() || 'church';
     const payload: Record<string, unknown> = {
       to: row.recipient_phone,
@@ -241,7 +251,7 @@ Deno.serve(async (request: Request) => {
       p_lock_token: lockToken,
       p_najiki_sms_id: gatewaySmsId,
       p_najiki_reference: gatewayReference,
-      p_gateway_status: typeof responseBody.status === 'string' ? responseBody.status : 'queued',
+      p_gateway_status: typeof responseBody.status === 'string' ? responseBody.status : 'sent',
     });
     if (completeError || completed !== true) {
       // The accepted request is safe to retry because the exact same key and

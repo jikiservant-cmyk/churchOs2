@@ -30,10 +30,10 @@ describe('Na\'jiki webhook security and settlement rules', () => {
   });
 
   test('settlement only acknowledges credited transactions or duplicates already successful', () => {
-    assert.equal(classifyWalletSettlementResult({ result: 'credited' }), 'credited');
-    assert.equal(classifyWalletSettlementResult({ result: 'duplicate', previous_status: 'success' }), 'already_credited');
-    assert.equal(classifyWalletSettlementResult({ result: 'duplicate', previous_status: 'failed' }), 'conflict');
-    assert.equal(classifyWalletSettlementResult({ result: 'not_found' }), 'retry');
+    assert.equal(classifyWalletSettlementResult({ success: true, already_processed: false }), 'credited');
+    assert.equal(classifyWalletSettlementResult({ success: true, already_processed: true }), 'already_credited');
+    assert.equal(classifyWalletSettlementResult({ result: 'credited' }), 'retry');
+    assert.equal(classifyWalletSettlementResult({ success: false }), 'retry');
     assert.equal(classifyWalletSettlementResult(null), 'retry');
   });
 

@@ -35,6 +35,7 @@ import {
 import {
   classifyNajikiWebhook,
   activationMerchantReference,
+  activationProviderTransactionId,
   notificationChurchId,
   notificationTenantCode,
   parsePaymentNotification,
@@ -42,6 +43,8 @@ import {
   planPaymentReceiptSms,
   transactionLookupCandidates,
   verifyNajikiWebhook,
+  classifyWalletSettlementResult,
+  validateWalletPaymentAmount,
 } from '../lib/najiki/webhook.ts'
 import { MockNajikiServer } from './helpers/mock-najiki-server.ts'
 import {
@@ -588,8 +591,24 @@ describe('inbound webhook verification', () => {
     }
     assert.match(
       verifyNajikiWebhook({ rawBody: body, headers: withoutSignedTimestamp, secret, now: 1_700_000_000_000 }).reason!,
-      /timestamp/
+      /signature|timestamp/i
     )
+  })
+
+  test('rejects non-canonical timestamps and duplicate signature fields', () => {
+    const headers = buildNotificationHeaders(secret, body, 1_700_000_000_000)
+    assert.equal(verifyNajikiWebhook({
+      rawBody: body,
+      headers: { ...headers, 'X-Najiki-Timestamp': '1.7e12' },
+      secret,
+      now: 1_700_000_000_000,
+    }).ok, false)
+    assert.equal(verifyNajikiWebhook({
+      rawBody: body,
+      headers: { ...headers, 'X-Najiki-Signature': `${headers['X-Najiki-Signature']},v=${headers['X-Najiki-Signature'].split('v=')[1]}` },
+      secret,
+      now: 1_700_000_000_000,
+    }).ok, false)
   })
 
   test('rejects a tampered body', () => {
@@ -700,6 +719,23 @@ describe('inbound webhook payload handling', () => {
     const notification = parsePaymentNotification(JSON.parse(payload))!
     assert.equal(activationMerchantReference(notification), 'ACT-activation-merchant-ref')
 
+    const withCanonicalProviderId = parsePaymentNotification({
+      paymentIntentId: 'pay_najiki_intent',
+      providerPaymentId: ' livepay-txn-456 ',
+      status: 'success',
+      metadata: { type: 'church_activation', merchantReference: 'ACT-activation-merchant-ref' },
+    })!
+    assert.equal(activationProviderTransactionId(withCanonicalProviderId), 'livepay-txn-456')
+
+    const withoutCanonicalProviderId = parsePaymentNotification({
+      paymentIntentId: 'pay_najiki_intent',
+      providerPaymentId: null,
+      status: 'success',
+      metadata: { type: 'church_activation', merchantReference: 'ACT-activation-merchant-ref' },
+    })!
+    // Never substitute the distinct Na’jiki paymentIntentId.
+    assert.equal(activationProviderTransactionId(withoutCanonicalProviderId), null)
+
     const malformed = parsePaymentNotification({
       paymentIntentId: 'pay_activation',
       status: 'success',
@@ -782,4 +818,28 @@ describe('inbound webhook payload handling', () => {
     )
   })
 })
+})
+
+describe('wallet webhook settlement guards', () => {
+  test('accepts only a new credit or a confirmed duplicate success from the atomic RPC', () => {
+    assert.equal(classifyWalletSettlementResult({ success: true, already_processed: false }), 'credited')
+    assert.equal(
+      classifyWalletSettlementResult({ success: true, already_processed: true }),
+      'already_credited',
+    )
+    assert.equal(classifyWalletSettlementResult({ result: 'credited' }), 'retry')
+    assert.equal(classifyWalletSettlementResult({ success: false }), 'retry')
+    assert.equal(classifyWalletSettlementResult(null), 'retry')
+  })
+
+  test('requires exact positive whole-UGX amount and explicit matching currency', () => {
+    const expected = { receivedAmount: 20_000, receivedCurrency: 'UGX', expectedAmount: '20000', expectedCurrency: 'UGX' }
+    assert.deepEqual(validateWalletPaymentAmount(expected), { ok: true })
+    assert.deepEqual(validateWalletPaymentAmount({ ...expected, receivedAmount: null }), { ok: false, reason: 'missing_amount' })
+    assert.deepEqual(validateWalletPaymentAmount({ ...expected, receivedAmount: 19_999 }), { ok: false, reason: 'amount_mismatch' })
+    assert.deepEqual(validateWalletPaymentAmount({ ...expected, receivedAmount: 20_001 }), { ok: false, reason: 'amount_mismatch' })
+    assert.deepEqual(validateWalletPaymentAmount({ ...expected, receivedAmount: 20_000.5 }), { ok: false, reason: 'invalid_amount' })
+    assert.deepEqual(validateWalletPaymentAmount({ ...expected, receivedCurrency: null }), { ok: false, reason: 'missing_currency' })
+    assert.deepEqual(validateWalletPaymentAmount({ ...expected, receivedCurrency: 'KES' }), { ok: false, reason: 'currency_mismatch' })
+  })
 })

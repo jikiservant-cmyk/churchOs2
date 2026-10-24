@@ -3,6 +3,7 @@
 import { useState, useEffect } from 'react';
 import { X, Smartphone, CreditCard, Loader2, CheckCircle2, AlertCircle } from 'lucide-react';
 import { initiateNajikiPayment } from '@/lib/wallet-actions';
+import { SMS_TOPUP_MAX_UGX, SMS_TOPUP_MIN_UGX } from '@/lib/money';
 import { toast } from 'sonner';
 
 interface TopUpModalProps {
@@ -45,8 +46,15 @@ export default function TopUpModal({ churchId, isOpen, onClose }: TopUpModalProp
     const rawAmount = customAmount || amount;
     const finalAmount = Number(rawAmount);
     
-    if (!/^\d+$/.test(rawAmount) || !Number.isSafeInteger(finalAmount) || finalAmount < 2000) {
-      toast.error('Please enter a valid amount (minimum 2,000 UGX)');
+    if (
+      !/^\d+$/.test(rawAmount) ||
+      !Number.isSafeInteger(finalAmount) ||
+      finalAmount < SMS_TOPUP_MIN_UGX ||
+      finalAmount > SMS_TOPUP_MAX_UGX
+    ) {
+      toast.error(
+        `Please enter a whole amount between ${SMS_TOPUP_MIN_UGX.toLocaleString()} and ${SMS_TOPUP_MAX_UGX.toLocaleString()} UGX`,
+      );
       return;
     }
 
@@ -159,7 +167,7 @@ export default function TopUpModal({ churchId, isOpen, onClose }: TopUpModalProp
               {/* Amount Selection */}
               <div className="space-y-1.5">
                 <label className="text-[10px] font-bold text-[#C8B89A] uppercase tracking-widest ml-1">
-                  Select or Enter Amount (Min 2,000 UGX)
+                  Select or Enter Amount (Min {SMS_TOPUP_MIN_UGX.toLocaleString()} UGX)
                 </label>
                 <div className="grid grid-cols-2 gap-3">
                   {['5000', '10000', '20000', '50000'].map((amt) => (

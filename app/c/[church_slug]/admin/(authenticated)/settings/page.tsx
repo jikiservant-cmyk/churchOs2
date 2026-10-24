@@ -3,7 +3,9 @@ import { createAdminClient, createClient } from '@/lib/supabase/server';
 import { notFound } from 'next/navigation';
 import Link from 'next/link';
 import JoinDenominationCard from '@/components/settings/JoinDenominationCard';
-import { Calendar, Church as ChurchIcon, ExternalLink, Settings, Shield } from 'lucide-react';
+import MeetingDaysSettings from '@/components/settings/MeetingDaysSettings';
+import { ISO_WEEKDAYS } from '@/lib/meeting-days';
+import { Church as ChurchIcon, ExternalLink, Settings, Shield } from 'lucide-react';
 
 export default async function SettingsPage({
   params,
@@ -15,15 +17,38 @@ export default async function SettingsPage({
   if (!church) notFound();
 
   const [supabase, adminDb] = await Promise.all([createClient(), createAdminClient()]);
-  const [{ data: churchRow }, { data: { user } }] = await Promise.all([
+  const [
+    { data: churchRow },
+    { data: scheduleRow, error: scheduleError },
+    { data: { user } },
+  ] = await Promise.all([
     adminDb
       .schema('church')
       .from('churches')
-      .select('denomination_id, meeting_days, attendance_flag_threshold')
+      .select('denomination_id')
+      .eq('id', church.id)
+      .maybeSingle(),
+    adminDb
+      .schema('church')
+      .from('churches')
+      .select('meeting_days, attendance_flag_threshold')
       .eq('id', church.id)
       .maybeSingle(),
     supabase.auth.getUser(),
   ]);
+
+  let canJoinDenomination = false;
+  let canEditMeetingDays = false;
+  if (user) {
+    const { data: profile } = await supabase
+      .from('admin_profiles')
+      .select('tenant_id, role')
+      .eq('id', user.id)
+      .maybeSingle();
+    const isChurchPastor = profile?.tenant_id === church.id && profile.role === 'pastor';
+    canJoinDenomination = isChurchPastor;
+    canEditMeetingDays = isChurchPastor;
+  }
 
   const denominationId = churchRow?.denomination_id ?? null;
   let denominationName: string | null = null;
@@ -39,17 +64,14 @@ export default async function SettingsPage({
     denominationSlug = denomination?.slug ?? null;
   }
 
-  const configuredMeetingDays: number[] = churchRow?.meeting_days ?? [7];
-  const attendanceThreshold = churchRow?.attendance_flag_threshold ?? 3;
-  const meetingDays = [
-    { label: 'Mon', iso: 1 },
-    { label: 'Tue', iso: 2 },
-    { label: 'Wed', iso: 3 },
-    { label: 'Thu', iso: 4 },
-    { label: 'Fri', iso: 5 },
-    { label: 'Sat', iso: 6 },
-    { label: 'Sun', iso: 7 },
-  ];
+  const meetingDaysSchemaAvailable = !scheduleError;
+  const hasNoStoredSchedule = meetingDaysSchemaAvailable && scheduleRow?.meeting_days == null;
+  // NULL means there is no weekday filter in attendance monitoring, so show
+  // every ISO weekday as eligible rather than misleadingly displaying Sunday.
+  const configuredMeetingDays: number[] = meetingDaysSchemaAvailable
+    ? scheduleRow?.meeting_days ?? [...ISO_WEEKDAYS]
+    : [...ISO_WEEKDAYS];
+  const attendanceThreshold = scheduleRow?.attendance_flag_threshold ?? 3;
 
   return (
     <div className="mx-auto max-w-7xl space-y-6" style={{ fontFamily: "'Outfit', sans-serif" }}>
@@ -71,6 +93,7 @@ export default async function SettingsPage({
         denominationName={denominationName}
         denominationSlug={denominationSlug}
         isLinked={Boolean(denominationId)}
+        canJoin={canJoinDenomination}
       />
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
@@ -118,43 +141,31 @@ export default async function SettingsPage({
           <section className="rounded-2xl border border-[rgba(90,55,20,0.13)] bg-[#F0E6D3] p-6 shadow-sm">
             <div className="mb-5 flex items-center gap-3 border-b border-[rgba(90,55,20,0.08)] pb-4">
               <div className="rounded-xl bg-[#2B1A0E] p-2.5 text-[#F5E6CE]">
-                <Calendar className="h-4 w-4 text-[#B5622A]" />
+                <Shield className="h-4 w-4 text-[#B5622A]" />
               </div>
               <div>
                 <h2 className="text-base font-bold text-[#1E1208]">Attendance Monitoring</h2>
                 <p className="text-[12px] text-[#9A7E65]">Current rules used for pastoral follow-up alerts.</p>
               </div>
             </div>
-
-            <div className="space-y-4">
-              <div className="flex flex-col gap-2 rounded-xl border border-[rgba(90,55,20,0.08)] bg-white/50 p-4 sm:flex-row sm:items-center sm:justify-between">
-                <div>
-                  <p className="text-[13px] font-bold text-[#1E1208]">Missed-event alert threshold</p>
-                  <p className="mt-0.5 text-[11px] text-[#9A7E65]">Number of consecutive services before a member is flagged.</p>
-                </div>
-                <span className="self-start rounded-lg bg-[#2B1A0E] px-3 py-1.5 font-mono text-xs font-bold text-[#F5E6CE] sm:self-auto">
-                  {attendanceThreshold} services
-                </span>
+            <div className="flex flex-col gap-2 rounded-xl border border-[rgba(90,55,20,0.08)] bg-white/50 p-4 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <p className="text-[13px] font-bold text-[#1E1208]">Missed-event alert threshold</p>
+                <p className="mt-0.5 text-[11px] text-[#9A7E65]">Number of consecutive services before a member is flagged.</p>
               </div>
-
-              <div className="rounded-xl border border-[rgba(90,55,20,0.08)] bg-white/50 p-4">
-                <p className="mb-2 text-[13px] font-bold text-[#1E1208]">Regular meeting days</p>
-                <div className="flex flex-wrap gap-1.5">
-                  {meetingDays.map(({ label, iso }) => {
-                    const active = configuredMeetingDays.includes(iso);
-                    return (
-                      <span
-                        key={label}
-                        className={`rounded-lg px-2.5 py-1 text-[11px] font-semibold ${active ? 'bg-[#B5622A] text-white' : 'bg-black/5 text-[#9A7E65]'}`}
-                      >
-                        {label}
-                      </span>
-                    );
-                  })}
-                </div>
-              </div>
+              <span className="self-start rounded-lg bg-[#2B1A0E] px-3 py-1.5 font-mono text-xs font-bold text-[#F5E6CE] sm:self-auto">
+                {attendanceThreshold} services
+              </span>
             </div>
           </section>
+
+          <MeetingDaysSettings
+            churchSlug={church_slug}
+            initialDays={configuredMeetingDays}
+            hasNoStoredSchedule={hasNoStoredSchedule}
+            canEdit={canEditMeetingDays}
+            schemaAvailable={meetingDaysSchemaAvailable}
+          />
         </div>
 
         <aside className="space-y-6">

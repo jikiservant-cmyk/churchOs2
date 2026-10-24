@@ -11,6 +11,7 @@ interface JoinDenominationCardProps {
   denominationName?: string | null;
   denominationSlug?: string | null;
   isLinked?: boolean;
+  canJoin?: boolean;
 }
 
 export default function JoinDenominationCard({
@@ -18,6 +19,7 @@ export default function JoinDenominationCard({
   denominationName,
   denominationSlug,
   isLinked = false,
+  canJoin = false,
 }: JoinDenominationCardProps) {
   const router = useRouter();
   const [inviteCode, setInviteCode] = useState('');
@@ -90,6 +92,12 @@ export default function JoinDenominationCard({
                 {denominationName || activeDenomination} affiliation is active. Your denomination overseer can view the ministry reporting enabled for this network.
               </p>
             </div>
+          </div>
+        </div>
+      ) : !canJoin ? (
+        <div className="p-6 md:p-7">
+          <div className="rounded-xl border border-[rgba(90,55,20,0.08)] bg-white/45 p-4 text-[13px] leading-relaxed text-[#6B513E]">
+            Only this church’s pastor can link the workspace to a denomination. Ask the pastor to sign in and enter the overseer’s invite code.
           </div>
         </div>
       ) : (

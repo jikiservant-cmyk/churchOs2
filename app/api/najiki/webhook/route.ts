@@ -30,13 +30,16 @@ import {
   verifyNajikiWebhook,
   classifyNajikiWebhook,
   activationMerchantReference,
+  activationProviderTransactionId,
   parsePaymentNotification,
   parseSmsDeliveryNotification,
   transactionLookupCandidates,
   notificationTenantCode,
   notificationChurchId,
   planPaymentReceiptSms,
+  validateWalletPaymentAmount,
 } from '@/lib/najiki/webhook';
+import { getNajikiPayment } from '@/lib/najiki/client';
 import { settleWalletPayment } from '@/lib/najiki/settlement';
 import { sendSingleSMS } from '@/lib/sms-actions';
 import { confirmActivationPayment } from '@/lib/activation';
@@ -272,14 +275,49 @@ async function handlePaymentNotification(payload: any) {
       return NextResponse.json({ error: 'Activation tenant mismatch' }, { status: 403 });
     }
 
-    if (String(status).toLowerCase() === 'success' &&
+    const isSuccess = String(status).trim().toLowerCase() === 'success';
+    let providerTransactionId = activationProviderTransactionId(notification);
+
+    if (isSuccess &&
         (!Number.isSafeInteger(amount) || (amount ?? 0) <= 0 || !notification.currency?.trim())) {
       return NextResponse.json({ error: 'Activation payment amount and currency are required' }, { status: 422 });
     }
 
+    // Never substitute Na'jiki's paymentIntentId for the downstream transaction
+    // ID. If the signed callback omits providerPaymentId, reconcile by Na'jiki's
+    // reference and require the status endpoint to confirm the same successful
+    // intent, church, amount, currency, and canonical provider ID.
+    if (isSuccess && !providerTransactionId) {
+      try {
+        if (!reference) throw new Error('Missing Na\'jiki payment reference');
+        const reconciled = await getNajikiPayment(reference);
+        const reconciledProviderId = reconciled.providerPaymentId?.trim() || null;
+        const matchesCallback =
+          reconciled.id === notification.paymentIntentId &&
+          reconciled.reference === reference &&
+          reconciled.status.trim().toLowerCase() === 'success' &&
+          reconciled.externalEntityId === churchId &&
+          reconciled.amount === amount &&
+          reconciled.currency.trim().toUpperCase() === notification.currency?.trim().toUpperCase();
+
+        if (matchesCallback && reconciledProviderId) {
+          providerTransactionId = reconciledProviderId;
+        }
+      } catch (reconcileError) {
+        console.warn('[Najiki Webhook] Could not reconcile activation providerPaymentId yet:', reconcileError instanceof Error ? reconcileError.message : reconcileError);
+      }
+
+      if (!providerTransactionId) {
+        return NextResponse.json(
+          { error: 'Canonical providerPaymentId is not available yet; activation settlement deferred' },
+          { status: 503, headers: { 'Retry-After': '30' } },
+        );
+      }
+    }
+
     const outcome = await confirmActivationPayment({
       merchantReference,
-      providerTransactionId: notification.providerPaymentId || notification.paymentIntentId,
+      providerTransactionId: providerTransactionId ?? undefined,
       paidAmount: Number(amount ?? 0),
       currency: notification.currency || 'UGX',
       status: String(status).toUpperCase(),
@@ -384,6 +422,63 @@ async function handlePaymentNotification(payload: any) {
 
   // ── Success ────────────────────────────────────────────────────────────────
   if (String(status).toLowerCase() === 'success') {
+    // This RPC is specifically scoped to public BUY_SMS payment intents. Do not
+    // route donations or unrelated payment products through it.
+    if (notification.paymentTypeCode !== 'BUY_SMS') {
+      return NextResponse.json({ error: 'Only BUY_SMS payments can settle the SMS wallet' }, { status: 422 });
+    }
+
+    const amountCheck = validateWalletPaymentAmount({
+      receivedAmount: notification.amount,
+      receivedCurrency: notification.currency,
+      expectedAmount: tx.amount,
+      expectedCurrency: tx.currency || 'UGX',
+    });
+    if (!amountCheck.ok) {
+      return NextResponse.json({ error: 'Amount or currency mismatch' }, { status: 422 });
+    }
+
+    // The RPC finds the app's ledger row by payment_intent_id. Normally the
+    // initiation action persists this link before the member approves the
+    // handset prompt. If the webhook wins that race, repair the link only for a
+    // matching signed callback and a still-pending row.
+    if (!tx.payment_intent_id) {
+      const { data: linkedRow, error: linkError } = await db
+        .from('wallet_transactions')
+        .update({ payment_intent_id: notification.paymentIntentId })
+        .eq('id', tx.id)
+        .eq('tenant_id', tx.tenant_id)
+        .eq('status', 'pending')
+        .is('payment_intent_id', null)
+        .select('payment_intent_id')
+        .maybeSingle();
+      if (linkError) {
+        console.error('[Najiki Webhook] Could not link callback payment intent to ledger row:', linkError.message);
+        return NextResponse.json({ error: 'Payment settlement is temporarily unavailable' }, { status: 500 });
+      }
+      if (linkedRow?.payment_intent_id !== notification.paymentIntentId) {
+        // The initiation action may have won the race and attached the same
+        // intent between our initial read and the conditional update.
+        const { data: currentRow, error: currentRowError } = await db
+          .from('wallet_transactions')
+          .select('payment_intent_id')
+          .eq('id', tx.id)
+          .maybeSingle();
+        if (currentRowError) {
+          return NextResponse.json({ error: 'Payment settlement is temporarily unavailable' }, { status: 500 });
+        }
+        if (currentRow?.payment_intent_id !== notification.paymentIntentId) {
+          return NextResponse.json({ error: 'Payment intent does not match the pending wallet transaction' }, { status: 409 });
+        }
+        tx.payment_intent_id = currentRow.payment_intent_id;
+      } else {
+        tx.payment_intent_id = linkedRow.payment_intent_id;
+      }
+    }
+    if (tx.payment_intent_id !== notification.paymentIntentId) {
+      return NextResponse.json({ error: 'Payment intent does not match the pending wallet transaction' }, { status: 409 });
+    }
+
     // Wallet status and balance must change in the same database transaction;
     // there is deliberately no manual non-atomic fallback.
     const settlement = await settleWalletPayment({
