@@ -1,4 +1,5 @@
 import { createClient, createAdminClient } from '@/lib/supabase/server';
+import { isSafeChurchSlug } from '@/lib/auth-security';
 import LoginForm from '@/components/LoginForm';
 import { getChurchBySlug } from '@/lib/db';
 import { redirect } from 'next/navigation';
@@ -17,6 +18,15 @@ export default async function RootLoginPage({
   // Normalize params to strings
   let targetSlug = Array.isArray(resolvedSearchParams.slug) ? resolvedSearchParams.slug[0] : resolvedSearchParams.slug;
   let loginError = Array.isArray(resolvedSearchParams.error) ? resolvedSearchParams.error[0] : resolvedSearchParams.error;
+
+  // `?slug=` is fully attacker-controlled and is echoed into the login form's
+  // hidden `churchSlug` field, which the login action turns into a redirect
+  // target. Only a canonical slug may survive.
+  if (!isSafeChurchSlug(targetSlug?.toLowerCase().trim())) {
+    targetSlug = undefined;
+  } else {
+    targetSlug = targetSlug!.toLowerCase().trim();
+  }
 
   let redirectTo: string | null = null;
 

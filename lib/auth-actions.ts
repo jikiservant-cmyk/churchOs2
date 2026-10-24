@@ -1,6 +1,7 @@
 'use server';
 
 import { createClient, createAdminClient } from '@/lib/supabase/server';
+import { isSafeChurchSlug } from '@/lib/auth-security';
 import { redirect } from 'next/navigation';
 
 export type AuthState = {
@@ -12,7 +13,13 @@ export type AuthState = {
 export async function login(prevState: AuthState, formData: FormData): Promise<AuthState> {
   const email = (formData.get('email') as string || '').trim();
   const password = formData.get('password') as string;
-  const churchSlug = formData.get('churchSlug') as string;
+  // `churchSlug` is attacker-controlled (it comes from the `?slug=` query param
+  // via a hidden form field) and ends up in a redirect target. Drop anything
+  // that is not a canonical slug so it can never form `//host/path`.
+  const rawChurchSlug = formData.get('churchSlug') as string;
+  const churchSlug = isSafeChurchSlug(rawChurchSlug?.toLowerCase().trim())
+    ? (rawChurchSlug.toLowerCase().trim() as string)
+    : '';
 
   if (!email || !password) {
     return { error: 'Email and password are required' };

@@ -4,7 +4,25 @@ import { createClient, createAdminClient } from '@/lib/supabase/server';
 import { revalidatePath } from 'next/cache';
 import { normalizeUgPhone } from './utils';
 import { parseWholeUgxAmount, SMS_TOPUP_MAX_UGX, SMS_TOPUP_MIN_UGX } from './money';
+import { describeRetryAfter, getClientIp, rateLimit } from './rate-limit';
 import crypto from 'crypto';
+
+/**
+ * Ceilings for the *unauthenticated* public giving portal.
+ *
+ * Every one of these actions reaches a paid third-party gateway and pushes a
+ * mobile-money prompt onto a real handset, so an anonymous caller must not be
+ * able to invoke them without bound.
+ */
+const DONATION_RL_PER_IP = { limit: 5, windowMs: 10 * 60 * 1000 };
+const DONATION_RL_PER_PHONE = { limit: 3, windowMs: 10 * 60 * 1000 };
+const DONATION_RL_PER_CHURCH = { limit: 60, windowMs: 60 * 1000 };
+
+/** Authenticated top-ups are lower risk but still cost money per attempt. */
+const TOPUP_RL_PER_USER = { limit: 10, windowMs: 10 * 60 * 1000 };
+
+/** A church whose workspace is not active must not receive payment prompts. */
+const DONATION_BLOCKED_ACTIVATION_STATUSES = new Set(['suspended', 'pending_payment']);
 import {
   buildChurchDonationPayment,
   buildChurchTopupPayment,
@@ -63,6 +81,16 @@ export async function initiateNajikiPayment(formData: FormData) {
     if (profileError || !profile || profile.tenant_id !== churchId ||
         !['pastor', 'admin'].includes(profile.role)) {
       return { error: 'Access denied: a pastor or administrator for this church is required' };
+    }
+
+    // Authenticated, but each attempt still costs a real gateway call and pushes
+    // a prompt to the pastor's handset — throttle per user.
+    const topupLimit = await rateLimit(`topup:user:${user.id}`, TOPUP_RL_PER_USER);
+    if (!topupLimit.success) {
+      console.warn(`[Najiki] Top-up rate limited (backend=${topupLimit.backend}) user=${user.id}`);
+      return {
+        error: `Too many top-up attempts. Please try again in ${describeRetryAfter(topupLimit.retryAfterMs)}.`,
+      };
     }
 
     // Fail fast with the exact variable names that are missing.
@@ -289,6 +317,30 @@ export async function initiateDonationPayment(params: {
     return { error: 'Please enter a valid Ugandan phone number' };
   }
 
+  // ── Abuse throttling (unauthenticated caller) ─────────────────────────────
+  // This action is reachable by any anonymous client: its id is embedded in the
+  // public giving page bundle and it performs no session check (a donor has no
+  // account). Without these ceilings an attacker can drive unlimited paid
+  // gateway calls, spam mobile-money prompts to arbitrary numbers, and flood
+  // the ledger with pending credit rows for any church id.
+  const clientIp = await getClientIp();
+  const [ipLimit, phoneLimit, churchLimit] = await Promise.all([
+    rateLimit(`don:ip:${clientIp}`, DONATION_RL_PER_IP),
+    rateLimit(`don:phone:${cleanPhone}`, DONATION_RL_PER_PHONE),
+    rateLimit(`don:church:${churchId}`, DONATION_RL_PER_CHURCH),
+  ]);
+
+  for (const check of [ipLimit, phoneLimit, churchLimit]) {
+    if (!check.success) {
+      console.warn(
+        `[Donation] Rate limited (backend=${check.backend}) ip=${clientIp} church=${churchId} phone=${cleanPhone}`,
+      );
+      return {
+        error: `Too many giving requests. Please try again in ${describeRetryAfter(check.retryAfterMs)}.`,
+      };
+    }
+  }
+
   // Fail closed if Na'jiki is unavailable or unconfigured. No downstream
   // payment credentials or direct-provider fallback are supported here.
   try {
@@ -302,12 +354,20 @@ export async function initiateDonationPayment(params: {
     const { data: church, error: churchError } = await supabaseAdmin
       .schema('church')
       .from('churches')
-      .select('id, name, slug')
+      .select('id, name, slug, activation_status')
       .eq('id', churchId)
       .maybeSingle();
 
     if (churchError) return { error: 'Unable to verify church payment configuration' };
     if (!church) return { error: 'Church not found' };
+
+    // A suspended or not-yet-activated workspace must not collect money: the
+    // church id is disclosed on its own public page, so it is not a secret and
+    // cannot be treated as a capability.
+    const activationStatus = (church as { activation_status?: string | null }).activation_status;
+    if (activationStatus && DONATION_BLOCKED_ACTIVATION_STATUSES.has(String(activationStatus))) {
+      return { error: 'Giving is temporarily unavailable for this church.' };
+    }
 
     const { data: tenant, error: tenantError } = await supabaseAdmin
       .from('tenants')
