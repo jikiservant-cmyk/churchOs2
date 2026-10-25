@@ -4,9 +4,10 @@ import { createAdminClient } from '@/lib/supabase/server';
 import { dispatchSmsQueueItems } from '@/lib/sms-dispatch';
 
 const QUEUE_SECRET = process.env.QUEUE_PROCESSOR_SECRET;
+const HAS_STRONG_QUEUE_SECRET = Boolean(QUEUE_SECRET && Buffer.byteLength(QUEUE_SECRET) >= 32 && !QUEUE_SECRET.includes('REPLACE_ME'));
 
 function isAuthorized(request: Request): boolean {
-  if (!QUEUE_SECRET) return false;
+  if (!QUEUE_SECRET || !HAS_STRONG_QUEUE_SECRET) return false;
   const provided = request.headers.get('x-queue-secret')
     ?? request.headers.get('authorization')?.replace(/^Bearer\s+/i, '');
   if (!provided) return false;
@@ -16,8 +17,8 @@ function isAuthorized(request: Request): boolean {
 }
 
 async function run(request: Request) {
-  if (!QUEUE_SECRET) {
-    return NextResponse.json({ error: 'Queue processor secret not configured.' }, { status: 503 });
+  if (!QUEUE_SECRET || !HAS_STRONG_QUEUE_SECRET) {
+    return NextResponse.json({ error: 'A strong queue processor secret is not configured.' }, { status: 503 });
   }
   if (!isAuthorized(request)) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 

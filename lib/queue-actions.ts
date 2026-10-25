@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { normalizeUgPhone } from '@/lib/utils';
 import { tenantScopedAdmin } from '@/lib/supabase/tenant-scoped';
+import { isSmsWithinSegmentLimit } from '@/supabase/functions/_shared/sms-length';
 
 export interface EnqueueBroadcastParams {
   tenantId: string;
@@ -37,6 +38,12 @@ export interface BroadcastStatus {
  * or dependency on church.broadcasts/church.broadcast_sessions.
  */
 export async function enqueueBroadcast(params: EnqueueBroadcastParams): Promise<EnqueueResult> {
+  if (!params.tenantId || typeof params.message !== 'string' || !params.message.trim() || Array.from(params.message).length > 500 || !isSmsWithinSegmentLimit(params.message)) {
+    throw new Error('A church ID and SMS message of at most 500 characters are required.');
+  }
+  if (!Array.isArray(params.recipients) || params.recipients.length < 1 || params.recipients.length > 250) {
+    throw new Error('Broadcasts must contain between 1 and 250 recipients.');
+  }
   const scopedDb = await tenantScopedAdmin(params.tenantId);
   const batchId = randomUUID();
   const rows: Array<Record<string, unknown>> = [];
@@ -54,6 +61,9 @@ export async function enqueueBroadcast(params: EnqueueBroadcastParams): Promise<
     const message = params.message
       .replace(/{name}/gi, name)
       .replace(/{first_name}/gi, name.split(/\s+/)[0] || 'Member');
+    if (Array.from(message).length > 500 || !isSmsWithinSegmentLimit(message)) {
+      throw new Error('A personalized SMS exceeds the 500-character or 4-segment limit.');
+    }
 
     rows.push({
       tenant_id: params.tenantId,

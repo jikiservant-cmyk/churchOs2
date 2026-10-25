@@ -34,6 +34,7 @@ const nextConfig: NextConfig = {
   experimental: {
     serverActions: {
       allowedOrigins,
+      bodySizeLimit: '1mb',
     },
   },
   // @ts-ignore Next.js 15+ allowedDevOrigins

@@ -3,6 +3,7 @@
 import { createAdminClient, createClient } from '@/lib/supabase/server';
 import { headers } from 'next/headers';
 import { canProvisionChurch } from '@/lib/provisioning-security';
+import { checkRateLimit, getRateLimitIp } from '@/lib/security/rate-limit';
 
 export type ProvisionState = {
   error?: string;
@@ -20,9 +21,7 @@ export async function provisionTenant(prevState: ProvisionState, formData: FormD
 
   // IP detection for scam prevention
   const headerList = await headers();
-  const ip = headerList.get('x-forwarded-for')?.split(',')[0] || 
-             headerList.get('x-real-ip') || 
-             'unknown';
+  const ip = getRateLimitIp(headerList);
 
   // 0. Robust Input Validation
   if (!name || name.length < 3 || name.length > 50) {
@@ -84,7 +83,17 @@ export async function provisionTenant(prevState: ProvisionState, formData: FormD
     }
   }
 
-  // 1.2 IP Rate Limiting: Check if IP has already registered a church
+  if (ip === 'unknown' && process.env.NODE_ENV === 'production') {
+    return { error: 'Registration protection is temporarily unavailable. Please try again later.' };
+  }
+  const accountLimit = await checkRateLimit({ namespace: 'church-provision-account', subject: user.id, limit: 3, windowSeconds: 24 * 60 * 60 });
+  const ipLimit = await checkRateLimit({ namespace: 'church-provision-ip', subject: ip, limit: 3, windowSeconds: 24 * 60 * 60 });
+  const deniedLimit = !accountLimit.allowed ? accountLimit : ipLimit;
+  if (!accountLimit.allowed || !ipLimit.allowed) {
+    return { error: deniedLimit.unavailable ? 'Registration protection is temporarily unavailable.' : 'Too many registration attempts. Please try again later.' };
+  }
+
+  // 1.2 Additional database check: block repeat registrations from a saved IP
   if (ip !== 'unknown' && ip !== '127.0.0.1' && ip !== '::1') {
     const { data: ipChurch } = await adminSupabase
       .schema('church')

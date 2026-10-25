@@ -5,6 +5,8 @@ import { revalidatePath } from 'next/cache';
 import { normalizeUgPhone } from './utils';
 import { parseWholeUgxAmount, SMS_TOPUP_MAX_UGX, SMS_TOPUP_MIN_UGX } from './money';
 import crypto from 'crypto';
+import { headers } from 'next/headers';
+import { checkRateLimit, getRateLimitIp } from '@/lib/security/rate-limit';
 import {
   buildChurchDonationPayment,
   buildChurchTopupPayment,
@@ -63,6 +65,13 @@ export async function initiateNajikiPayment(formData: FormData) {
     if (profileError || !profile || profile.tenant_id !== churchId ||
         !['pastor', 'admin'].includes(profile.role)) {
       return { error: 'Access denied: a pastor or administrator for this church is required' };
+    }
+
+    const accountLimit = await checkRateLimit({ namespace: 'sms-topup-account', subject: user.id, limit: 10, windowSeconds: 60 * 60 });
+    const phoneLimit = await checkRateLimit({ namespace: 'sms-topup-phone', subject: `${churchId}:${normalizedPhone}`, limit: 3, windowSeconds: 10 * 60 });
+    const deniedLimit = !accountLimit.allowed ? accountLimit : phoneLimit;
+    if (!accountLimit.allowed || !phoneLimit.allowed) {
+      return { error: deniedLimit.unavailable ? 'Payment protection is temporarily unavailable.' : 'Too many payment attempts. Please wait before trying again.' };
     }
 
     // Fail fast with the exact variable names that are missing.
@@ -274,7 +283,14 @@ export async function initiateDonationPayment(params: {
   phoneNumber: string;
   category: string;
 }) {
+  if (!params || typeof params !== 'object') return { error: 'Invalid donation request.' };
   const { churchId, phoneNumber, category } = params;
+  if (typeof churchId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(churchId)) {
+    return { error: 'A valid church is required for this donation.' };
+  }
+  if (typeof phoneNumber !== 'string' || phoneNumber.length > 32 || typeof category !== 'string') {
+    return { error: 'Invalid donation details.' };
+  }
   const DONATION_MIN = 500, DONATION_MAX = 10_000_000;
   const amount = parseWholeUgxAmount(params.amount, DONATION_MIN, DONATION_MAX);
   if (amount === null) {
@@ -287,6 +303,18 @@ export async function initiateDonationPayment(params: {
   const cleanPhone = normalizeUgPhone(phoneNumber);
   if (!cleanPhone) {
     return { error: 'Please enter a valid Ugandan phone number' };
+  }
+
+  const requestHeaders = await headers();
+  const clientIp = getRateLimitIp(requestHeaders);
+  if (clientIp === 'unknown' && process.env.NODE_ENV === 'production') {
+    return { error: 'Payment protection is temporarily unavailable. Please try again later.' };
+  }
+  const ipLimit = await checkRateLimit({ namespace: 'public-donation-ip', subject: clientIp, limit: 10, windowSeconds: 60 * 60 });
+  const phoneLimit = await checkRateLimit({ namespace: 'public-donation-phone', subject: `${churchId}:${cleanPhone}`, limit: 3, windowSeconds: 60 * 60 });
+  const deniedLimit = !ipLimit.allowed ? ipLimit : phoneLimit;
+  if (!ipLimit.allowed || !phoneLimit.allowed) {
+    return { error: deniedLimit.unavailable ? 'Payment protection is temporarily unavailable.' : 'Too many payment attempts. Please wait before trying again.' };
   }
 
   // Fail closed if Na'jiki is unavailable or unconfigured. No downstream
