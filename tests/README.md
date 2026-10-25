@@ -19,8 +19,8 @@ live service credentials.
 | `attendance-streaks.test.ts` | Consecutive attendance-miss calculations and attendance flag lifecycle rules. |
 | `denomination.test.ts` | Invite code normalization, provisioning payload validation, login-context mapping, and denomination query helpers. |
 | `najiki-contract.test.ts` | Church → Na'jiki payloads validated by Na'jiki's own Zod schemas; error forwarding; idempotency; signed webhook verification and replay/tamper rejection. |
-| `najiki-settlement.test.ts` | Exact deployed top-up RPC argument names/reference/amount and its `{ success, already_processed }` return contract. |
-| `sms-topup-e2e.ts` | Actual wallet initiation action → mocked Na'jiki request → signed webhook route → mocked settlement RPC; confirms one credit and duplicate acknowledgement. |
+| `najiki-settlement.test.ts` | Exact deployed top-up RPC argument names/reference/amount and its `{ success, already_processed }` return contract; blocks settlement without a successful `BUY_SMS` notification and canonical provider transaction ID. |
+| `sms-topup-e2e.ts` | Actual wallet initiation action → mocked Na'jiki request → signed webhook route → mocked settlement RPC; confirms one credit, duplicate acknowledgement, and status-API reconciliation when a signed callback omits the provider transaction ID. |
 | `sql/attendance_streaks.test.sql` | Runs the real attendance migrations and PostgreSQL functions against a scratch database with behavior assertions. CI runs this against PostgreSQL 16. |
 
 The Na'jiki contract suite uses `helpers/mock-najiki-server.ts` for partner

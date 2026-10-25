@@ -13,7 +13,7 @@ The active `church-najiki-dispatch` function requires both a valid Supabase JWT 
 ```text
 Authorization: Bearer <user access token, or server-only service-role JWT>
 apikey: <Supabase publishable key>
-x-dispatch-secret: <DISPATCH_SECRET>
+x-dispatch-secret: <CHURCH_DISPATCH_SECRET>
 Content-Type: application/json
 ```
 
@@ -41,7 +41,7 @@ Supabase provides `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` to the Edge Fun
 
 Required application-specific Edge secrets:
 
-- `DISPATCH_SECRET` — at least 32 bytes; set the same value as the Next.js server's `SMS_DISPATCH_SECRET`.
+- `CHURCH_DISPATCH_SECRET` — at least 32 characters; set the same value as the Next.js server's `CHURCH_DISPATCH_SECRET`. Generate a strong value with `openssl rand -hex 32` (64 hex characters).
 - `NAJIKI_API_KEY` — Na'jiki API credential.
 
 Optional Edge variables:
@@ -49,7 +49,7 @@ Optional Edge variables:
 - `NAJIKI_API_URL` — defaults to `https://najiki.netlify.app`; must use HTTPS.
 - `NAJIKI_APPLICATION_CODE` — defaults to `church`.
 
-The server-side caller also needs the Supabase project URL, a publishable key for the `apikey` header, and a JWT for the `Authorization` header. Prefer the initiating user's access token when available; a service-role JWT is acceptable only for a trusted server-to-server call. Never put `DISPATCH_SECRET` or the service-role JWT in browser code or chat.
+The server-side caller also needs the Supabase project URL, a publishable key for the `apikey` header, and a JWT for the `Authorization` header. Prefer the initiating user's access token when available; a service-role JWT is acceptable only for a trusted server-to-server call. Never put `CHURCH_DISPATCH_SECRET` or the service-role JWT in browser code or chat.
 
 ## Responses and retry notes
 

@@ -244,6 +244,14 @@ contract supplied by the database owner:
 - The initiation action links that pending row using the returned
   `paymentId` as `payment_intent_id`; the webhook confirms it matches the signed
   `paymentIntentId` before calling the RPC.
+- A successful top-up callback must include Na'jiki's canonical
+  `providerPaymentId`. If it is omitted, the webhook reconciles the exact intent,
+  reference, success status, church, amount, and currency through Na'jiki's
+  authenticated status API; settlement is deferred with a retryable response if
+  the match or provider ID is unavailable.
+- The webhook calls the settlement RPC only for a signed, fresh `success`
+  callback with matching Church/`BUY_SMS` identity and exact persisted amount and
+  UGX currency.
 - The RPC validates the Church application and `BUY_SMS` intent, then atomically
   creates or settles the linked `sms_topup` row, credits the wallet once, and
   returns `{ success, already_processed, ... }`. The webhook acknowledges only

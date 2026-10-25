@@ -479,6 +479,36 @@ async function handlePaymentNotification(payload: any) {
       return NextResponse.json({ error: 'Payment intent does not match the pending wallet transaction' }, { status: 409 });
     }
 
+    // A signed success callback must identify the downstream provider
+    // transaction, not only Na'jiki's payment intent. If the callback omits
+    // that canonical ID, reconcile against Na'jiki's authenticated status API
+    // and require every settlement-critical field to match before crediting.
+    if (!notification.providerPaymentId?.trim()) {
+      try {
+        const reconciled = await getNajikiPayment(reference);
+        const matchesCallback =
+          reconciled.id === notification.paymentIntentId &&
+          reconciled.reference === reference &&
+          reconciled.status.trim().toLowerCase() === 'success' &&
+          reconciled.externalEntityId === churchId &&
+          reconciled.amount === notification.amount &&
+          reconciled.currency.trim().toUpperCase() === notification.currency?.trim().toUpperCase();
+        const canonicalProviderId = reconciled.providerPaymentId?.trim() || null;
+        if (matchesCallback && canonicalProviderId) {
+          notification.providerPaymentId = canonicalProviderId;
+        }
+      } catch (reconcileError) {
+        console.warn('[Najiki Webhook] Could not reconcile top-up providerPaymentId yet:', reconcileError instanceof Error ? reconcileError.message : reconcileError);
+      }
+
+      if (!notification.providerPaymentId?.trim()) {
+        return NextResponse.json(
+          { error: 'Canonical providerPaymentId is not available yet; top-up settlement deferred' },
+          { status: 503, headers: { 'Retry-After': '30' } },
+        );
+      }
+    }
+
     // Wallet status and balance must change in the same database transaction;
     // there is deliberately no manual non-atomic fallback.
     const settlement = await settleWalletPayment({

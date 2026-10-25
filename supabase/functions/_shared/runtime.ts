@@ -12,13 +12,14 @@ export function jsonResponse(body: unknown, status = 200) {
 }
 
 export function hasValidDispatchSecret(request: Request): boolean {
-  const expected = Deno.env.get('DISPATCH_SECRET') ?? '';
+  const expected = Deno.env.get('CHURCH_DISPATCH_SECRET') ?? '';
   const provided = request.headers.get('x-dispatch-secret') ?? '';
   if (expected.length < 32 || expected.length !== provided.length) return false;
 
   // Constant-time comparison for equal-length UTF-8 secrets.
   const a = new TextEncoder().encode(expected);
   const b = new TextEncoder().encode(provided);
+  if (a.length !== b.length) return false;
   let mismatch = 0;
   for (let i = 0; i < a.length; i++) mismatch |= a[i] ^ b[i];
   return mismatch === 0;

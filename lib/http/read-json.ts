@@ -1,9 +1,14 @@
 export type BoundedJsonResult<T> =
   | { ok: true; value: T }
-  | { ok: false; status: 400 | 413; error: string };
+  | { ok: false; status: 400 | 413 | 415; error: string };
 
-/** Read and parse a JSON request while enforcing a hard byte limit. */
+/** Read and parse a JSON request while enforcing media type and hard byte limits. */
 export async function readBoundedJson<T>(request: Request, maxBytes: number): Promise<BoundedJsonResult<T>> {
+  const mediaType = request.headers.get('content-type')?.split(';', 1)[0].trim().toLowerCase();
+  if (mediaType !== 'application/json') {
+    return { ok: false, status: 415, error: 'Content-Type must be application/json.' };
+  }
+
   const declaredLength = Number(request.headers.get('content-length'));
   if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
     return { ok: false, status: 413, error: 'Request body is too large.' };

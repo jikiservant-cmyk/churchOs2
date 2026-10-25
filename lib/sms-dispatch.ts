@@ -141,11 +141,11 @@ export async function dispatchSmsQueueItem(
   const publishableKey = process.env.SUPABASE_PUBLISHABLE_KEY
     || process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY
     || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-  const dispatchSecret = process.env.SMS_DISPATCH_SECRET;
+  const dispatchSecret = process.env.CHURCH_DISPATCH_SECRET;
   const bearerToken = accessToken || process.env.SUPABASE_SERVICE_ROLE_KEY;
 
   if (!projectUrl || !publishableKey || !dispatchSecret || !bearerToken) {
-    throw new Error('SMS Edge dispatch requires Supabase URL, publishable key, server-side JWT, and SMS_DISPATCH_SECRET.');
+    throw new Error('SMS Edge dispatch requires Supabase URL, publishable key, server-side JWT, and CHURCH_DISPATCH_SECRET.');
   }
 
   const response = await fetch(`${projectUrl}/functions/v1/church-najiki-dispatch`, {

@@ -14,10 +14,21 @@ export type ProvisionState = {
 };
 
 export async function provisionTenant(prevState: ProvisionState, formData: FormData): Promise<ProvisionState> {
-  const name = (formData.get('name') as string || '').trim();
-  const rawSlug = (formData.get('slug') as string || '').toLowerCase().trim();
-  const inviteCode = (formData.get('invite_code') as string || formData.get('inviteCode') as string || '').trim();
+  const nameValue = formData.get('name');
+  const slugValue = formData.get('slug');
+  const inviteValue = formData.get('invite_code') ?? formData.get('inviteCode');
+  if (typeof nameValue !== 'string' || typeof slugValue !== 'string' ||
+      (inviteValue !== null && typeof inviteValue !== 'string')) {
+    return { error: 'Invalid church setup details.' };
+  }
+
+  const name = nameValue.normalize('NFKC').trim();
+  const rawSlug = slugValue.normalize('NFKC').toLowerCase().trim();
+  const inviteCode = typeof inviteValue === 'string' ? inviteValue.trim() : '';
   const appType = 'church';
+
+  // Bound invite input before using the Supabase RPC.
+  if (inviteCode.length > 512) return { error: 'Invalid invitation code.' };
 
   // IP detection for scam prevention
   const headerList = await headers();
@@ -109,9 +120,8 @@ export async function provisionTenant(prevState: ProvisionState, formData: FormD
 
   let currentStep = 'initializing';
   try {
-    // 0. Robust Input Sanitization (Unicode Normalization)
-    const sanitizedName = name.normalize('NFKC');
-    const sanitizedSlug = rawSlug.normalize('NFKC');
+    const sanitizedName = name;
+    const sanitizedSlug = rawSlug;
 
     currentStep = 'provisioning-church';
     if (!canProvisionChurch(existingProfile)) {

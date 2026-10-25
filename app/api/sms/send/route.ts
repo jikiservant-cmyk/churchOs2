@@ -4,6 +4,7 @@ import { normalizeUgPhone } from '@/lib/utils';
 import { sendSingleSMS } from '@/lib/sms-actions';
 import { readBoundedJson } from '@/lib/http/read-json';
 import { checkRateLimit } from '@/lib/security/rate-limit';
+import { isSameOriginRequest } from '@/lib/auth-security';
 import { isSmsWithinSegmentLimit } from '@/supabase/functions/_shared/sms-length';
 
 const MAX_REQUEST_BYTES = 16 * 1024;
@@ -12,6 +13,9 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-
 
 export async function POST(req: Request) {
   try {
+    if (!isSameOriginRequest(req.url, req.headers.get('origin'))) {
+      return NextResponse.json({ error: 'Cross-origin request denied.' }, { status: 403 });
+    }
     const parsed = await readBoundedJson<unknown>(req, MAX_REQUEST_BYTES);
     if (!parsed.ok) return NextResponse.json({ error: parsed.error }, { status: parsed.status });
     if (!parsed.value || Array.isArray(parsed.value) || typeof parsed.value !== 'object') {

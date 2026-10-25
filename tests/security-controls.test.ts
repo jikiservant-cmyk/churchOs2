@@ -67,6 +67,19 @@ describe('resource-abuse security controls', () => {
     assert.equal(getRateLimitIp(new Headers()), 'unknown');
   });
 
+  it('rejects simple cross-origin form content types before parsing JSON', async () => {
+    const request = new Request('https://example.test/api', {
+      method: 'POST',
+      headers: { 'content-type': 'text/plain' },
+      body: '{"ok":true}',
+    });
+    assert.deepEqual(await readBoundedJson(request, 32), {
+      ok: false,
+      status: 415,
+      error: 'Content-Type must be application/json.',
+    });
+  });
+
   it('rejects bodies exceeding the declared byte limit before parsing', async () => {
     const request = new Request('https://example.test/api', {
       method: 'POST',
