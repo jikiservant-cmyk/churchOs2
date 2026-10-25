@@ -24,7 +24,6 @@ import {
   TrendingUp,
   Shield,
   Layers,
-  Sparkles,
   ChevronRight,
   Eye
 } from 'lucide-react';
@@ -49,97 +48,6 @@ interface OverseerDashboardClientProps {
   denominationSlug?: string;
 }
 
-// Sample demonstration dataset for brand new dioceses prior to pastor onboarding
-const SAMPLE_CHURCHES: OverseerChurchItem[] = [
-  {
-    church_id: 'sample-1',
-    name: 'Grace Cathedral Central',
-    slug: 'grace-central',
-    pastor_name: 'Rev. Emmanuel Kato',
-    pastor_email: 'emmanuel@gracecentral.org',
-    member_count: 420,
-    recent_attendance: 385,
-    total_giving: 14250000,
-    joined_at: new Date(Date.now() - 90 * 86400000).toISOString(),
-    status: 'active',
-  },
-  {
-    church_id: 'sample-2',
-    name: 'St. Luke Parish North',
-    slug: 'st-luke-north',
-    pastor_name: 'Pastor Sarah Namubiru',
-    pastor_email: 'sarah@stlukenorth.org',
-    member_count: 280,
-    recent_attendance: 245,
-    total_giving: 8900000,
-    joined_at: new Date(Date.now() - 60 * 86400000).toISOString(),
-    status: 'active',
-  },
-  {
-    church_id: 'sample-3',
-    name: 'Faith Fellowship East',
-    slug: 'faith-east',
-    pastor_name: 'Pastor David Mugisha',
-    pastor_email: 'david@faitheast.org',
-    member_count: 195,
-    recent_attendance: 170,
-    total_giving: 5400000,
-    joined_at: new Date(Date.now() - 45 * 86400000).toISOString(),
-    status: 'active',
-  },
-  {
-    church_id: 'sample-4',
-    name: 'Hope Community Chapel',
-    slug: 'hope-chapel',
-    pastor_name: 'Rev. Joshua Okello',
-    pastor_email: 'joshua@hopechapel.org',
-    member_count: 140,
-    recent_attendance: 125,
-    total_giving: 3750000,
-    joined_at: new Date(Date.now() - 20 * 86400000).toISOString(),
-    status: 'active',
-  },
-  {
-    church_id: 'sample-5',
-    name: 'New Life Outreach Campus',
-    slug: 'newlife-outreach',
-    pastor_name: 'Pastor Grace Akello',
-    pastor_email: 'grace@newlife.org',
-    member_count: 95,
-    recent_attendance: 88,
-    total_giving: 2100000,
-    joined_at: new Date(Date.now() - 10 * 86400000).toISOString(),
-    status: 'active',
-  },
-];
-
-const SAMPLE_INVITES: OverseerInvite[] = [
-  {
-    id: 'inv-sample-1',
-    code: 'DIOCESE-2026-WEST',
-    max_uses: 5,
-    uses_count: 2,
-    created_at: new Date(Date.now() - 15 * 86400000).toISOString(),
-    expires_at: new Date(Date.now() + 75 * 86400000).toISOString(),
-  },
-  {
-    id: 'inv-sample-2',
-    code: 'PLANTING-EAST-01',
-    max_uses: 1,
-    uses_count: 0,
-    created_at: new Date(Date.now() - 5 * 86400000).toISOString(),
-    expires_at: new Date(Date.now() + 25 * 86400000).toISOString(),
-  },
-  {
-    id: 'inv-sample-3',
-    code: 'CAMPUS-YOUTH-NET',
-    max_uses: null,
-    uses_count: 3,
-    created_at: new Date(Date.now() - 30 * 86400000).toISOString(),
-    expires_at: null,
-  }
-];
-
 export default function OverseerDashboardClient({
   initialTotals,
   initialChurches,
@@ -148,16 +56,9 @@ export default function OverseerDashboardClient({
   denominationName = 'Diocese Governance',
   denominationSlug,
 }: OverseerDashboardClientProps) {
-  // If zero real churches exist, enable demo toggle so the overseer sees the full UI potential
-  const isZeroState = initialChurches.length === 0;
-  const [useDemoData, setUseDemoData] = useState(isZeroState);
-
-  const activeChurches = useDemoData ? SAMPLE_CHURCHES : initialChurches;
-  const activeInvites = useDemoData && initialInvites.length === 0 ? SAMPLE_INVITES : initialInvites;
-
   const [activeTab, setActiveTab] = useState<'churches' | 'invites' | 'governance'>('churches');
-  const [churches, setChurches] = useState<OverseerChurchItem[]>(activeChurches);
-  const [invites, setInvites] = useState<OverseerInvite[]>(activeInvites);
+  const [churches, setChurches] = useState<OverseerChurchItem[]>(initialChurches);
+  const [invites, setInvites] = useState<OverseerInvite[]>(initialInvites);
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | 'large' | 'medium' | 'growth'>('all');
   const [copiedCode, setCopiedCode] = useState<string | null>(null);
@@ -316,38 +217,6 @@ export default function OverseerDashboardClient({
 
   return (
     <div className="space-y-8" style={{ fontFamily: "'Outfit', sans-serif" }}>
-      {/* Zero State / Demo Mode Ticker Banner */}
-      {isZeroState && (
-        <div className="bg-[#F0E6D3] border border-[#B5622A]/30 rounded-2xl p-4 shadow-sm flex flex-col sm:flex-row items-center justify-between gap-3">
-          <div className="flex items-center gap-3">
-            <div className="p-2 bg-[#B5622A] text-white rounded-xl">
-              <Sparkles className="w-5 h-5" />
-            </div>
-            <div>
-              <p className="text-xs font-bold text-[#1E1208]">
-                {useDemoData ? 'Showing Demonstration Diocese Preview' : 'Your Denomination Network is Freshly Provisioned'}
-              </p>
-              <p className="text-[11px] text-[#9A7E65]">
-                {useDemoData 
-                  ? 'Previewing metrics with sample parish congregations. Generate your first pastor invite to start onboarding.' 
-                  : 'No member churches have linked yet. Use the toggle to preview how the executive charts will look.'}
-              </p>
-            </div>
-          </div>
-          <button
-            onClick={() => {
-              const nextState = !useDemoData;
-              setUseDemoData(nextState);
-              setChurches(nextState ? SAMPLE_CHURCHES : []);
-              setInvites(nextState ? SAMPLE_INVITES : initialInvites);
-            }}
-            className="px-3.5 py-1.5 bg-[#2B1A0E] text-[#F5E6CE] hover:bg-[#3D2614] rounded-xl text-xs font-bold uppercase tracking-wider transition-colors shrink-0"
-          >
-            {useDemoData ? 'Switch to Live Data' : 'Preview Demo View'}
-          </button>
-        </div>
-      )}
-
       {/* Executive Greeting Hero Banner */}
       <div className="bg-[#F0E6D3] rounded-3xl border border-[rgba(90,55,20,0.15)] p-6 md:p-8 shadow-sm flex flex-col md:flex-row items-start md:items-center justify-between gap-6 relative overflow-hidden">
         <div className="flex items-start gap-4 z-10">

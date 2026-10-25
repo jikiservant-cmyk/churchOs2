@@ -6,7 +6,7 @@ import { useEffect, useState, useActionState, useRef } from 'react';
 import Image from 'next/image';
 import { useRouter } from 'next/navigation';
 
-export default function LoginForm({ church, churchSlug, error: urlError }: { church: any; churchSlug: string; error?: string }) {
+export default function LoginForm({ church, churchSlug, error: urlError, returnTo }: { church: any; churchSlug: string; error?: string; returnTo?: string }) {
   const router = useRouter();
   const redirected = useRef(false);
   
@@ -51,6 +51,7 @@ export default function LoginForm({ church, churchSlug, error: urlError }: { chu
 
         <form action={formAction} className="space-y-5">
           <input type="hidden" name="churchSlug" value={churchSlug} />
+          {returnTo && <input type="hidden" name="returnTo" value={returnTo} />}
           <div className="space-y-1.5">
             <label className="block text-[10px] font-bold text-[#C8B89A] uppercase tracking-widest">Email Address</label>
             <input

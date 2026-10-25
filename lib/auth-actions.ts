@@ -35,6 +35,39 @@ export async function login(prevState: AuthState, formData: FormData): Promise<A
       return { error: authError?.message || 'Login failed' };
     }
 
+    // Invite redemption is a safe, narrowly-scoped post-login destination. Do
+    // not accept arbitrary return URLs from the browser.
+    const returnTo = String(formData.get('returnTo') || '').trim();
+    if (/^\/overseer\/invite\/[A-Za-z0-9_-]{1,128}$/.test(returnTo)) {
+      return { success: true, redirectTo: returnTo };
+    }
+
+    // The global platform role takes precedence over denomination/church context.
+    const adminSupabase = await createAdminClient();
+    const { data: signedInProfile } = await adminSupabase
+      .from('admin_profiles')
+      .select('role, tenant_id')
+      .eq('id', authData.user.id)
+      .maybeSingle();
+    if (signedInProfile?.role === 'super_admin') {
+      return { success: true, redirectTo: '/super-admin/overseers' };
+    }
+
+    // If an existing pastor/admin also has a denomination-admin link, preserve
+    // their church dashboard as the default login destination. They can still
+    // open /overseer directly because access is checked against denomination_admins.
+    if (['pastor', 'admin'].includes(signedInProfile?.role || '') && signedInProfile?.tenant_id) {
+      const { data: church } = await adminSupabase
+        .schema('church')
+        .from('churches')
+        .select('slug')
+        .eq('id', signedInProfile.tenant_id)
+        .maybeSingle();
+      if (church?.slug) {
+        return { success: true, redirectTo: `/${church.slug}/admin` };
+      }
+    }
+
     // 2. Call my_login_context RPC and route based on its result
     try {
       const { data: contextData, error: contextError } = await supabase.rpc('my_login_context');
@@ -45,7 +78,6 @@ export async function login(prevState: AuthState, formData: FormData): Promise<A
           const overseerUrl = context.denomination_slug ? `/d/${context.denomination_slug}/overseer` : '/overseer';
           return { success: true, redirectTo: overseerUrl };
         } else if (context?.account_type === 'pastor') {
-          const adminSupabase = await createAdminClient();
           const { data: profile } = await adminSupabase
             .from('admin_profiles')
             .select('tenant_id')
@@ -77,8 +109,7 @@ export async function login(prevState: AuthState, formData: FormData): Promise<A
     }
 
     // 3. Fallback: Verify Role and find Church Slug in admin_profiles
-    // Use admin client to reliably bypass RLS restrictions on admin_profiles
-    const adminSupabase = await createAdminClient();
+    // Reuse the server-side admin client to bypass RLS restrictions on admin_profiles.
     let profile = null;
     let profileError = null;
 
@@ -110,15 +141,27 @@ export async function login(prevState: AuthState, formData: FormData): Promise<A
       }
     }
 
+    // The platform super-admin is a global role and does not need a church tenant.
+    if (profile?.role === 'super_admin') {
+      return { success: true, redirectTo: '/super-admin/overseers' };
+    }
+
+    // Overseer access is granted by the denomination membership relation, not
+    // by admin_profiles.role. Check it before the church-provisioning fallback.
+    const { data: overseerLink } = await adminSupabase
+      .schema('church')
+      .from('denomination_admins')
+      .select('user_id')
+      .eq('user_id', authData.user.id)
+      .maybeSingle();
+    if (overseerLink?.user_id === authData.user.id) {
+      return { success: true, redirectTo: '/overseer' };
+    }
+
     // If no profile or no tenant_id exists yet, the authenticated user has not provisioned their church workspace.
     // Send them to /signup/provision instead of kicking them out with Access Denied!
     if (!profile || !profile.tenant_id) {
       return { success: true, redirectTo: '/signup/provision' };
-    }
-
-    // Handle overseer in fallback profile check
-    if (profile.role?.toLowerCase() === 'overseer') {
-      return { success: true, redirectTo: '/overseer' };
     }
 
     // Allow strictly pastor roles for church admin

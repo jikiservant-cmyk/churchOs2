@@ -46,7 +46,16 @@ export default async function AdminLoginPage({
             .eq('id', user.id)
             .maybeSingle();
 
-          if (profile?.role === 'overseer') {
+          const { data: overseerLink } = await supabase
+            .schema('church')
+            .from('denomination_admins')
+            .select('user_id')
+            .eq('user_id', user.id)
+            .maybeSingle();
+
+          if (profile?.role === 'super_admin') {
+            redirectTo = '/super-admin/overseers';
+          } else if (overseerLink?.user_id === user.id) {
             redirectTo = '/overseer';
           } else if (profile?.role === 'pastor' && profile?.tenant_id) {
              const { data: church } = await supabase

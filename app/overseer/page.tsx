@@ -17,16 +17,23 @@ export default async function OverseerPage() {
   // Check login context
   const context = await getMyLoginContext();
 
-  // If user has a pastor context rather than overseer, redirect them to their church
-  if (context && context.account_type === 'pastor' && context.church_slug) {
-    redirect(`/${context.church_slug}/admin`);
-  }
+  // The denomination_admins membership relation is authoritative for overseer
+  // access. A linked pastor may hold both memberships, so don't redirect based
+  // on a pastor-first login context before checking that relation.
 
   // Fetch overseer data
   const data = await getOverseerDashboardData();
 
-  if ('error' in data && data.error && data.error.includes('Authentication required')) {
-    redirect('/admin/login?error=Session%20Expired');
+  if ('error' in data && data.error) {
+    if (data.error.includes('Authentication required')) {
+      redirect('/admin/login?error=Session%20Expired');
+    }
+    if (data.error.includes('overseer access required')) {
+      if (context?.account_type === 'pastor' && context.church_slug) {
+        redirect(`/${context.church_slug}/admin`);
+      }
+      redirect('/');
+    }
   }
 
   const churches = ('churches' in data && data.churches) ? data.churches : [];
