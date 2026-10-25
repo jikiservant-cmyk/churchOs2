@@ -46,6 +46,17 @@ test('SMS top-up action → signed webhook → exact process_topup_webhook contr
   let providerRequest: Record<string, any> | null = null;
   let creditedBalance = 0;
   let rpcCalls = 0;
+  let najikiStatusResponse: Record<string, unknown> = {
+    id: paymentIntentId,
+    reference: providerReference,
+    status: 'success',
+    amount: 1_000,
+    currency: 'UGX',
+    phoneNumber: '256772123456',
+    externalEntityId: churchId,
+    providerPaymentId: 'synthetic-provider-transaction',
+    failureReason: null,
+  };
 
   Object.assign(process.env, {
     NEXT_PUBLIC_SUPABASE_URL: 'https://supabase.test',
@@ -112,6 +123,10 @@ test('SMS top-up action → signed webhook → exact process_topup_webhook contr
       assert.equal(headers.get('authorization'), `Bearer ${apiKey}`);
       providerRequest = body;
       return json({ paymentId: paymentIntentId, reference: providerReference, status: 'processing' });
+    }
+    if (url.host === 'najiki.test' && url.pathname === `/api/payments/${providerReference}` && method === 'GET') {
+      assert.equal(headers.get('authorization'), `Bearer ${apiKey}`);
+      return json(najikiStatusResponse);
     }
     if (url.host === 'supabase.test' && url.pathname === '/rest/v1/rpc/process_topup_webhook' && method === 'POST') {
       rpcCalls += 1;
@@ -187,7 +202,21 @@ test('SMS top-up action → signed webhook → exact process_topup_webhook contr
     assert.equal(sentPayment.paymentTypeCode, 'BUY_SMS');
     assert.equal(sentPayment.metadata.product, 'sms_topup');
 
-    const payload = {
+    const payload: {
+      paymentIntentId: string;
+      reference: string;
+      status: string;
+      amount: number;
+      currency: string;
+      providerPaymentId: string | null;
+      failureReason: null;
+      externalEntityId: string;
+      tenantId: string;
+      tenantCode: string;
+      paymentType: string;
+      paymentTypeCode: string;
+      metadata: Record<string, unknown>;
+    } = {
       paymentIntentId,
       reference: providerReference,
       status: 'success',
@@ -226,6 +255,23 @@ test('SMS top-up action → signed webhook → exact process_topup_webhook contr
     assert.deepEqual(await duplicate.json(), { received: true, settlement: 'already_credited' });
     assert.equal(creditedBalance, 1_000);
     assert.equal(rpcCalls, 2);
+
+    // If a signed success callback omits the downstream provider transaction
+    // ID, reconcile the exact intent/reference/status/amount/currency/church
+    // with Na'jiki before allowing the settlement RPC to run.
+    payload.providerPaymentId = null;
+    const reconciled = await POST(signedRequest());
+    assert.equal(reconciled.status, 200, await reconciled.clone().text());
+    assert.deepEqual(await reconciled.json(), { received: true, settlement: 'already_credited' });
+    assert.equal(creditedBalance, 1_000);
+    assert.equal(rpcCalls, 3);
+
+    // A status lookup that disagrees with the signed event must defer the RPC.
+    najikiStatusResponse = { ...najikiStatusResponse, amount: 1_001 };
+    const mismatchedReconciliation = await POST(signedRequest());
+    assert.equal(mismatchedReconciliation.status, 503);
+    assert.equal(creditedBalance, 1_000);
+    assert.equal(rpcCalls, 3);
   } finally {
     globalThis.fetch = oldFetch;
     process.env = oldEnv;

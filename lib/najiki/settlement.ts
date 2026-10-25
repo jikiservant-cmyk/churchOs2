@@ -41,6 +41,15 @@ export async function settleWalletPayment({ db, notification, transaction, paylo
   if (!reference || !tenantId || !paymentIntentId) {
     return { ok: false, status: 422, error: 'Payment reference, tenant, and intent are required' };
   }
+  if (notification.status.trim().toLowerCase() !== 'success') {
+    return { ok: false, status: 422, error: 'Only successful payments can settle the SMS wallet' };
+  }
+  if (notification.paymentTypeCode !== 'BUY_SMS') {
+    return { ok: false, status: 422, error: 'Only BUY_SMS payments can settle the SMS wallet' };
+  }
+  if (!notification.providerPaymentId?.trim()) {
+    return { ok: false, status: 422, error: 'Provider payment ID is required for wallet settlement' };
+  }
   if (transaction.payment_intent_id !== paymentIntentId) {
     return { ok: false, status: 409, error: 'Payment intent does not match the pending wallet transaction' };
   }

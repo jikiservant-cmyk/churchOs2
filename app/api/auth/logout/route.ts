@@ -1,7 +1,11 @@
 import { createClient } from '@/lib/supabase/server';
 import { NextResponse } from 'next/server';
+import { isSameOriginRequest } from '@/lib/auth-security';
 
 export async function POST(req: Request) {
+  if (!isSameOriginRequest(req.url, req.headers.get('origin'))) {
+    return NextResponse.json({ error: 'Cross-origin request denied.' }, { status: 403 });
+  }
   try {
     if (process.env.NEXT_PUBLIC_SUPABASE_URL && process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY) {
       const supabase = await createClient();

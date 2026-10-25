@@ -1,13 +1,15 @@
 /**
  * tests/helpers/mock-najiki-server.ts
  *
- * A faithful re-implementation of the Na'jiki Finance *partner* API, built from
- * najiki-finance2's route handlers so the church app's real HTTP client can be
- * pointed at it and driven end-to-end:
+ * A faithful re-implementation of the Na'jiki Finance payment partner API, built
+ * from najiki-finance2's route handlers so the church app's payment-only HTTP
+ * client can be pointed at it and driven end-to-end:
  *
- *   POST /api/messaging/send      → src/app/api/messaging/send/route.ts
  *   POST /api/payments            → src/app/api/payments/route.ts
  *   GET  /api/payments/:reference → src/app/api/payments/[reference]/route.ts
+ *
+ * SMS is intentionally not exposed by this mock client: production SMS dispatch
+ * is owned by the Supabase Edge Function, not this Next.js payment client.
  *
  * Validation uses Na'jiki's own Zod schema, vendored in
  * tests/fixtures/najiki/schemas.ts — so a payload the church app builds either
@@ -25,7 +27,6 @@ import {
   CreatePaymentRequestSchema,
   type CreatePaymentRequest,
 } from '../fixtures/najiki/schemas.ts'
-import { SmsInputSchema } from '../fixtures/najiki/sms-policy.ts'
 
 export interface MockApplication {
   id: string
@@ -48,17 +49,6 @@ export interface MockPayment {
   applicationId: string
   idempotencyKey: string
   body: CreatePaymentRequest
-}
-
-export interface MockSms {
-  id: string
-  reference: string
-  status: string
-  recipient: string
-  message: string
-  senderId: string | null
-  applicationId: string
-  idempotencyKey: string | null
 }
 
 export interface RecordedRequest {
@@ -110,10 +100,7 @@ export class MockNajikiServer {
   ]
 
   readonly payments: MockPayment[] = []
-  readonly smsMessages: MockSms[] = []
   readonly requests: RecordedRequest[] = []
-  /** Number of SMS actually handed to the provider (deduplicated ones excluded). */
-  smsSends = 0
 
   get apiKey(): string {
     return TEST_API_KEY
@@ -152,9 +139,7 @@ export class MockNajikiServer {
 
   reset(): void {
     this.payments.length = 0
-    this.smsMessages.length = 0
     this.requests.length = 0
-    this.smsSends = 0
   }
 
   private json(res: import('node:http').ServerResponse, status: number, body: unknown) {
@@ -192,10 +177,6 @@ export class MockNajikiServer {
       body: parsedBody,
     })
 
-    if (req.method === 'POST' && url.pathname === '/api/messaging/send') {
-      return this.handleMessagingSend(res, headers, parsedBody as Record<string, unknown>)
-    }
-
     if (req.method === 'POST' && url.pathname === '/api/payments') {
       return this.handleCreatePayment(res, headers, parsedBody)
     }
@@ -205,89 +186,6 @@ export class MockNajikiServer {
     }
 
     return this.json(res, 404, { error: 'Not found' })
-  }
-
-  // ── POST /api/messaging/send ───────────────────────────────────────────────
-  private handleMessagingSend(
-    res: import('node:http').ServerResponse,
-    headers: Record<string, string>,
-    rawBody: Record<string, unknown>
-  ) {
-    const idempotencyHeader = headers['idempotency-key']?.trim()
-    const parsed = SmsInputSchema.safeParse(rawBody)
-    if (
-      !parsed.success ||
-      (idempotencyHeader && (idempotencyHeader.length < 8 || idempotencyHeader.length > 255))
-    ) {
-      return this.json(res, 400, { error: 'Invalid SMS payload or idempotency key' })
-    }
-    const { to, message, applicationCode, from, senderId, apiKey: bodyApiKey } = parsed.data
-    const idempotencyKey = idempotencyHeader || parsed.data.idempotencyKey || null
-
-    const authHeader = headers['authorization']
-    let apiKey = ''
-    if (authHeader && authHeader.startsWith('Bearer ')) {
-      apiKey = authHeader.slice(7).trim()
-    } else if (authHeader) {
-      apiKey = authHeader.trim()
-    } else if (headers['x-api-key']) {
-      apiKey = headers['x-api-key'].trim()
-    } else if (bodyApiKey) {
-      apiKey = String(bodyApiKey).trim()
-    }
-
-    const application = this.applications.find((a) => a.apiKey === apiKey && a.isActive) ?? null
-    if (!application) {
-      return this.json(res, 401, { error: 'Invalid or missing API key' })
-    }
-
-    if (applicationCode && application.code !== applicationCode) {
-      return this.json(res, 403, { error: 'Application code mismatch' })
-    }
-
-    const customSender = (from as string) || (senderId as string) || undefined
-
-    const existing =
-      idempotencyKey && application
-        ? this.smsMessages.find(
-            (m) => m.applicationId === application.id && m.idempotencyKey === idempotencyKey
-          ) ?? null
-        : null
-
-    if (existing) {
-      return this.json(res, 202, {
-        success: true,
-        message: 'Duplicate request — the original SMS job was returned',
-        smsId: existing.id,
-        reference: existing.reference,
-        status: existing.status,
-        deduplicated: true,
-        createdAt: new Date().toISOString(),
-      })
-    }
-
-    const sms: MockSms = {
-      id: `sms_${randomBytes(8).toString('hex')}`,
-      reference: `SMS-${randomBytes(5).toString('hex').toUpperCase()}`,
-      status: 'queued',
-      recipient: String(to),
-      message: String(message),
-      senderId: customSender ?? null,
-      applicationId: application.id,
-      idempotencyKey,
-    }
-    this.smsMessages.push(sms)
-    this.smsSends += 1
-
-    return this.json(res, 202, {
-      success: true,
-      message: 'SMS send job queued successfully',
-      smsId: sms.id,
-      reference: sms.reference,
-      status: sms.status,
-      deduplicated: false,
-      createdAt: new Date().toISOString(),
-    })
   }
 
   // ── POST /api/payments ─────────────────────────────────────────────────────

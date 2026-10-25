@@ -9,6 +9,8 @@ const notification = parsePaymentNotification({
   status: 'success',
   amount: 12_000,
   currency: 'UGX',
+  providerPaymentId: 'provider-tx-123',
+  paymentTypeCode: 'BUY_SMS',
 })!;
 const transaction = {
   tenant_id: 'tenant-1',
@@ -62,6 +64,47 @@ describe('wallet webhook settlement against the deployed process_topup_webhook c
       payload: {},
     });
     assert.deepEqual(otherCurrency, { ok: false, status: 422, error: 'Amount or currency mismatch' });
+    assert.equal(calls.length, 0);
+  });
+
+  test('requires successful BUY_SMS status and canonical provider transaction ID before calling the RPC', async () => {
+    const { db, calls } = fakeDb();
+    const missingProviderId = await settleWalletPayment({
+      db,
+      notification: { ...notification, providerPaymentId: null },
+      transaction,
+      payload: {},
+    });
+    assert.deepEqual(missingProviderId, {
+      ok: false,
+      status: 422,
+      error: 'Provider payment ID is required for wallet settlement',
+    });
+
+    const nonSuccess = await settleWalletPayment({
+      db,
+      notification: { ...notification, status: 'processing' },
+      transaction,
+      payload: {},
+    });
+    assert.deepEqual(nonSuccess, {
+      ok: false,
+      status: 422,
+      error: 'Only successful payments can settle the SMS wallet',
+    });
+
+    const wrongType = await settleWalletPayment({
+      db,
+      notification: { ...notification, paymentTypeCode: 'donation' },
+      transaction,
+      payload: {},
+    });
+    assert.deepEqual(wrongType, {
+      ok: false,
+      status: 422,
+      error: 'Only BUY_SMS payments can settle the SMS wallet',
+    });
+
     assert.equal(calls.length, 0);
   });
 

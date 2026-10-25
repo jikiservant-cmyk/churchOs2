@@ -3,6 +3,7 @@
 import { createAdminClient, createClient } from '@/lib/supabase/server';
 import { headers } from 'next/headers';
 import { canProvisionChurch } from '@/lib/provisioning-security';
+import { checkRateLimit, getRateLimitIp } from '@/lib/security/rate-limit';
 
 export type ProvisionState = {
   error?: string;
@@ -13,16 +14,25 @@ export type ProvisionState = {
 };
 
 export async function provisionTenant(prevState: ProvisionState, formData: FormData): Promise<ProvisionState> {
-  const name = (formData.get('name') as string || '').trim();
-  const rawSlug = (formData.get('slug') as string || '').toLowerCase().trim();
-  const inviteCode = (formData.get('invite_code') as string || formData.get('inviteCode') as string || '').trim();
+  const nameValue = formData.get('name');
+  const slugValue = formData.get('slug');
+  const inviteValue = formData.get('invite_code') ?? formData.get('inviteCode');
+  if (typeof nameValue !== 'string' || typeof slugValue !== 'string' ||
+      (inviteValue !== null && typeof inviteValue !== 'string')) {
+    return { error: 'Invalid church setup details.' };
+  }
+
+  const name = nameValue.normalize('NFKC').trim();
+  const rawSlug = slugValue.normalize('NFKC').toLowerCase().trim();
+  const inviteCode = typeof inviteValue === 'string' ? inviteValue.trim() : '';
   const appType = 'church';
+
+  // Bound invite input before using the Supabase RPC.
+  if (inviteCode.length > 512) return { error: 'Invalid invitation code.' };
 
   // IP detection for scam prevention
   const headerList = await headers();
-  const ip = headerList.get('x-forwarded-for')?.split(',')[0] || 
-             headerList.get('x-real-ip') || 
-             'unknown';
+  const ip = getRateLimitIp(headerList);
 
   // 0. Robust Input Validation
   if (!name || name.length < 3 || name.length > 50) {
@@ -84,7 +94,17 @@ export async function provisionTenant(prevState: ProvisionState, formData: FormD
     }
   }
 
-  // 1.2 IP Rate Limiting: Check if IP has already registered a church
+  if (ip === 'unknown' && process.env.NODE_ENV === 'production') {
+    return { error: 'Registration protection is temporarily unavailable. Please try again later.' };
+  }
+  const accountLimit = await checkRateLimit({ namespace: 'church-provision-account', subject: user.id, limit: 3, windowSeconds: 24 * 60 * 60 });
+  const ipLimit = await checkRateLimit({ namespace: 'church-provision-ip', subject: ip, limit: 3, windowSeconds: 24 * 60 * 60 });
+  const deniedLimit = !accountLimit.allowed ? accountLimit : ipLimit;
+  if (!accountLimit.allowed || !ipLimit.allowed) {
+    return { error: deniedLimit.unavailable ? 'Registration protection is temporarily unavailable.' : 'Too many registration attempts. Please try again later.' };
+  }
+
+  // 1.2 Additional database check: block repeat registrations from a saved IP
   if (ip !== 'unknown' && ip !== '127.0.0.1' && ip !== '::1') {
     const { data: ipChurch } = await adminSupabase
       .schema('church')
@@ -100,9 +120,8 @@ export async function provisionTenant(prevState: ProvisionState, formData: FormD
 
   let currentStep = 'initializing';
   try {
-    // 0. Robust Input Sanitization (Unicode Normalization)
-    const sanitizedName = name.normalize('NFKC');
-    const sanitizedSlug = rawSlug.normalize('NFKC');
+    const sanitizedName = name;
+    const sanitizedSlug = rawSlug;
 
     currentStep = 'provisioning-church';
     if (!canProvisionChurch(existingProfile)) {

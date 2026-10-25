@@ -6,6 +6,7 @@ import {
   jsonResponse,
   requireSupabaseSecrets,
 } from '../_shared/runtime.ts';
+import { isSmsWithinSegmentLimit } from '../_shared/sms-length.ts';
 
 type QueueItem = {
   id: string;
@@ -135,6 +136,21 @@ Deno.serve(async (request: Request) => {
   if (!row) return jsonResponse({ ok: true, skipped: true, status: 'not_due_or_already_claimed' });
 
   try {
+    const validPhone = typeof row.recipient_phone === 'string' && /^\+256\d{9}$/.test(row.recipient_phone);
+    const validMessage = typeof row.message === 'string' && row.message.trim().length > 0 && Array.from(row.message).length <= 500 && isSmsWithinSegmentLimit(row.message);
+    const validIdempotencyKey = typeof row.idempotency_key === 'string' && row.idempotency_key.length >= 8 && row.idempotency_key.length <= 255;
+    if (!validPhone || !validMessage || !validIdempotencyKey) {
+      const { data: failed, error: failError } = await db.rpc('fail_sms_queue_item', {
+        p_sms_id: row.id,
+        p_lock_token: lockToken,
+        p_error: 'Queue item failed server-side SMS validation.',
+      });
+      if (failError || failed?.result === 'not_claimed') {
+        throw new Error(`Could not reject invalid SMS queue item: ${failError?.message ?? 'lease was lost'}`);
+      }
+      return jsonResponse({ ok: true, status: 'failed', reason: 'invalid_queue_payload', sms_id: row.id });
+    }
+
     await ensureSmsLog(db, row);
 
     const { data: debit, error: debitError } = await db.rpc('reserve_sms_queue_debit', {

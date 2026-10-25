@@ -4,8 +4,8 @@
  * The single, contract-conformant HTTP client for the Na'jiki Finance gateway
  * (https://github.com/jikiservant-cmyk/najiki-finance2).
  *
- * Everything the church app sends to Na'jiki goes through this file, so the
- * request shapes, headers and error handling only have to be correct once.
+ * This client is restricted to payment endpoints. SMS dispatch is exclusively
+ * handled by the Supabase Edge Function `church-najiki-dispatch`.
  * See NAJIKI_INTEGRATION.md for the full contract this implements.
  *
  * ⚠️ This module deliberately imports NOTHING from `next/*` or
@@ -13,18 +13,11 @@
  * the contract tests in `tests/` with Node's built-in runner.
  *
  * ── Contract summary (source: najiki-finance2) ────────────────────────────────
- * POST {base}/api/messaging/send   → 202 { success, message, smsId, reference,
- *                                       status, deduplicated, createdAt }
  * POST {base}/api/payments         → 200 { paymentId, reference, status }
  * GET  {base}/api/payments/:ref    → 200 { id, reference, status, amount, ... }
  *
- * Auth: `Authorization: Bearer <application api key>`. `/api/payments` accepts
- *       ONLY this header (a bare `x-api-key` is a 401 there); `/api/messaging/send`
- *       additionally accepts `x-api-key` or a body `apiKey`, but the Bearer
- *       header is what both endpoints document.
- * Idempotency: payments require the `idempotencyKey` body field; SMS accepts
- *       the `Idempotency-Key` header or its body alias (≤255 trimmed chars).
- *       Na'jiki dedupes both per (application, idempotencyKey).
+ * Auth: `Authorization: Bearer <application api key>`.
+ * Idempotency: payment initiation requires the `idempotencyKey` body field.
  */
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -42,19 +35,14 @@ export const NAJIKI_DEFAULT_BASE_URL = 'https://najiki.netlify.app'
  * `scripts/seed.ts` in najiki-finance2 seeds it as lowercase `church`
  * (`code: 'church', name: 'Church App'`).
  *
- * This matters: `/api/messaging/send` answers 403 "Application code mismatch"
- * when the body's `applicationCode` differs from the authenticated
- * application's `code`, and `/api/payments` filters its API-key lookup on
- * `{ code: body.applicationCode }`, so a mismatch surfaces as 401. Sending
- * "CHURCH" (as .env.example used to say) is rejected.
+ * `/api/payments` filters its API-key lookup on `{ code: body.applicationCode }`,
+ * so a mismatch surfaces as 401. Sending `CHURCH` is rejected. SMS application
+ * credentials are consumed only by the Supabase Edge Function.
  */
 export const NAJIKI_DEFAULT_APPLICATION_CODE = 'church'
 
 /** Money is always UGX in churchOs; Na'jiki defaults to UGX as well. */
 export const NAJIKI_DEFAULT_CURRENCY = 'UGX'
-
-/** Na'jiki's SMS Idempotency-Key header is limited to 255 trimmed characters. */
-export const NAJIKI_MAX_IDEMPOTENCY_KEY_LENGTH = 255
 
 export interface NajikiConfig {
   /** Origin without a trailing slash, e.g. https://najiki.netlify.app */
@@ -91,9 +79,8 @@ function stripTrailingSlashes(url: string): string {
  * Read and validate the Na'jiki connection settings.
  *
  * Throws {@link NajikiConfigError} naming every missing variable rather than
- * failing later with an opaque "fetch failed" — the previous code threw
- * 'Najiki configuration missing from environment variables' from deep inside
- * the SMS send path, which made a misconfiguration look like a provider outage.
+ * failing later with an opaque "fetch failed" — this keeps payment setup
+ * errors explicit and fail-closed. SMS configuration is validated in the Edge Function.
  */
 export function getNajikiConfig(): NajikiConfig {
   const apiKey = (process.env.NAJIKI_API_KEY ?? '').trim()
@@ -263,33 +250,24 @@ export class NajikiApiError extends Error {
 // ─────────────────────────────────────────────────────────────────────────────
 
 export interface NajikiRequestOptions {
-  /** Optional SMS idempotency header. Payments use their required body field instead. */
-  idempotencyKey?: string | null
   /** Overrides the configured timeout. */
   timeoutMs?: number
   /** Extra headers (never used to carry credentials). */
   headers?: Record<string, string>
 }
 
-function normaliseIdempotencyKey(key: string | null | undefined): string | null {
-  if (!key) return null
-  const trimmed = String(key).trim()
-  if (!trimmed) return null
-  return trimmed
-}
-
 /**
- * Perform one request against the Na'jiki partner API.
- *
- * Auth is `Authorization: Bearer <api key>` for every endpoint — this is the
- * only scheme `/api/payments` accepts. `Content-Type` is always JSON because
- * Na'jiki calls `request.json()` on both partner endpoints.
+ * Perform a payment-only request. SMS paths are rejected here by design;
+ * production SMS delivery belongs exclusively to the Supabase Edge Function.
  */
-export async function najikiRequest<T = unknown>(
+async function najikiPaymentRequest<T = unknown>(
   path: string,
   body?: unknown,
   options: NajikiRequestOptions = {}
 ): Promise<T> {
+  if (path !== '/api/payments' && !/^\/api\/payments\/[^/?#]+$/.test(path)) {
+    throw new Error('This Na’jiki client is payment-only. SMS must use the Supabase Edge Function.');
+  }
   const config = getNajikiConfig()
   const url = `${config.baseUrl}${path}`
 
@@ -300,9 +278,6 @@ export async function najikiRequest<T = unknown>(
   }
 
   if (body !== undefined) headers['Content-Type'] = 'application/json'
-
-  const idempotencyKey = normaliseIdempotencyKey(options.idempotencyKey)
-  if (idempotencyKey) headers['Idempotency-Key'] = idempotencyKey
 
   const timeoutMs = options.timeoutMs ?? config.timeoutMs
 
@@ -348,58 +323,6 @@ export async function najikiRequest<T = unknown>(
   }
 
   return parsed as T
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// POST /api/messaging/send
-// ─────────────────────────────────────────────────────────────────────────────
-
-export interface NajikiSmsRequest {
-  /** Recipient in E.164 (Na'jiki re-normalises, but send canonical form). */
-  to: string
-  message: string
-  /** Optional sender ID → Na'jiki's `from` field (precedence: `from || senderId`). */
-  from?: string | null
-  idempotencyKey?: string | null
-}
-
-/** The 202 body Na'jiki returns from POST /api/messaging/send. */
-export interface NajikiSmsResponse {
-  success: boolean
-  message: string
-  smsId: string
-  reference: string
-  status: string
-  /** True when this key was already used and no new SMS was queued. */
-  deduplicated: boolean
-  createdAt: string
-}
-
-/**
- * Queue one SMS through Na'jiki.
- *
- * Request body: `{ to, message, applicationCode, from? }` plus the
- * `Idempotency-Key` header. `applicationCode` must match the authenticated
- * application's `code` or Na'jiki answers 403.
- */
-export async function sendNajikiSms(
-  request: NajikiSmsRequest,
-  options: NajikiRequestOptions = {}
-): Promise<NajikiSmsResponse> {
-  const config = getNajikiConfig()
-
-  const payload: Record<string, unknown> = {
-    to: request.to,
-    message: request.message,
-    applicationCode: config.applicationCode,
-  }
-  const sender = (request.from ?? '').trim()
-  if (sender) payload.from = sender
-
-  return najikiRequest<NajikiSmsResponse>('/api/messaging/send', payload, {
-    ...options,
-    idempotencyKey: request.idempotencyKey ?? options.idempotencyKey,
-  })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -473,12 +396,8 @@ export async function createNajikiPayment(
   if (request.tenantCode) payload.tenantCode = request.tenantCode
   if (request.description) payload.description = request.description
 
-  // The payment endpoint's idempotency source is the required body field;
-  // it does not read Idempotency-Key (unlike the SMS endpoint).
-  return najikiRequest<NajikiCreatePaymentResponse>('/api/payments', payload, {
-    ...options,
-    idempotencyKey: undefined,
-  })
+  // The payment endpoint's idempotency source is the required body field.
+  return najikiPaymentRequest<NajikiCreatePaymentResponse>('/api/payments', payload, options)
 }
 
 /**
@@ -489,7 +408,7 @@ export async function getNajikiPayment(
   reference: string,
   options: NajikiRequestOptions = {}
 ): Promise<NajikiPaymentStatus> {
-  return najikiRequest<NajikiPaymentStatus>(
+  return najikiPaymentRequest<NajikiPaymentStatus>(
     `/api/payments/${encodeURIComponent(reference)}`,
     undefined,
     options

@@ -13,7 +13,9 @@ const configuredAppHost = (() => {
     return null;
   }
 })();
-const localDevOrigins = ['localhost:3000', '127.0.0.1:3000'];
+const localDevOrigins = process.env.NODE_ENV === 'development'
+  ? ['localhost:3000', '127.0.0.1:3000']
+  : [];
 // Arena preview host is derived from this sandbox's ID, rather than trusting
 // every tenant on the shared e2b.app domain.
 const arenaPreviewHost = process.env.NODE_ENV === 'development' && process.env.E2B_SANDBOX_ID
@@ -34,6 +36,7 @@ const nextConfig: NextConfig = {
   experimental: {
     serverActions: {
       allowedOrigins,
+      bodySizeLimit: '1mb',
     },
   },
   // @ts-ignore Next.js 15+ allowedDevOrigins

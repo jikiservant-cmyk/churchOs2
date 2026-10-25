@@ -5,15 +5,17 @@ conforms to it.
 
 - **Upstream:** <https://github.com/jikiservant-cmyk/najiki-finance2>
 - **Verified against commit:** `b73a82b9e4411dd27b559927a3b455f833cfb2a7`
-- ** churchOs implementation:** `lib/najiki/client.ts` (outbound), `lib/najiki/webhook.ts` (inbound)
+- **churchOs implementation:** payment calls in `lib/najiki/client.ts`; SMS dispatch only in `supabase/functions/church-najiki-dispatch/index.ts`; inbound events in `lib/najiki/webhook.ts`
 - **Tests:** `tests/najiki-contract.test.ts`
 
 Na'jiki is the source of truth. Everything below was read out of its source.
-The application-side boundary is strict: churchOs sends every SMS and payment
-initiation only to Na'jiki, and accepts payment settlements and SMS delivery
-updates only through the signed Na'jiki webhook handler. Downstream carrier and
-payment-provider integrations are Na'jiki's responsibility; churchOs does not
-store their credentials or call their APIs.
+The application-side boundary is strict: **only the Supabase Edge Function
+`church-najiki-dispatch` may call Na'jiki's SMS endpoint.** Next.js routes and
+server actions authorize, validate, enqueue, and invoke that Edge Function; they
+never send SMS to Na'jiki directly. The shared Next.js Na'jiki client is
+payment-only and rejects non-payment paths. Payment settlements and SMS delivery
+updates are accepted only through the signed Na'jiki webhook handler. Downstream
+carrier and payment-provider integrations are Na'jiki's responsibility.
 
 ---
 
@@ -21,7 +23,7 @@ store their credentials or call their APIs.
 
 | Method | Path | Purpose | churchOs caller |
 | --- | --- | --- | --- |
-| `POST` | `/api/messaging/send` | Queue one SMS | `sendNajikiSms()` ← `lib/sms-actions.ts` |
+| `POST` | `/api/messaging/send` | Queue one SMS | `supabase/functions/church-najiki-dispatch/index.ts` only |
 | `POST` | `/api/payments` | Create a payment intent | `createNajikiPayment()` ← `lib/wallet-actions.ts` |
 | `GET` | `/api/payments/:reference` | Read a payment's status | `getNajikiPayment()` (shared client helper; contract-tested) |
 
@@ -37,17 +39,22 @@ Na'jiki's own provider callback.
 | --- | --- |
 | `POST /api/payments` | `Authorization: Bearer` **only** |
 | `GET /api/payments/:reference` | `Authorization: Bearer` only |
-| `POST /api/messaging/send` | `Authorization: Bearer` (with or without the `Bearer ` prefix), or `x-api-key`, or an `apiKey` field in the body |
+| `POST /api/messaging/send` | The Edge Function sends `Authorization: Bearer` with its server-side Na'jiki key |
 
-`/api/payments` reads nothing else: a request authenticated with `x-api-key` is
-rejected with `401 {"error":"Missing or invalid authorization header"}`. This is
-what the donation fallback used to do.
+The payment endpoints read no alternate auth scheme: a request authenticated
+with `x-api-key` is rejected with
+`401 {"error":"Missing or invalid authorization header"}`.
 
 The key is looked up by SHA-256 hash against `applications.apiKeyHash` (with a
 fallback to the legacy cleartext column for un-migrated rows), filtered on
 `isActive: true`.
 
-### `POST /api/messaging/send`
+### `POST /api/messaging/send` — Edge Function only
+
+This contract is implemented only in `supabase/functions/church-najiki-dispatch/index.ts`.
+No Next.js server action, route, or shared payment client is permitted to call it.
+The Next.js layer sends the durable queue ID to Supabase; the Edge Function claims
+the row, reserves the wallet debit, and then makes this provider request.
 
 Request body:
 
@@ -237,6 +244,14 @@ contract supplied by the database owner:
 - The initiation action links that pending row using the returned
   `paymentId` as `payment_intent_id`; the webhook confirms it matches the signed
   `paymentIntentId` before calling the RPC.
+- A successful top-up callback must include Na'jiki's canonical
+  `providerPaymentId`. If it is omitted, the webhook reconciles the exact intent,
+  reference, success status, church, amount, and currency through Na'jiki's
+  authenticated status API; settlement is deferred with a retryable response if
+  the match or provider ID is unavailable.
+- The webhook calls the settlement RPC only for a signed, fresh `success`
+  callback with matching Church/`BUY_SMS` identity and exact persisted amount and
+  UGX currency.
 - The RPC validates the Church application and `BUY_SMS` intent, then atomically
   creates or settles the linked `sms_topup` row, credits the wallet once, and
   returns `{ success, already_processed, ... }`. The webhook acknowledges only
@@ -260,15 +275,17 @@ other payment types must not be sent through this SMS-top-up procedure.
 2. **SMS receipt idempotency.** The receipt's idempotency key is
    `receipt_<paymentIntentId>`, so a webhook redelivery cannot bill the church
    twice.
-3. **Send idempotency.** `lib/sms-actions.ts` forwards its own
-   `idempotency_key` as Na'jiki's `Idempotency-Key`. When Na'jiki answers
-   `deduplicated: true`, the wallet is **not** debited again.
+3. **Send idempotency.** Each durable `church.sms_queue` row has a stable
+   `idempotency_key`. Only `church-najiki-dispatch` forwards it as Na'jiki's
+   `Idempotency-Key`; wallet reservation and queue completion are transactional
+   database RPCs, and ambiguous retries reuse the same queue row and key.
 4. **Payment idempotency.** One `idempotencyKey` per attempt
    (`ik_church_<uuid>` / `ik_don_<uuid>`), generated before the request and
    stored on the pending ledger row, so a retry returns the same intent.
-5. **Na'jiki-only routing.** Every SMS send and payment initiation fails closed
-   if Na'jiki is unavailable or rejects the request. There is no direct-provider
-   fallback. Payment settlement and SMS delivery updates are processed only by
+5. **Na'jiki-only routing.** SMS provider calls originate exclusively from the
+   Supabase Edge Function; payment initiation uses the payment-only Next.js
+   client. Both fail closed if Na'jiki is unavailable. There is no alternate
+   SMS/provider path. Payment settlement and SMS delivery updates are processed only by
    `/api/webhooks/najiki` or its identical alias `/api/najiki/webhook` after
    Na'jiki signature and replay-window verification. This includes activation
    payments; no separate activation or downstream-provider callback can settle
@@ -304,12 +321,12 @@ Summary of integration fixes:
 | 3 | `lib/wallet-actions.ts` | Read `result.paymentIntentId` from the response; Na'jiki returns `paymentId`, so the provider response was never stored and the UI got `undefined`. | Reads `paymentId` / `reference`; persists Na'jiki's reference on the row. |
 | 4 | `lib/wallet-actions.ts` (donation fallback) | Authenticated with `x-api-key`, which `POST /api/payments` rejects with 401. | `Authorization: Bearer` via the shared client. |
 | 5 | `lib/wallet-actions.ts` | `.eq('reference', …)` on error paths — `wallet_transactions.reference` is never populated, so failed payments were never marked failed. | `.eq('reference_code', …)`. |
-| 6 | `lib/sms-actions.ts` | Never sent an idempotency key to Na'jiki, so a retried broadcast was a second, separately billed SMS. | Sends `Idempotency-Key`; skips the wallet debit when `deduplicated: true`. |
-| 7 | `lib/sms-actions.ts` | Swallowed every Na'jiki error and fell back to Africa's Talking — a 401/403/400 looked like a provider outage. | all failures are surfaced; no alternate provider is called. |
-| 8 | `lib/sms-actions.ts` | Required `NAJIKI_API_URL`, which was not in `.env.example` — so in practice Na'jiki was always "unconfigured" and every SMS went out via the direct AT path. | `NAJIKI_API_URL` is optional and defaults to the deployed origin; missing configuration fails closed. |
+| 6 | SMS dispatch boundary | Next.js code had a direct Na'jiki SMS client alongside the queue flow. | Removed the direct-send helper and its mock-provider route; the only provider call is in `supabase/functions/church-najiki-dispatch/index.ts`. The shared Na'jiki client now permits payment endpoints only. |
+| 7 | SMS queueing | Retry/error handling could rely on a second send path. | Next.js persists queue rows and invokes the Edge Function by queue ID; the Edge Function owns wallet reservation, provider idempotency, retries, and completion. |
+| 8 | `NAJIKI_API_URL` | SMS dispatch configuration could be confused with Next.js direct-send configuration. | Provider SMS URL/key are read in the Edge Function; Next.js direct SMS sending is not supported. |
 | 9 | `.env.example` | `NAJIKI_APPLICATION_CODE="CHURCH"` — Na'jiki seeds the church application as lowercase `church`, so this value is rejected (403/401). | Defaults to `church`, with the reason documented. |
 | 10 | `app/api/najiki/webhook/route.ts` | Only `status === 'failed'` was treated as a failure; `expired` / `cancelled` were logged as "still pending" and left the ledger row pending forever. | `failed`, `expired` and `cancelled` are terminal failures. |
-| 11 | Giving portal | The confirmation SMS was never sent at all (the client-side comment said it should come from the webhook). | Sent from the webhook, after the payment is confirmed and the wallet credited. |
+| 11 | Giving portal | The confirmation SMS was never sent at all (the client-side comment said it should come from the webhook). | Queued by the signed webhook only after payment confirmation and wallet credit; actual provider delivery still goes through the Edge Function. |
 
 ---
 
@@ -348,9 +365,10 @@ Summary of integration fixes:
 
 ## Verification
 
-`npm test` (72 tests, all passing) drives churchOs' real client over TCP
-against a mock that enforces Na'jiki's **own** payment and SMS Zod schemas
-(`tests/fixtures/najiki/schemas.ts` and `sms-policy.ts`, vendored from the pinned revision):
+`npm test` exercises the payment-only churchOs client against a mock that
+enforces Na'jiki's payment schema, and separately tests webhook parsing and
+queue/security helpers. The mock intentionally has no SMS send endpoint; the
+only production provider caller is the Supabase Edge Function:
 
 - SMS-credit top-ups use `BUY_SMS`, activations use `ACCOUNT_ACTIVATION`, and
   donations use a non-platform collection code; the local platform-fee set is
@@ -360,12 +378,10 @@ against a mock that enforces Na'jiki's **own** payment and SMS Zod schemas
 - amount is major units (`toMinorUnits(5000,'UGX') === 5000n`, and the stored
   amount is `5000`);
 - phone numbers are digits-only E.164 (`/^256\d{9}$/`);
-- SMS request shape and sender/idempotency constraints are checked against
-  Na'jiki's real `SmsInputSchema`;
-- the same `Idempotency-Key` twice ⇒ one send, `deduplicated: true`;
-- a dropped `idempotencyKey` ⇒ `400 Validation failed` with the field-level
-  `details` surfaced through `NajikiApiError`;
-- `NAJIKI_APPLICATION_CODE="CHURCH"` ⇒ 403 on SMS, 401 on payments;
+- SMS delivery notification parsing and receipt sequencing are tested;
+- a dropped payment `idempotencyKey` ⇒ `400 Validation failed` with the
+  field-level `details` surfaced through `NajikiApiError`;
+- code review confirms the Next.js payment transport rejects non-payment paths;
 - `x-api-key` auth ⇒ 401 on `/api/payments`;
 - unknown tenant ⇒ 404; `GET /api/payments/:reference` round-trips;
 - a notification signed by Na'jiki's own `buildNotificationHeaders()` verifies,
@@ -374,8 +390,8 @@ against a mock that enforces Na'jiki's **own** payment and SMS Zod schemas
 - the receipt-SMS sequencing rule holds for every non-success status.
 
 Live end-to-end against the deployed gateway was **not** possible from this
-sandbox (see ambiguity 5) — the acceptance evidence above comes from Na'jiki's
-own validator running on the exact bytes churchOs sends.
+sandbox (see ambiguity 5). The mock validation above applies to payment payloads;
+SMS Edge dispatch was not exercised against a live provider from this environment.
 
 ### Live smoke test of the webhook route
 

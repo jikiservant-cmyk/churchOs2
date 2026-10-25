@@ -170,6 +170,10 @@ export async function editMember(formData: FormData) {
 
 export async function bulkAddMembers(churchSlug: string, membersData: any[]) {
   try {
+    if (!Array.isArray(membersData) || membersData.length < 1 || membersData.length > 500 ||
+        membersData.some((member) => !member || typeof member !== 'object' || Array.isArray(member))) {
+      return { error: 'Import must contain between 1 and 500 valid records.' };
+    }
     const { supabase, churchId: finalChurchId } = await checkChurchAdminAuth(churchSlug);
 
     const payload = membersData.map((member) => {

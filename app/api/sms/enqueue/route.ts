@@ -10,16 +10,37 @@ import { createClient as createServerClient } from '@/lib/supabase/server';
 import { enqueueBroadcast } from '@/lib/queue-actions';
 import { dispatchSmsQueueItems } from '@/lib/sms-dispatch';
 import { normalizeUgPhone } from '@/lib/utils';
+import { readBoundedJson } from '@/lib/http/read-json';
+import { checkRateLimit } from '@/lib/security/rate-limit';
+import { isSameOriginRequest } from '@/lib/auth-security';
+import { isSmsWithinSegmentLimit, smsSegmentCount } from '@/supabase/functions/_shared/sms-length';
+
+const MAX_REQUEST_BYTES = 64 * 1024;
+const MAX_RECIPIENTS_PER_BROADCAST = 250;
+const MAX_SMS_CHARACTERS = 500;
 
 export async function POST(req: Request) {
   try {
-    const body = await req.json();
+    if (!isSameOriginRequest(req.url, req.headers.get('origin'))) {
+      return NextResponse.json({ error: 'Cross-origin request denied.' }, { status: 403 });
+    }
+    const parsed = await readBoundedJson<unknown>(req, MAX_REQUEST_BYTES);
+    if (!parsed.ok) {
+      return NextResponse.json({ error: parsed.error }, { status: parsed.status });
+    }
+    if (!parsed.value || Array.isArray(parsed.value) || typeof parsed.value !== 'object') {
+      return NextResponse.json({ error: 'JSON body must be an object.' }, { status: 400 });
+    }
+    const body = parsed.value as Record<string, unknown>;
     const { message, churchId, recipients, audience } = body;
 
-    // ── Input validation ────────────────────────────────────────────────────
-    if (!message || !churchId || !Array.isArray(recipients) || recipients.length === 0) {
+    // Bound broadcast size before any database query, then validate the actual
+    // types rather than relying on client-side form constraints.
+    if (typeof message !== 'string' || !message.trim() || Array.from(message).length > MAX_SMS_CHARACTERS || !isSmsWithinSegmentLimit(message) ||
+        typeof churchId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(churchId) ||
+        !Array.isArray(recipients) || recipients.length === 0 || recipients.length > MAX_RECIPIENTS_PER_BROADCAST) {
       return NextResponse.json(
-        { error: 'Missing required fields: message, churchId, or recipients' },
+        { error: 'Provide a message of at most 500 characters and 4 SMS segments, a valid church ID, and 1–250 recipients.' },
         { status: 400 },
       );
     }
@@ -47,6 +68,18 @@ export async function POST(req: Request) {
       );
     }
 
+    // Rate-limit by both account and tenant using shared storage in production.
+    const accountLimit = await checkRateLimit({ namespace: 'sms-broadcast-account', subject: user.id, limit: 10, windowSeconds: 60 });
+    const tenantLimit = await checkRateLimit({ namespace: 'sms-broadcast-tenant', subject: churchId, limit: 5, windowSeconds: 15 * 60 });
+    const deniedLimit = !accountLimit.allowed ? accountLimit : tenantLimit;
+    if (!accountLimit.allowed || !tenantLimit.allowed) {
+      const unavailable = Boolean(deniedLimit.unavailable);
+      return NextResponse.json(
+        { error: unavailable ? 'SMS protection is temporarily unavailable.' : 'Broadcast limit reached. Please try again later.' },
+        { status: unavailable ? 503 : 429, headers: unavailable ? undefined : { 'Retry-After': String(deniedLimit.retryAfterSeconds) } },
+      );
+    }
+
     // ── Church config ───────────────────────────────────────────────────────
     const { data: church, error: churchErr } = await supabase
       .schema('church')
@@ -60,10 +93,16 @@ export async function POST(req: Request) {
     }
 
     // ── Server-side Recipient Verification (MT-06 / F-02) ──────────────────────────
-    const requestedIds = Array.isArray(recipients) ? recipients.map((r: any) => r.id).filter(Boolean) : [];
-    if (requestedIds.length === 0) {
+    const requestedIds = [...new Set((recipients as unknown[]).flatMap((recipient) => {
+      if (!recipient || typeof recipient !== 'object' || Array.isArray(recipient)) return [];
+      const id = (recipient as Record<string, unknown>).id;
+      return typeof id === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)
+        ? [id]
+        : [];
+    }))];
+    if (requestedIds.length === 0 || requestedIds.length !== recipients.length) {
       return NextResponse.json(
-        { error: 'Recipients must be selected from this church (ids are required).' },
+        { error: 'Each recipient must be a unique, valid church member or convert ID.' },
         { status: 400 },
       );
     }
@@ -105,6 +144,29 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'No valid authorized recipients found for this church.' }, { status: 400 });
     }
 
+    // Enforce billable SMS segments, not merely request or recipient count.
+    // These quotas are shared with single sends through the same tenant key.
+    const smsVolume = verifiedRecipients.length * smsSegmentCount(message);
+    if (smsVolume > 500) {
+      return NextResponse.json({ error: 'Hourly SMS volume limit reached.' }, { status: 429 });
+    }
+    const accountVolumeLimit = await checkRateLimit({
+      namespace: 'sms-volume-account', subject: user.id, limit: 500, windowSeconds: 60 * 60,
+      cost: smsVolume,
+    });
+    const tenantVolumeLimit = await checkRateLimit({
+      namespace: 'sms-volume-tenant', subject: churchId, limit: 1_000, windowSeconds: 60 * 60,
+      cost: smsVolume,
+    });
+    const deniedVolumeLimit = !accountVolumeLimit.allowed ? accountVolumeLimit : tenantVolumeLimit;
+    if (!accountVolumeLimit.allowed || !tenantVolumeLimit.allowed) {
+      const unavailable = Boolean(deniedVolumeLimit.unavailable);
+      return NextResponse.json(
+        { error: unavailable ? 'SMS protection is temporarily unavailable.' : 'Hourly SMS volume limit reached.' },
+        { status: unavailable ? 503 : 429, headers: unavailable ? undefined : { 'Retry-After': String(deniedVolumeLimit.retryAfterSeconds) } },
+      );
+    }
+
     // The existing Edge debit RPC performs the authoritative wallet check; no
     // preflight balance read is used to decide whether to enqueue.
 
@@ -115,7 +177,7 @@ export async function POST(req: Request) {
     const { broadcastId, enqueued, skipped, queueIds } = await enqueueBroadcast({
       tenantId:   churchId,
       message,
-      audience:   audience ?? 'all',
+      audience:   typeof audience === 'string' ? audience.slice(0, 40) : 'all',
       senderId,
       recipients: verifiedRecipients,
       createdBy:  user.id,

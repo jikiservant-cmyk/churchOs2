@@ -137,6 +137,10 @@ export async function editNewConvert(formData: FormData) {
 
 export async function bulkAddNewConverts(churchSlug: string, convertsData: any[]) {
   try {
+    if (!Array.isArray(convertsData) || convertsData.length < 1 || convertsData.length > 500 ||
+        convertsData.some((convert) => !convert || typeof convert !== 'object' || Array.isArray(convert))) {
+      return { error: 'Import must contain between 1 and 500 valid records.' };
+    }
     const { supabase, churchId: finalChurchId } = await checkChurchAdminAuth(churchSlug);
 
     const payload = convertsData.map((convert) => {

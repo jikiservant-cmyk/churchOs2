@@ -1,5 +1,7 @@
 import { createAdminClient } from '@/lib/supabase/server';
 import { normalizeUgPhone } from '@/lib/utils';
+import { checkRateLimit } from '@/lib/security/rate-limit';
+import { isSmsWithinSegmentLimit, smsSegmentCount } from '@/supabase/functions/_shared/sms-length';
 
 export type EnqueueSmsInput = {
   tenantId: string;
@@ -20,11 +22,14 @@ export type EnqueuedSms = {
 /** Persist first, then invoke the single-row Edge Function using this same ID. */
 export async function enqueueSmsDispatch(input: EnqueueSmsInput): Promise<EnqueuedSms> {
   const phone = normalizeUgPhone(input.phoneNumber);
-  const message = input.message.trim();
+  const message = typeof input.message === 'string' ? input.message.trim() : '';
   const idempotencyKey = typeof input.idempotencyKey === 'string' ? input.idempotencyKey.trim() : '';
 
   if (!input.tenantId || !phone || !message) {
     throw new Error('A tenant, valid Ugandan phone number, and message are required.');
+  }
+  if (Array.from(message).length > 500 || !isSmsWithinSegmentLimit(message)) {
+    throw new Error('SMS messages must contain 500 characters or fewer and no more than 4 SMS segments.');
   }
   if (idempotencyKey.length < 8 || idempotencyKey.length > 255) {
     throw new Error('The SMS idempotency key must be between 8 and 255 characters.');
@@ -42,6 +47,37 @@ export async function enqueueSmsDispatch(input: EnqueueSmsInput): Promise<Enqueu
     scheduled_at: new Date().toISOString(),
   };
 
+  const { data: prior, error: priorError } = await admin
+    .schema('church')
+    .from('sms_queue')
+    .select('id, tenant_id, recipient_id, recipient_phone, message, sender_id, idempotency_key, status')
+    .eq('idempotency_key', idempotencyKey)
+    .maybeSingle();
+  if (priorError) throw new Error(`Could not check SMS idempotency: ${priorError.message}`);
+  if (prior) {
+    if (
+      prior.tenant_id !== row.tenant_id || prior.recipient_id !== row.recipient_id ||
+      prior.recipient_phone !== row.recipient_phone || prior.message !== row.message ||
+      (prior.sender_id ?? '') !== (row.sender_id ?? '')
+    ) {
+      throw new Error('The SMS idempotency key is already bound to a different message.');
+    }
+    return { id: prior.id, idempotencyKey, status: prior.status, alreadyExisted: true };
+  }
+
+  const volumeLimit = await checkRateLimit({
+    namespace: 'sms-volume-tenant',
+    subject: input.tenantId,
+    limit: 1_000,
+    windowSeconds: 60 * 60,
+    cost: smsSegmentCount(message),
+  });
+  if (!volumeLimit.allowed) {
+    throw new Error(volumeLimit.unavailable
+      ? 'SMS protection is temporarily unavailable.'
+      : 'The church hourly SMS volume limit has been reached.');
+  }
+
   const { data: inserted, error: insertError } = await admin
     .schema('church')
     .from('sms_queue')
@@ -58,7 +94,7 @@ export async function enqueueSmsDispatch(input: EnqueueSmsInput): Promise<Enqueu
     const { data: existing, error: lookupError } = await admin
       .schema('church')
       .from('sms_queue')
-      .select('id, tenant_id, recipient_phone, message, sender_id, idempotency_key, status')
+      .select('id, tenant_id, recipient_id, recipient_phone, message, sender_id, idempotency_key, status')
       .eq('idempotency_key', idempotencyKey)
       .maybeSingle();
 
@@ -67,6 +103,7 @@ export async function enqueueSmsDispatch(input: EnqueueSmsInput): Promise<Enqueu
     }
     if (
       existing.tenant_id !== input.tenantId ||
+      existing.recipient_id !== row.recipient_id ||
       existing.recipient_phone !== phone ||
       existing.message !== message ||
       (existing.sender_id ?? '') !== (row.sender_id ?? '')
@@ -104,11 +141,11 @@ export async function dispatchSmsQueueItem(
   const publishableKey = process.env.SUPABASE_PUBLISHABLE_KEY
     || process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY
     || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-  const dispatchSecret = process.env.SMS_DISPATCH_SECRET;
+  const dispatchSecret = process.env.CHURCH_DISPATCH_SECRET;
   const bearerToken = accessToken || process.env.SUPABASE_SERVICE_ROLE_KEY;
 
   if (!projectUrl || !publishableKey || !dispatchSecret || !bearerToken) {
-    throw new Error('SMS Edge dispatch requires Supabase URL, publishable key, server-side JWT, and SMS_DISPATCH_SECRET.');
+    throw new Error('SMS Edge dispatch requires Supabase URL, publishable key, server-side JWT, and CHURCH_DISPATCH_SECRET.');
   }
 
   const response = await fetch(`${projectUrl}/functions/v1/church-najiki-dispatch`, {

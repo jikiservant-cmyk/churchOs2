@@ -28,7 +28,6 @@ import {
   NAJIKI_PLATFORM_PAYMENT_TYPE_CODES,
   NajikiApiError,
   NajikiConfigError,
-  sendNajikiSms,
   NAJIKI_DEFAULT_APPLICATION_CODE,
   NAJIKI_DEFAULT_BASE_URL,
 } from '../lib/najiki/client.ts'
@@ -141,119 +140,6 @@ describe('configuration', () => {
     process.env.NAJIKI_PAYMENT_TYPE_DONATION = 'BUY_SMS'
     assert.throws(() => najikiPaymentTypeCode('donation'), /must be a tenant collection type/)
     delete process.env.NAJIKI_PAYMENT_TYPE_DONATION
-  })
-})
-
-// ─────────────────────────────────────────────────────────────────────────────
-// SMS — POST /api/messaging/send
-// ─────────────────────────────────────────────────────────────────────────────
-
-describe('SMS: POST /api/messaging/send', () => {
-  test('is accepted with the church app\u2019s payload and returns the 202 body', async () => {
-    server.reset()
-
-    const result = await sendNajikiSms({
-      to: PHONE_E164,
-      message: 'Service starts at 9am.',
-      from: 'GraceChurch',
-      idempotencyKey: 'sms_test_accept_1',
-    })
-
-    assert.equal(result.success, true)
-    assert.equal(result.status, 'queued')
-    assert.equal(result.deduplicated, false)
-    assert.match(result.smsId, /^sms_/)
-    assert.match(result.reference, /^SMS-/)
-
-    // What actually went over the wire.
-    const request = server.requests.at(-1)!
-    assert.equal(request.path, '/api/messaging/send')
-    assert.equal(request.headers['authorization'], `Bearer ${server.apiKey}`)
-    assert.equal(request.headers['idempotency-key'], 'sms_test_accept_1')
-    assert.match(request.headers['content-type'] ?? '', /application\/json/)
-    assert.deepEqual(request.body, {
-      to: PHONE_E164,
-      message: 'Service starts at 9am.',
-      applicationCode: 'church',
-      from: 'GraceChurch',
-    })
-  })
-
-  test('honours the Idempotency-Key so a retry is not billed twice', async () => {
-    server.reset()
-    const key = 'sms_test_idempotent'
-
-    const first = await sendNajikiSms({ to: PHONE_E164, message: 'hi', idempotencyKey: key })
-    const second = await sendNajikiSms({ to: PHONE_E164, message: 'hi', idempotencyKey: key })
-
-    assert.equal(first.deduplicated, false)
-    assert.equal(second.deduplicated, true)
-    assert.equal(second.smsId, first.smsId)
-    // Exactly one message reached the provider.
-    assert.equal(server.smsSends, 1)
-    assert.equal(server.smsMessages.length, 1)
-  })
-
-  test('surfaces Na\u2019jiki\u2019s 400 when a required field is missing', async () => {
-    await assert.rejects(
-      () => sendNajikiSms({ to: PHONE_E164, message: '', idempotencyKey: 'x' }),
-      (err: unknown) => {
-        assert.ok(err instanceof NajikiApiError)
-        assert.equal(err.status, 400)
-        assert.equal(err.error, 'Invalid SMS payload or idempotency key')
-        // The message a human would see must name the reason.
-        assert.match(err.message, /Invalid SMS payload/)
-        return true
-      }
-    )
-  })
-
-  test('enforces Na’jiki phone, message, sender-ID and idempotency constraints', async () => {
-    server.reset()
-    for (const request of [
-      { to: '+256 772 123456', message: 'hello', idempotencyKey: 'sms_bad_phone_1' },
-      { to: PHONE_E164, message: 'x'.repeat(919), idempotencyKey: 'sms_long_body_1' },
-      { to: PHONE_E164, message: '😀'.repeat(400), idempotencyKey: 'sms_many_parts_1' },
-      { to: PHONE_E164, message: 'hello', from: 'Grace Church', idempotencyKey: 'sms_bad_sender_1' },
-      { to: PHONE_E164, message: 'hello', idempotencyKey: 'short' },
-      { to: PHONE_E164, message: 'hello', idempotencyKey: 'k'.repeat(256) },
-    ]) {
-      await assert.rejects(
-        () => sendNajikiSms(request),
-        (err: unknown) => err instanceof NajikiApiError && err.status === 400 &&
-          err.error === 'Invalid SMS payload or idempotency key'
-      )
-    }
-    assert.equal(server.smsSends, 0)
-  })
-
-  test('surfaces Na\u2019jiki\u2019s 403 when the application code does not match', async () => {
-    // Na'jiki seeds the church application as lowercase 'church'.
-    const response = await fetch(`${server.url}/api/messaging/send`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${server.apiKey}`,
-        'Content-Type': 'application/json',
-        'Idempotency-Key': 'sms_wrong_app_code',
-      },
-      body: JSON.stringify({ to: PHONE_E164, message: 'hi', applicationCode: 'CHURCH' }),
-    })
-    assert.equal(response.status, 403)
-    assert.deepEqual(await response.json(), { error: 'Application code mismatch' })
-  })
-
-  test('rejects a wrong API key with Na’jiki’s 401 response', async () => {
-    const response = await fetch(`${server.url}/api/messaging/send`, {
-      method: 'POST',
-      headers: {
-        Authorization: 'Bearer njk_wrong_key',
-        'Content-Type': 'application/json',
-        'Idempotency-Key': 'sms_wrong_api_key',
-      },
-      body: JSON.stringify({ to: PHONE_E164, message: 'hi', applicationCode: 'church' }),
-    })
-    assert.equal(response.status, 401)
-    assert.deepEqual(await response.json(), { error: 'Invalid or missing API key' })
   })
 })
 

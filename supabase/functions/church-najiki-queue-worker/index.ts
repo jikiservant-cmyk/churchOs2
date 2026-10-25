@@ -33,7 +33,7 @@ Deno.serve(async (request: Request) => {
 
   const endpoint = `${config.url}/functions/v1/church-najiki-dispatch`;
   const publishableOrSecretKey = config.secretKey;
-  const outcomes: Array<{ ok: boolean; deferred: boolean }> = [];
+  const outcomes: Array<'sent' | 'deferred' | 'failed'> = [];
   let cursor = 0;
   const concurrency = Math.min(15, smsIds.length);
 
@@ -44,29 +44,31 @@ Deno.serve(async (request: Request) => {
         const response = await fetch(endpoint, {
           method: 'POST',
           headers: {
+            // The dispatcher has verify_jwt enabled; apikey alone does not
+            // satisfy Supabase's Authorization JWT check.
+            authorization: `Bearer ${config.secretKey}`,
             apikey: publishableOrSecretKey,
             'content-type': 'application/json',
-            'x-dispatch-secret': Deno.env.get('DISPATCH_SECRET') ?? '',
+            'x-dispatch-secret': Deno.env.get('CHURCH_DISPATCH_SECRET') ?? '',
           },
           // Keep the per-row function contract: exactly one queue ID is sent.
           body: JSON.stringify({ sms_id: smsId }),
           signal: AbortSignal.timeout(120_000),
         });
         const result = await response.json().catch(() => ({}));
-        outcomes.push({
-          ok: response.ok,
-          deferred: response.ok && (result?.status === 'pending' || result?.skipped === true),
-        });
+        if (response.ok && result?.status === 'sent') outcomes.push('sent');
+        else if (response.ok && result?.status === 'failed') outcomes.push('failed');
+        else outcomes.push('deferred');
       } catch (dispatchError) {
         console.warn(`[church-najiki-queue-worker] dispatch invocation failed for ${smsId}:`, dispatchError instanceof Error ? dispatchError.message : dispatchError);
-        outcomes.push({ ok: false, deferred: true });
+        outcomes.push('deferred');
       }
     }
   });
   await Promise.all(workers);
 
-  const dispatched = outcomes.filter((result) => result.ok && !result.deferred).length;
-  const deferred = outcomes.filter((result) => result.deferred).length;
-  const failed = outcomes.filter((result) => !result.ok).length;
+  const dispatched = outcomes.filter((result) => result === 'sent').length;
+  const deferred = outcomes.filter((result) => result === 'deferred').length;
+  const failed = outcomes.filter((result) => result === 'failed').length;
   return jsonResponse({ ok: true, candidates: smsIds.length, dispatched, deferred, failed });
 });

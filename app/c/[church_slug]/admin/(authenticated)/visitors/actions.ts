@@ -149,6 +149,10 @@ export async function editVisitor(formData: FormData) {
 
 export async function bulkAddVisitors(churchSlug: string, visitorsData: any[]) {
   try {
+    if (!Array.isArray(visitorsData) || visitorsData.length < 1 || visitorsData.length > 500 ||
+        visitorsData.some((visitor) => !visitor || typeof visitor !== 'object' || Array.isArray(visitor))) {
+      return { error: 'Import must contain between 1 and 500 valid records.' };
+    }
     const { supabase, churchId: finalChurchId } = await checkChurchAdminAuth(churchSlug);
 
     const payload = visitorsData.map((visitor) => {

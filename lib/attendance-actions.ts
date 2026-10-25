@@ -3,7 +3,8 @@
 import { createClient, createAdminClient } from '@/lib/supabase/server';
 import { tenantScopedAdmin } from '@/lib/supabase/tenant-scoped';
 import { revalidatePath } from 'next/cache';
-import { cookies } from 'next/headers';
+import { cookies, headers } from 'next/headers';
+import { checkRateLimit, getRateLimitIp } from '@/lib/security/rate-limit';
 import { ChurchEvent, AttendanceLog, AttendanceFlag, AttendanceFlagStatus } from './attendance-types';
 import { membersExpectedAtEvent } from './attendance-streaks';
 import { SignJWT, jwtVerify } from 'jose';
@@ -16,7 +17,7 @@ function getJwtSecret(): Uint8Array {
   // F-04: no silent fallback to the service-role key. A dedicated secret is now
   // mandatory, which is what makes rotation and revocation auditable.
   const jwtSecretValue = process.env.USHER_JWT_SECRET;
-  if (!jwtSecretValue || jwtSecretValue === 'REPLACE_ME_WITH_A_STRONG_RANDOM_SECRET') {
+  if (!jwtSecretValue || jwtSecretValue === 'REPLACE_ME_WITH_A_STRONG_RANDOM_SECRET' || Buffer.byteLength(jwtSecretValue) < 32) {
     throw new Error('USHER_JWT_SECRET is not configured. Usher sessions are disabled until it is set.');
   }
   // Domain-separate the usher secret to prevent raw key reuse
@@ -27,36 +28,6 @@ function getJwtSecret(): Uint8Array {
 function computePasskeyHash(passkey: string): string {
   const secret = getJwtSecret();
   return crypto.createHmac('sha256', secret).update(passkey.trim()).digest('hex');
-}
-
-// In-memory throttling map to prevent brute-force attacks on usher passkeys (max 5 failed attempts per 60s)
-const failedAttemptsMap = new Map<string, { count: number; resetTime: number }>();
-
-function checkUsherRateLimit(key: string): { allowed: boolean; retryAfter?: number } {
-  const now = Date.now();
-  const record = failedAttemptsMap.get(key);
-  if (!record || now > record.resetTime) {
-    return { allowed: true };
-  }
-  if (record.count >= 5) {
-    const retryAfter = Math.ceil((record.resetTime - now) / 1000);
-    return { allowed: false, retryAfter };
-  }
-  return { allowed: true };
-}
-
-function recordUsherFailedAttempt(key: string) {
-  const now = Date.now();
-  const record = failedAttemptsMap.get(key);
-  if (!record || now > record.resetTime) {
-    failedAttemptsMap.set(key, { count: 1, resetTime: now + 60 * 1000 });
-  } else {
-    record.count += 1;
-  }
-}
-
-function resetUsherAttempts(key: string) {
-  failedAttemptsMap.delete(key);
 }
 
 export async function generateSecurePasskey(): Promise<string> {
@@ -77,11 +48,19 @@ export async function validateUsherPasskey(churchSlug: string, passkey: string) 
       return { success: false, error: 'Invalid church identifier.' };
     }
 
-    const rateLimit = checkUsherRateLimit(canonicalSlug);
-    if (!rateLimit.allowed) {
-      return { 
-        success: false, 
-        error: `Too many failed attempts. Please wait ${rateLimit.retryAfter}s before trying again.` 
+    const requestHeaders = await headers();
+    const clientIp = getRateLimitIp(requestHeaders);
+    const churchLimit = await checkRateLimit({ namespace: 'usher-passkey-church', subject: canonicalSlug, limit: 100, windowSeconds: 15 * 60 });
+    const ipLimit = clientIp === 'unknown'
+      ? { allowed: true, retryAfterSeconds: 0 }
+      : await checkRateLimit({ namespace: 'usher-passkey-ip', subject: `${canonicalSlug}:${clientIp}`, limit: 20, windowSeconds: 15 * 60 });
+    const deniedLimit = !ipLimit.allowed ? ipLimit : churchLimit;
+    if (!ipLimit.allowed || !churchLimit.allowed) {
+      return {
+        success: false,
+        error: deniedLimit.unavailable
+          ? 'Usher login protection is temporarily unavailable. Please try again later.'
+          : `Too many attempts. Please wait ${deniedLimit.retryAfterSeconds}s before trying again.`,
       };
     }
 
@@ -103,7 +82,6 @@ export async function validateUsherPasskey(churchSlug: string, passkey: string) 
 
     const providedPasskey = (passkey || '').trim();
     if (!providedPasskey || providedPasskey.length < 6 || providedPasskey.length > 32 || !/^[A-Za-z0-9_-]+$/.test(providedPasskey)) {
-      recordUsherFailedAttempt(canonicalSlug);
       return { success: false, error: 'Invalid passkey format.' };
     }
 
@@ -138,12 +116,8 @@ export async function validateUsherPasskey(churchSlug: string, passkey: string) 
     }
 
     if (!isMatch) {
-      recordUsherFailedAttempt(canonicalSlug);
       return { success: false, error: 'Invalid passkey. Please check and try again.' };
     }
-
-    // Reset attempts upon successful verification
-    resetUsherAttempts(canonicalSlug);
 
     const churchId = church.id;
     const churchName = church.name;
@@ -289,6 +263,7 @@ export async function createEvent(formData: FormData, churchId: string, churchSl
 
 export async function updateEventStatus(eventId: string, status: 'upcoming' | 'active' | 'completed', churchSlug: string) {
   try {
+    if (!['upcoming', 'active', 'completed'].includes(status)) return { error: 'Invalid event status.' };
     // 1. Authorize caller first (ensures event belongs to church and caller has admin/usher rights)
     const { scopedDb, churchId } = await checkAuthorization(churchSlug, eventId, ['pastor', 'admin']);
     
@@ -392,8 +367,8 @@ export async function updateChurchPasskey(churchId: string, newPasskey: string, 
       return { error: 'Access denied: Only pastors or administrators can rotate the usher passkey.' };
     }
 
-    const trimmedKey = newPasskey.trim();
-    if (trimmedKey.length < 8 || !/^[A-Za-z0-9_-]+$/.test(trimmedKey)) {
+    const trimmedKey = typeof newPasskey === 'string' ? newPasskey.trim() : '';
+    if (trimmedKey.length < 8 || trimmedKey.length > 32 || !/^[A-Za-z0-9_-]+$/.test(trimmedKey)) {
       return { error: 'Passkey must be at least 8 characters long and contain only letters, numbers, hyphens, and underscores.' };
     }
 
@@ -676,6 +651,7 @@ export async function getAttendanceFlags(churchId: string) {
 }
 
 export async function updateAttendanceFlagStatus(flagId: string, status: AttendanceFlagStatus, churchSlug: string) {
+  if (!['open', 'followed_up', 'resolved'].includes(status)) return { error: 'Invalid attendance flag status.' };
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return { error: 'Not authenticated' };
@@ -721,6 +697,16 @@ export async function sendMissedYouMessages(churchId: string, churchSlug: string
     if (!profile || profile.tenant_id !== churchId || !hasAllowedRole(profile.role, CHURCH_ADMIN_ROLES)) {
       return { error: 'Access denied' };
     }
+    if (typeof customMessage !== 'undefined' && (typeof customMessage !== 'string' || Array.from(customMessage).length > 500)) {
+      return { error: 'Custom SMS messages must contain 500 characters or fewer.' };
+    }
+
+    const accountLimit = await checkRateLimit({ namespace: 'sms-missed-you-account', subject: user.id, limit: 3, windowSeconds: 15 * 60 });
+    const tenantLimit = await checkRateLimit({ namespace: 'sms-missed-you-tenant', subject: churchId, limit: 5, windowSeconds: 15 * 60 });
+    const deniedLimit = !accountLimit.allowed ? accountLimit : tenantLimit;
+    if (!accountLimit.allowed || !tenantLimit.allowed) {
+      return { error: deniedLimit.unavailable ? 'SMS protection is temporarily unavailable.' : 'Too many missed-you broadcasts. Please try again later.' };
+    }
 
     // Refresh "missed N consecutive events" flags before choosing recipients.
     // (This used to invoke a `sync_missed_3_sundays_flags` Edge Function that
@@ -755,19 +741,33 @@ export async function sendMissedYouMessages(churchId: string, churchSlug: string
       }
     }
     
-    // Fetch members who were absent for the target event
+    // Verify the event belongs to this church before using its attendance IDs.
+    if (targetEventId) {
+      const { data: targetEvent } = await supabase
+        .schema('church')
+        .from('events')
+        .select('id')
+        .eq('id', targetEventId)
+        .eq('church_id', churchId)
+        .maybeSingle();
+      if (!targetEvent) return { error: 'Event not found for this church.' };
+    }
+
+    // Fetch members who were absent for the target event. A 251-row sentinel
+    // detects oversized audiences without retrieving an unbounded result set.
     if (targetEventId) {
       const { data: absentLogs, error: absentError } = await supabase
         .schema('church')
         .from('attendance_logs')
         .select('member_id')
+        .eq('church_id', churchId)
         .eq('event_id', targetEventId)
-        .eq('attendance_status', 'absent');
+        .eq('attendance_status', 'absent')
+        .limit(251);
 
       if (absentError) return { error: absentError.message };
-      if (absentLogs) {
-        absentLogs.forEach(log => memberIdsToMessage.add(log.member_id));
-      }
+      if ((absentLogs?.length ?? 0) > 250) return { error: 'This audience exceeds the 250-recipient limit. Narrow the audience and try again.' };
+      if (absentLogs) absentLogs.forEach(log => memberIdsToMessage.add(log.member_id));
     }
 
     // Fetch members with an active consecutive-miss flag. Also accept legacy
@@ -778,23 +778,26 @@ export async function sendMissedYouMessages(churchId: string, churchSlug: string
       .select('id, member_id')
       .eq('church_id', churchId)
       .in('flag_type', ['missed_consecutive_events', 'missed_3_sundays'])
-      .eq('status', 'open');
+      .eq('status', 'open')
+      .limit(251);
 
     if (flagsError) return { error: flagsError.message };
+    if ((openFlags?.length ?? 0) > 250) return { error: 'This audience exceeds the 250-recipient limit. Narrow the audience and try again.' };
 
     // Fetch members who were PRESENT for the target event to EXCLUDE them
     const presentMemberIds = new Set<string>();
     if (targetEventId) {
-      const { data: presentLogs } = await supabase
+      const { data: presentLogs, error: presentError } = await supabase
         .schema('church')
         .from('attendance_logs')
         .select('member_id')
+        .eq('church_id', churchId)
         .eq('event_id', targetEventId)
-        .in('attendance_status', ['present', 'late']);
-      
-      if (presentLogs) {
-        presentLogs.forEach(log => presentMemberIds.add(log.member_id));
-      }
+        .in('attendance_status', ['present', 'late'])
+        .limit(251);
+      if (presentError) return { error: presentError.message };
+      if ((presentLogs?.length ?? 0) > 250) return { error: 'This event exceeds the 250-recipient processing limit.' };
+      if (presentLogs) presentLogs.forEach(log => presentMemberIds.add(log.member_id));
     }
 
     // Add flagged members, but ONLY if they weren't present at the current event
@@ -811,6 +814,9 @@ export async function sendMissedYouMessages(churchId: string, churchSlug: string
     if (memberIdsToMessage.size === 0) {
       return { success: true, count: 0 };
     }
+    if (memberIdsToMessage.size > 250) {
+      return { error: 'This audience exceeds the 250-recipient limit. Narrow the audience and try again.' };
+    }
 
     const memberIds = Array.from(memberIdsToMessage);
 
@@ -819,9 +825,12 @@ export async function sendMissedYouMessages(churchId: string, churchSlug: string
       .schema('church')
       .from('members')
       .select('id, full_name, phone_number')
-      .in('id', memberIds);
+      .eq('church_id', churchId)
+      .in('id', memberIds)
+      .limit(251);
 
     if (membersError) return { error: membersError.message };
+    if ((members?.length ?? 0) > 250) return { error: 'This audience exceeds the 250-recipient limit. Narrow the audience and try again.' };
     if (!members || members.length === 0) return { success: true, count: 0 };
 
     // Get church config and balance once

@@ -2,9 +2,13 @@
 
 import { createClient, createAdminClient } from '@/lib/supabase/server';
 import { redirect } from 'next/navigation';
+import { headers } from 'next/headers';
+import { checkRateLimit, getRateLimitIp } from '@/lib/security/rate-limit';
+import { validateSignupCredentials } from '@/lib/signup-security';
 
 export type AuthState = {
   error?: string;
+  message?: string;
   success?: boolean;
   redirectTo?: string;
 };
@@ -210,44 +214,81 @@ export async function login(prevState: AuthState, formData: FormData): Promise<A
 }
 
 export async function signup(prevState: AuthState, formData: FormData): Promise<AuthState> {
-  const email = (formData.get('email') as string || '').trim();
-  const password = formData.get('password') as string;
-
-  if (!email || !password) {
-    return { error: 'Email and password are required' };
+  const credentials = validateSignupCredentials(formData.get('email'), formData.get('password'));
+  if (!credentials.ok) {
+    return {
+      error: credentials.reason === 'email'
+        ? 'Enter a valid email address.'
+        : 'Password must be at least 8 characters and no more than 72 UTF-8 bytes.',
+    };
   }
 
   if (!process.env.NEXT_PUBLIC_SUPABASE_URL || !process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY) {
-    return { error: 'Auth service not configured properly' };
+    return { error: 'Auth service not configured properly.' };
+  }
+
+  const requestHeaders = await headers();
+  const clientIp = getRateLimitIp(requestHeaders);
+  if (clientIp === 'unknown' && process.env.NODE_ENV === 'production') {
+    return { error: 'Signup protection is temporarily unavailable. Please try again later.' };
+  }
+
+  const emailLimit = await checkRateLimit({
+    namespace: 'signup-email', subject: credentials.email, limit: 3, windowSeconds: 60 * 60,
+  });
+  const ipLimit = await checkRateLimit({
+    namespace: 'signup-ip', subject: clientIp, limit: 10, windowSeconds: 60 * 60,
+  });
+  const deniedLimit = !emailLimit.allowed ? emailLimit : ipLimit;
+  if (!emailLimit.allowed || !ipLimit.allowed) {
+    return {
+      error: deniedLimit.unavailable
+        ? 'Signup protection is temporarily unavailable. Please try again later.'
+        : 'Too many signup attempts. Please wait before trying again.',
+    };
   }
 
   try {
     const supabase = await createClient();
-    console.log('[Auth] Attempting signup for:', email);
-    
     const { data, error } = await supabase.auth.signUp({
-      email,
-      password,
+      email: credentials.email,
+      password: credentials.password,
     });
 
+    // Use the same response for an existing email and a newly registered
+    // account awaiting confirmation, avoiding a signup email-enumeration oracle.
     if (error) {
-      console.error('[Auth] Signup error:', error.message);
-      if (error.message.toLowerCase().includes('already registered')) {
-        return { error: 'This email is already registered. Please login instead.' };
+      if (/already registered|already exists|user exists/i.test(error.message)) {
+        return {
+          success: true,
+          message: 'If an account can be created for that email, confirmation instructions will be sent.',
+        };
       }
-      return { error: error.message };
+      console.warn('[Auth] Signup provider rejected request:', error.status ?? 'unknown status');
+      return { error: 'Could not create the account. Check the details or try again later.' };
     }
 
     if (!data.user) {
-      return { error: 'Account creation failed. Please try again.' };
+      return {
+        success: true,
+        message: 'If an account can be created for that email, confirmation instructions will be sent.',
+      };
     }
 
-    console.log('[Auth] Signup success for:', email);
+    // Supabase may require email confirmation, in which case signUp returns no
+    // session. Do not send unauthenticated users to church provisioning.
+    if (!data.session) {
+      return {
+        success: true,
+        message: 'Check your email for confirmation instructions. After confirming, sign in to finish setup.',
+      };
+    }
+
     return { success: true, redirectTo: '/signup/provision' };
   } catch (err: any) {
     if (err?.message === 'NEXT_REDIRECT' || err?.__next_redirect || err?.digest?.startsWith?.('NEXT_REDIRECT')) throw err;
-    console.error('[Auth] Critical signup exception:', err);
-    return { error: 'An unexpected error occurred. Please try again later.' };
+    console.error('[Auth] Signup exception:', err instanceof Error ? err.name : 'unknown error');
+    return { error: 'Could not create the account. Please try again later.' };
   }
 }
 

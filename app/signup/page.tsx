@@ -46,8 +46,13 @@ export default function SignupPage() {
         </div>
 
         {state.error && (
-          <div className="mb-6 p-4 bg-[#B5622A]/10 border border-[#B5622A]/20 rounded-xl text-[#B5622A] text-xs font-bold leading-relaxed uppercase tracking-wider">
+          <div role="alert" className="mb-6 p-4 bg-[#B5622A]/10 border border-[#B5622A]/20 rounded-xl text-[#B5622A] text-xs font-bold leading-relaxed uppercase tracking-wider">
             {state.error}
+          </div>
+        )}
+        {state.message && (
+          <div role="status" className="mb-6 p-4 bg-emerald-800/10 border border-emerald-800/20 rounded-xl text-emerald-900 text-sm font-medium leading-relaxed">
+            {state.message}
           </div>
         )}
 
@@ -57,6 +62,7 @@ export default function SignupPage() {
             <input
               type="email"
               name="email"
+              maxLength={254}
               required
               className="w-full px-4 py-3.5 bg-[rgba(255,220,170,0.05)] border border-[rgba(90,55,20,0.12)] rounded-xl text-[#1E1208] placeholder:text-[#C8B89A] focus:border-[#B5622A] outline-none transition-all font-medium"
               placeholder="name@email.com"
@@ -67,6 +73,8 @@ export default function SignupPage() {
             <input
               type="password"
               name="password"
+              minLength={8}
+              maxLength={72}
               required
               className="w-full px-4 py-3.5 bg-[rgba(255,220,170,0.05)] border border-[rgba(90,55,20,0.12)] rounded-xl text-[#1E1208] placeholder:text-[#C8B89A] focus:border-[#B5622A] outline-none transition-all font-medium"
               placeholder="••••••••"
