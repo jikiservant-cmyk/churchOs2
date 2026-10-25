@@ -9,13 +9,17 @@ export const dynamic = 'force-dynamic';
 export default async function AdminLoginPage({
   searchParams,
 }: {
-  searchParams: Promise<{ error?: string | string[]; slug?: string | string[] }>;
+    searchParams: Promise<{ error?: string | string[]; slug?: string | string[]; returnTo?: string | string[] }>;
 }) {
   const resolvedSearchParams = await searchParams || {};
   const supabase = await createClient();
   
   let targetSlug = Array.isArray(resolvedSearchParams.slug) ? resolvedSearchParams.slug[0] : resolvedSearchParams.slug;
   let loginError = Array.isArray(resolvedSearchParams.error) ? resolvedSearchParams.error[0] : resolvedSearchParams.error;
+  const requestedReturnTo = Array.isArray(resolvedSearchParams.returnTo) ? resolvedSearchParams.returnTo[0] : resolvedSearchParams.returnTo;
+  const safeReturnTo = requestedReturnTo && /^\/overseer\/invite\/[A-Za-z0-9_-]{1,128}$/.test(requestedReturnTo)
+    ? requestedReturnTo
+    : undefined;
 
   let redirectTo: string | null = null;
 
@@ -25,19 +29,23 @@ export default async function AdminLoginPage({
       const { data: { user } } = await supabase.auth.getUser();
       
       if (user) {
+        if (safeReturnTo) redirectTo = safeReturnTo;
+
         // Try my_login_context first
-        try {
-          const { data: contextData } = await supabase.rpc('my_login_context');
-          if (Array.isArray(contextData) && contextData.length > 0) {
-            const ctx = contextData[0];
-            if (ctx?.account_type === 'overseer') {
-              redirectTo = ctx.denomination_slug ? `/d/${ctx.denomination_slug}/overseer` : '/overseer';
-            } else if (ctx?.account_type === 'pastor' && ctx.church_slug) {
-              redirectTo = `/${ctx.church_slug}/admin`;
+        if (!redirectTo) {
+          try {
+            const { data: contextData } = await supabase.rpc('my_login_context');
+            if (Array.isArray(contextData) && contextData.length > 0) {
+              const ctx = contextData[0];
+              if (ctx?.account_type === 'overseer') {
+                redirectTo = ctx.denomination_slug ? `/d/${ctx.denomination_slug}/overseer` : '/overseer';
+              } else if (ctx?.account_type === 'pastor' && ctx.church_slug) {
+                redirectTo = `/${ctx.church_slug}/admin`;
+              }
             }
+          } catch {
+            // Fallback to profile table
           }
-        } catch {
-          // Fallback to profile table
         }
 
         if (!redirectTo) {
@@ -47,7 +55,16 @@ export default async function AdminLoginPage({
             .eq('id', user.id)
             .maybeSingle();
 
-          if (profile?.role === 'overseer') {
+          const { data: overseerLink } = await supabase
+            .schema('church')
+            .from('denomination_admins')
+            .select('user_id')
+            .eq('user_id', user.id)
+            .maybeSingle();
+
+          if (profile?.role === 'super_admin') {
+            redirectTo = '/super-admin/overseers';
+          } else if (overseerLink?.user_id === user.id) {
             redirectTo = '/overseer';
           } else if (profile?.role === 'pastor' && profile?.tenant_id) {
              const { data: church } = await supabase
@@ -106,6 +123,7 @@ export default async function AdminLoginPage({
         church={displayChurch} 
         churchSlug={finalSlug} 
         error={loginError} 
+        returnTo={safeReturnTo}
       />
     </Suspense>
   );

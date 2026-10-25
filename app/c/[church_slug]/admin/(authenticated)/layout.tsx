@@ -34,7 +34,17 @@ export default async function AdminLayout({
     redirect('/signup/provision');
   }
 
-  // Route overseer accounts to overseer dashboard
+  // A denomination-admin link is an additional portal membership. Keep a
+  // pastor/admin in this church portal while exposing a switch link below.
+  const { data: overseerLink } = await adminSupabase
+    .schema('church')
+    .from('denomination_admins')
+    .select('user_id')
+    .eq('user_id', user.id)
+    .maybeSingle();
+  const hasOverseerAccess = overseerLink?.user_id === user.id;
+
+  // Preserve routing for legacy profiles that still carry the old role value.
   if (profile.role === 'overseer') {
     redirect('/overseer');
   }
@@ -122,7 +132,7 @@ export default async function AdminLayout({
       style={{ fontFamily: "'Outfit', sans-serif" }}
       className="h-screen bg-[#E4D5BC] flex overflow-hidden"
     >
-      <AdminSidebar church={church} churchSlug={church_slug} />
+      <AdminSidebar church={church} churchSlug={church_slug} hasOverseerAccess={hasOverseerAccess} />
       <main className="flex-1 h-full overflow-y-auto px-6 py-8 md:px-12 md:py-10">
         <div className="max-w-7xl mx-auto">
           {children}

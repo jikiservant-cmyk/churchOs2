@@ -51,7 +51,16 @@ export default async function RootLoginPage({
             .eq('id', user.id)
             .maybeSingle();
 
-          if (profile?.role === 'overseer') {
+          const { data: overseerLink } = await adminSupabase
+            .schema('church')
+            .from('denomination_admins')
+            .select('user_id')
+            .eq('user_id', user.id)
+            .maybeSingle();
+
+          if (profile?.role === 'super_admin') {
+            redirectTo = '/super-admin/overseers';
+          } else if (overseerLink?.user_id === user.id) {
             redirectTo = '/overseer';
           } else if (['pastor', 'admin'].includes(profile?.role || '') && profile?.tenant_id) {
              const { data: church } = await adminSupabase
@@ -68,7 +77,7 @@ export default async function RootLoginPage({
              }
           } else if (!profile || !profile.tenant_id) {
              redirectTo = '/signup/provision';
-          } else if (profile && !['pastor', 'admin', 'overseer'].includes(profile.role)) {
+          } else if (profile && !['pastor', 'admin'].includes(profile.role)) {
              loginError = 'Access Denied: You do not have admin permissions';
           }
         }

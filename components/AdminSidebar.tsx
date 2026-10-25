@@ -4,10 +4,10 @@ import { useState } from 'react';
 import Link from 'next/link';
 import Image from 'next/image';
 import { usePathname, useRouter } from 'next/navigation';
-import { LayoutDashboard, Users, UserPlus, MessageSquare, ClipboardList, Settings, LogOut, Menu, X, UserCheck } from 'lucide-react';
+import { LayoutDashboard, Users, UserPlus, MessageSquare, ClipboardList, Settings, LogOut, Menu, X, UserCheck, ShieldCheck } from 'lucide-react';
 import type { Church } from '@/lib/db';
 
-export default function AdminSidebar({ church, churchSlug }: { church: Church, churchSlug: string }) {
+export default function AdminSidebar({ church, churchSlug, hasOverseerAccess = false }: { church: Church, churchSlug: string, hasOverseerAccess?: boolean }) {
   const [isOpen, setIsOpen] = useState(false);
   const [isLoggingOut, setIsLoggingOut] = useState(false);
   const pathname = usePathname();
@@ -49,6 +49,7 @@ export default function AdminSidebar({ church, churchSlug }: { church: Church, c
     { href: `/${churchSlug}/admin/new-converts`, icon: UserPlus, label: 'New Converts' },
     { href: `/${churchSlug}/admin/messages`, icon: MessageSquare, label: 'Messages' },
     { href: `/${churchSlug}/admin/settings`, icon: Settings, label: 'Settings' },
+    ...(hasOverseerAccess ? [{ href: '/overseer', icon: ShieldCheck, label: 'Overseer Portal' }] : []),
   ];
 
   return (

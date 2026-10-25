@@ -4,12 +4,15 @@ import { createClient } from './supabase/server';
 import { revalidatePath } from 'next/cache';
 
 async function isAuthorizedOverseer(supabase: Awaited<ReturnType<typeof createClient>>, userId: string) {
-  const { data: profile, error } = await supabase
-    .from('admin_profiles')
-    .select('role')
-    .eq('id', userId)
+  // Overseer access comes from the denomination membership relation, not from
+  // the global admin_profiles role (which may be super_admin independently).
+  const { data, error } = await supabase
+    .schema('church')
+    .from('denomination_admins')
+    .select('user_id')
+    .eq('user_id', userId)
     .maybeSingle();
-  return !error && profile?.role === 'overseer';
+  return !error && data?.user_id === userId;
 }
 
 export interface OverseerChurchItem {
