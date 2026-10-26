@@ -47,6 +47,9 @@ function messageFromBody(body: any): string {
 }
 
 async function ensureSmsLog(db: ReturnType<typeof client>, row: QueueItem) {
+  // sms_logs declares idempotency_key as its unique constraint (global). Use
+  // that exact conflict target; tenant_id,idempotency_key has no matching
+  // unique index in the deployed/base schema and causes every insert to fail.
   const { error: insertError } = await db.from('sms_logs').upsert({
     tenant_id: row.tenant_id,
     recipient_phone: row.recipient_phone,
@@ -54,7 +57,7 @@ async function ensureSmsLog(db: ReturnType<typeof client>, row: QueueItem) {
     status: 'PENDING',
     idempotency_key: row.idempotency_key,
     sender_id: row.sender_id,
-  }, { onConflict: 'tenant_id,idempotency_key', ignoreDuplicates: true });
+  }, { onConflict: 'idempotency_key', ignoreDuplicates: true });
 
   if (insertError) throw new Error(`SMS log insert failed: ${insertError.message}`);
 

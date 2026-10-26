@@ -204,6 +204,43 @@ describe('Church Workspace Activation Flow Suite', () => {
     }
   });
 
+  test('requires service-role credentials for settlement and never falls back to the anon key', async () => {
+    const originalFetch = globalThis.fetch;
+    const names = ['NEXT_PUBLIC_SUPABASE_URL', 'NEXT_PUBLIC_SUPABASE_ANON_KEY', 'SUPABASE_SERVICE_ROLE_KEY'] as const;
+    const originalEnv = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+    const requests: string[] = [];
+    process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://supabase.test';
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY = 'synthetic-anon-key';
+    delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = new URL(typeof input === 'string' || input instanceof URL ? input : input.url);
+      requests.push(url.pathname);
+      throw new Error('Settlement must not make a request without service-role credentials');
+    }) as typeof fetch;
+
+    try {
+      const result = await confirmActivationPayment({
+        merchantReference: 'ACT-service-role-required',
+        providerTransactionId: 'provider-txn-1',
+        paidAmount: 17_000,
+        currency: 'UGX',
+        status: 'SUCCESS',
+      });
+
+      assert.equal(result.success, false);
+      assert.equal(result.retryable, true);
+      assert.match(result.error || '', /temporarily unavailable/i);
+      assert.deepEqual(requests, []);
+    } finally {
+      globalThis.fetch = originalFetch;
+      for (const name of names) {
+        const value = originalEnv[name];
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }
+  });
+
   test('rejects confirmation when merchant reference is missing', async () => {
     const res = await confirmActivationPayment({
       merchantReference: '',

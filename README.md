@@ -78,7 +78,7 @@ Application code persists a row in `church.sms_queue`; the `church-najiki-dispat
 Supabase Edge Function sends it through Na'jiki using the stable queue ID and
 idempotency key. Do not add synchronous provider calls or downstream-provider
 fallbacks. Deploy/configure the functions and apply
-`migrations/009_najiki_sms_edge_dispatch.sql` as described in `QUEUE_INTEGRATION.md`.
+`migrations/009_najiki_sms_edge_dispatch.sql` and then `migrations/010_sms_queue_status_normalization.sql` as described in `QUEUE_INTEGRATION.md`.
 See `NAJIKI_INTEGRATION.md` for the Na'jiki contract and signed webhook setup.
 
 ### 7 — Replace unbounded member queries with paginated ones

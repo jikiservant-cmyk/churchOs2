@@ -31,9 +31,14 @@ export interface ActivationStatusResult {
 }
 
 function getAdminClient() {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL || '';
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || '';
-  return createSupabaseClient(url, key);
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!url || !serviceRoleKey) {
+    throw new Error('Church activation requires server-side Supabase service-role configuration');
+  }
+  return createSupabaseClient(url, serviceRoleKey, {
+    auth: { autoRefreshToken: false, persistSession: false },
+  });
 }
 
 /**
@@ -294,12 +299,12 @@ export async function confirmActivationPayment({
     return { success: false, error: 'Missing merchant reference' };
   }
 
-  const supabase = getAdminClient();
-
   // Settle only through the atomic RPC. A direct-table fallback could mark the
   // payment paid without activating the church (or the reverse) and cannot
-  // preserve the ledger's idempotency guarantees.
+  // preserve the ledger's idempotency guarantees. This must use the service-role
+  // client because only service_role is granted execute on the public RPC.
   try {
+    const supabase = getAdminClient();
     const { data: rpcResult, error: rpcError } = await supabase.rpc('activate_church_workspace_v2', {
       p_merchant_reference: merchantReference.trim(),
       p_provider: 'najiki',

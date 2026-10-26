@@ -20,13 +20,20 @@ UPDATE church.sms_queue
     OR length(btrim(idempotency_key)) < 8
     OR length(btrim(idempotency_key)) > 255;
 
+-- The corrected queue contract uses lowercase states throughout its RPCs.
+-- Normalize historical uppercase rows before workers scan or claim them.
+UPDATE church.sms_queue
+   SET status = lower(status)
+ WHERE lower(status) IN ('pending', 'processing', 'sent', 'failed', 'cancelled')
+   AND status <> lower(status);
+
 CREATE INDEX IF NOT EXISTS sms_queue_due_pending_idx
   ON church.sms_queue (scheduled_at, created_at)
-  WHERE status = 'PENDING';
+  WHERE status = 'pending';
 
 CREATE INDEX IF NOT EXISTS sms_queue_expired_lease_idx
   ON church.sms_queue (locked_until, created_at)
-  WHERE status = 'PROCESSING';
+  WHERE status = 'processing';
 
 CREATE UNIQUE INDEX IF NOT EXISTS sms_logs_najiki_sms_id_uidx
   ON church.sms_logs (najiki_sms_id)
@@ -37,7 +44,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS sms_logs_najiki_reference_uidx
   WHERE najiki_reference IS NOT NULL;
 
 COMMENT ON COLUMN church.sms_queue.locked_until IS
-  'Lease expiry for a single-row Edge Function claim; expired PROCESSING rows can be safely reclaimed.';
+  'Lease expiry for a single-row Edge Function claim; expired processing rows can be safely reclaimed.';
 COMMENT ON COLUMN church.sms_queue.lock_token IS
   'Fencing token for the current Edge Function lease; stale workers cannot finalize a reclaimed row.';
 COMMENT ON COLUMN church.sms_queue.najiki_sms_id IS
@@ -58,16 +65,16 @@ SECURITY DEFINER
 SET search_path = church, public
 AS $$
   UPDATE church.sms_queue q
-     SET status = 'PROCESSING',
+     SET status = 'processing',
          attempts = q.attempts + 1,
          lock_token = p_lock_token,
          locked_until = now() + make_interval(secs => greatest(30, least(p_lease_seconds, 600))),
          updated_at = now()
    WHERE q.id = p_sms_id
      AND (
-       (q.status = 'PENDING' AND (q.scheduled_at IS NULL OR q.scheduled_at <= now()))
+       (q.status = 'pending' AND (q.scheduled_at IS NULL OR q.scheduled_at <= now()))
        OR
-       (q.status = 'PROCESSING' AND (q.locked_until IS NULL OR q.locked_until <= now()))
+       (q.status = 'processing' AND (q.locked_until IS NULL OR q.locked_until <= now()))
      )
   RETURNING q.*;
 $$;
@@ -82,8 +89,8 @@ SET search_path = church, public
 AS $$
   SELECT q.id
     FROM church.sms_queue q
-   WHERE (q.status = 'PENDING' AND (q.scheduled_at IS NULL OR q.scheduled_at <= now()))
-      OR (q.status = 'PROCESSING' AND (q.locked_until IS NULL OR q.locked_until <= now()))
+   WHERE (q.status = 'pending' AND (q.scheduled_at IS NULL OR q.scheduled_at <= now()))
+      OR (q.status = 'processing' AND (q.locked_until IS NULL OR q.locked_until <= now()))
    ORDER BY COALESCE(q.scheduled_at, q.created_at), q.created_at
    LIMIT greatest(1, least(p_limit, 500));
 $$;
@@ -113,7 +120,7 @@ BEGIN
     INTO v_tenant_id
     FROM church.sms_queue q
    WHERE q.id = p_sms_id
-     AND q.status = 'PROCESSING'
+     AND q.status = 'processing'
      AND q.lock_token = p_lock_token
    FOR UPDATE;
 
@@ -188,7 +195,7 @@ DECLARE
   v_rows integer;
 BEGIN
   UPDATE church.sms_queue q
-     SET status = 'PENDING',
+     SET status = 'pending',
          attempts = CASE WHEN p_restore_attempt THEN greatest(0, q.attempts - 1) ELSE q.attempts END,
          scheduled_at = COALESCE(p_retry_at, now() + interval '30 seconds'),
          last_error = left(COALESCE(p_error, 'Temporary dispatch condition'), 1000),
@@ -196,7 +203,7 @@ BEGIN
          locked_until = NULL,
          updated_at = now()
    WHERE q.id = p_sms_id
-     AND q.status = 'PROCESSING'
+     AND q.status = 'processing'
      AND q.lock_token = p_lock_token;
   GET DIAGNOSTICS v_rows = ROW_COUNT;
   RETURN v_rows = 1;
@@ -230,7 +237,7 @@ BEGIN
     INTO v_tenant_id, v_broadcast_id, v_idempotency_key
     FROM church.sms_queue q
    WHERE q.id = p_sms_id
-     AND q.status = 'PROCESSING'
+     AND q.status = 'processing'
      AND q.lock_token = p_lock_token
    FOR UPDATE;
 
@@ -239,7 +246,7 @@ BEGIN
   END IF;
 
   UPDATE church.sms_queue
-     SET status = 'SENT',
+     SET status = 'sent',
          processed_at = now(),
          last_error = NULL,
          najiki_sms_id = p_najiki_sms_id,
@@ -317,7 +324,7 @@ BEGIN
     INTO v_tenant_id, v_broadcast_id, v_key
     FROM church.sms_queue q
    WHERE q.id = p_sms_id
-     AND q.status = 'PROCESSING'
+     AND q.status = 'processing'
      AND q.lock_token = p_lock_token
    FOR UPDATE;
 
@@ -359,7 +366,7 @@ BEGIN
   END IF;
 
   UPDATE church.sms_queue
-     SET status = 'FAILED',
+     SET status = 'failed',
          last_error = left(COALESCE(p_error, 'Na''jiki permanently rejected the SMS'), 1000),
          lock_token = NULL,
          locked_until = NULL,

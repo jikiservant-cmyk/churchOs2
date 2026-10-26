@@ -2,6 +2,13 @@
 
 import { createClient } from './supabase/server';
 import { revalidatePath } from 'next/cache';
+import {
+  buildOverseerDashboardSnapshot,
+  type OverseerChurchItem,
+  type OverseerInvite,
+  type OverseerTotals,
+} from './overseer-dashboard-data';
+export type { OverseerChurchItem, OverseerInvite, OverseerTotals } from './overseer-dashboard-data';
 
 async function isAuthorizedOverseer(supabase: Awaited<ReturnType<typeof createClient>>, userId: string) {
   // Overseer access comes from the denomination membership relation, not from
@@ -13,39 +20,6 @@ async function isAuthorizedOverseer(supabase: Awaited<ReturnType<typeof createCl
     .eq('user_id', userId)
     .maybeSingle();
   return !error && data?.user_id === userId;
-}
-
-export interface OverseerChurchItem {
-  church_id: string;
-  name: string;
-  slug: string;
-  pastor_name?: string | null;
-  pastor_email?: string | null;
-  member_count?: number;
-  recent_attendance?: number;
-  total_giving?: number;
-  joined_at?: string;
-  status?: string;
-}
-
-export interface OverseerTotals {
-  total_churches: number;
-  total_members: number;
-  total_giving: number;
-  active_pastors: number;
-  denomination_name?: string;
-  denomination_slug?: string;
-}
-
-export interface OverseerInvite {
-  id?: string;
-  label?: string;
-  code?: string;
-  max_uses?: number | null;
-  uses_count?: number;
-  expires_at?: string | null;
-  created_at?: string;
-  revoked?: boolean;
 }
 
 /**
@@ -63,56 +37,21 @@ export async function getOverseerDashboardData() {
   }
 
   try {
-    // 1. Fetch totals
-    const { data: totalsData, error: totalsError } = await supabase.rpc('overseer_denomination_totals');
-    if (totalsError) {
-      console.warn('[Overseer] totals RPC notice:', totalsError.message);
+    const [totals, churches, invites] = await Promise.all([
+      supabase.rpc('overseer_denomination_totals'),
+      supabase.rpc('overseer_church_summary'),
+      supabase.rpc('overseer_list_invites'),
+    ]);
+
+    if (totals.error || churches.error || invites.error) {
+      console.error('[Overseer] Dashboard RPC failed:', {
+        totals: totals.error?.message,
+        churches: churches.error?.message,
+        invites: invites.error?.message,
+      });
     }
 
-    // 2. Fetch churches
-    const { data: churchesData, error: churchesError } = await supabase.rpc('overseer_church_summary');
-    if (churchesError) {
-      console.warn('[Overseer] churches RPC notice:', churchesError.message);
-    }
-
-    // 3. Fetch invites
-    const { data: invitesData, error: invitesError } = await supabase.rpc('overseer_list_invites');
-    if (invitesError) {
-      console.warn('[Overseer] invites RPC notice:', invitesError.message);
-    }
-
-    const rawTotal = totalsData?.[0] || {};
-    const totals: OverseerTotals = {
-      total_churches: Number(rawTotal.church_count ?? rawTotal.total_churches ?? (Array.isArray(churchesData) ? churchesData.length : 0)),
-      total_members: Number(rawTotal.member_total ?? rawTotal.total_members ?? 0),
-      total_giving: Number(rawTotal.giving_total ?? rawTotal.total_giving ?? 0),
-      active_pastors: Number(rawTotal.active_churches_30d ?? rawTotal.active_pastors ?? (Array.isArray(churchesData) ? churchesData.length : 0)),
-      denomination_name: rawTotal.denomination_name,
-      denomination_slug: rawTotal.denomination_slug,
-    };
-
-    const churches: OverseerChurchItem[] = Array.isArray(churchesData)
-      ? churchesData.map((c: any) => ({
-          church_id: c.church_id || c.id,
-          name: c.church_name || c.name || 'Unnamed Parish',
-          slug: c.slug || '',
-          pastor_name: c.pastor_name || c.pastor_email?.split('@')[0] || 'Pastor',
-          pastor_email: c.pastor_email || null,
-          member_count: Number(c.member_count || 0),
-          recent_attendance: Number(c.attendance_30d ?? c.recent_attendance ?? 0),
-          total_giving: Number(c.total_giving || 0),
-          joined_at: c.joined_at || c.created_at || new Date().toISOString(),
-          status: c.status || 'active',
-        }))
-      : [];
-    const invites: OverseerInvite[] = (invitesData as OverseerInvite[]) || [];
-
-    return {
-      success: true,
-      totals,
-      churches,
-      invites,
-    };
+    return buildOverseerDashboardSnapshot({ totals, churches, invites });
   } catch (err: any) {
     console.error('[Overseer] getOverseerDashboardData error:', err);
     return { error: err?.message || 'Failed to load overseer data' };

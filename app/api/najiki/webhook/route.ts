@@ -33,6 +33,7 @@ import {
   activationProviderTransactionId,
   parsePaymentNotification,
   parseSmsDeliveryNotification,
+  buildSmsDeliveryLogPatch,
   transactionLookupCandidates,
   notificationTenantCode,
   notificationChurchId,
@@ -43,6 +44,7 @@ import { getNajikiPayment } from '@/lib/najiki/client';
 import { settleWalletPayment } from '@/lib/najiki/settlement';
 import { sendSingleSMS } from '@/lib/sms-actions';
 import { confirmActivationPayment } from '@/lib/activation';
+import { normalizeUgPhone } from '@/lib/utils';
 
 export const dynamic = 'force-dynamic';
 
@@ -143,21 +145,33 @@ async function handlePost(request: Request) {
 
 async function handleSmsDelivery(payload: any) {
   const notification = parseSmsDeliveryNotification(payload)!;
-  const { smsId, reference: smsRef, status: smsStatus } = notification;
+  const {
+    smsId,
+    reference: smsRef,
+    status: smsStatus,
+    providerId,
+    recipient,
+    applicationCode,
+  } = notification;
 
-  console.log(`[Najiki Webhook] SMS Delivery Update for ${smsRef || smsId}: ${smsStatus}`);
-
-  // Validate before use — these values arrive in the request body.
+  // Validate all callback identifiers before using them in PostgREST filters.
   const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-  // Na'jiki returns opaque non-UUID smsId values; accept only URL/filter-safe IDs.
   const SAFE_SMS_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
   const KEY_RE = /^[A-Za-z0-9_.:-]{1,255}$/;
   const safeId = typeof smsId === 'string' && (UUID_RE.test(smsId) || SAFE_SMS_ID_RE.test(smsId)) ? smsId : null;
   const safeRef = typeof smsRef === 'string' && KEY_RE.test(smsRef) ? smsRef : null;
+  const safeProviderId = typeof providerId === 'string' && providerId.trim()
+    ? providerId.trim()
+    : null;
+  const recipientPhone = typeof recipient === 'string' ? normalizeUgPhone(recipient) : null;
+  const expectedApplicationCode = (process.env.NAJIKI_APPLICATION_CODE || 'church').trim();
 
-  if (!safeId && !safeRef) {
-    console.warn('[Najiki Webhook] SMS delivery update has no usable id/reference.');
+  if ((!safeId && !safeRef) || (providerId && (!safeProviderId || safeProviderId.length > 255)) || !recipientPhone) {
+    console.warn('[Najiki Webhook] SMS delivery update has malformed identifiers or recipient.');
     return NextResponse.json({ error: 'Malformed SMS delivery notification' }, { status: 400 });
+  }
+  if (applicationCode !== expectedApplicationCode) {
+    return NextResponse.json({ error: 'SMS application code mismatch' }, { status: 403 });
   }
 
   const normalizedProviderStatus = typeof smsStatus === 'string' ? smsStatus.trim().toLowerCase() : '';
@@ -166,49 +180,77 @@ async function handleSmsDelivery(payload: any) {
     return NextResponse.json({ error: 'Unsupported SMS delivery status' }, { status: 422 });
   }
 
-  const db = getServiceDb();
-  const normalisedStatus = normalizedProviderStatus;
-
-  const updateObj: Record<string, unknown> = {
-    status: normalisedStatus,
-    message_provider_status: smsStatus,
-    updated_at: new Date().toISOString(),
-  };
-  if (safeId) {
-    // Keep Na'jiki's own smsId as the stable callback key. providerId is an
-    // opaque downstream carrier ID and is not the ID sent in future callbacks.
-    updateObj.provider_message_id = safeId;
-    updateObj.najiki_sms_id = safeId;
-  }
-  if (safeRef) updateObj.najiki_reference = safeRef;
-
   const orConditions = [
     safeId ? `provider_message_id.eq.${safeId}` : null,
     safeId ? `najiki_sms_id.eq.${safeId}` : null,
     safeRef ? `najiki_reference.eq.${safeRef}` : null,
   ].filter(Boolean).join(',');
-
-  // Resolve owner(s) first, then keep every update tenant-scoped.
+  const db = getServiceDb();
   const { data: owners, error: ownerError } = await db
     .schema('church')
     .from('sms_logs')
-    .select('tenant_id')
+    .select('id, tenant_id, recipient_phone, status, provider_message_id, najiki_sms_id, najiki_reference')
     .or(orConditions)
-    .limit(10);
+    .limit(2);
 
   if (ownerError) {
     console.error('[Najiki Webhook] Failed to resolve SMS delivery owner:', ownerError.message);
     return NextResponse.json({ error: 'Delivery update could not be recorded' }, { status: 500 });
   }
+  if (!owners?.length) {
+    // A callback may beat the queue-completion write. Return a retryable status
+    // so Na'jiki's durable notification outbox can deliver it after correlation
+    // IDs have been stored, rather than acknowledging and silently losing it.
+    return NextResponse.json(
+      { error: 'SMS delivery record is not available yet' },
+      { status: 503, headers: { 'Retry-After': '30' } },
+    );
+  }
+  if (owners.length !== 1) {
+    console.error('[Najiki Webhook] Callback identifiers matched multiple SMS records; refusing ambiguous update.');
+    return NextResponse.json({ error: 'Ambiguous SMS delivery identifiers' }, { status: 409 });
+  }
 
-  for (const owner of owners ?? []) {
-    const { error: updateError } = await db.schema('church').from('sms_logs').update(updateObj)
-      .eq('tenant_id', owner.tenant_id)
-      .or(orConditions);
-    if (updateError) {
-      console.error('[Najiki Webhook] Failed to record SMS delivery update:', updateError.message);
-      return NextResponse.json({ error: 'Delivery update could not be recorded' }, { status: 500 });
-    }
+  const owner = owners[0];
+  const matchedId = Boolean(safeId && [owner.provider_message_id, owner.najiki_sms_id].includes(safeId));
+  const matchedReference = Boolean(safeRef && owner.najiki_reference === safeRef);
+  if ((owner.provider_message_id && safeId && owner.provider_message_id !== safeId && owner.najiki_sms_id !== safeId) ||
+      (owner.najiki_sms_id && safeId && owner.najiki_sms_id !== safeId && owner.provider_message_id !== safeId) ||
+      (owner.najiki_reference && safeRef && owner.najiki_reference !== safeRef) ||
+      (!matchedId && !matchedReference)) {
+    console.error('[Najiki Webhook] Callback identifiers do not consistently identify one SMS record.');
+    return NextResponse.json({ error: 'SMS delivery identifiers do not match' }, { status: 409 });
+  }
+  if (normalizeUgPhone(owner.recipient_phone) !== recipientPhone) {
+    console.error('[Najiki Webhook] SMS callback recipient does not match the queued recipient.');
+    return NextResponse.json({ error: 'SMS recipient mismatch' }, { status: 409 });
+  }
+
+  const currentStatus = typeof owner.status === 'string' ? owner.status.trim().toLowerCase() : '';
+  if (currentStatus === 'delivered' && normalizedProviderStatus === 'failed') {
+    // A contradictory late failure must not downgrade a confirmed delivery.
+    return NextResponse.json({ received: true, eventType: 'SMS_DELIVERY_UPDATE' });
+  }
+
+  const updateObj = buildSmsDeliveryLogPatch({
+    ...notification,
+    smsId: safeId ?? '',
+    reference: safeRef,
+    providerId: safeProviderId,
+  }, normalizedProviderStatus as 'delivered' | 'failed');
+
+  const { data: updated, error: updateError } = await db.schema('church').from('sms_logs')
+    .update(updateObj)
+    .eq('id', owner.id)
+    .eq('tenant_id', owner.tenant_id)
+    .select('id')
+    .maybeSingle();
+  if (updateError || !updated) {
+    console.error('[Najiki Webhook] Failed to record SMS delivery update:', updateError?.message ?? 'record disappeared');
+    return NextResponse.json(
+      { error: 'Delivery update could not be recorded' },
+      { status: 503, headers: { 'Retry-After': '30' } },
+    );
   }
 
   return NextResponse.json({ received: true, eventType: 'SMS_DELIVERY_UPDATE' });

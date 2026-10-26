@@ -2,6 +2,7 @@ import { createAdminClient } from '@/lib/supabase/server';
 import { normalizeUgPhone } from '@/lib/utils';
 import { checkRateLimit } from '@/lib/security/rate-limit';
 import { isSmsWithinSegmentLimit, smsSegmentCount } from '@/supabase/functions/_shared/sms-length';
+import { hasSmsQueueStatus, SMS_QUEUE_STATUS } from '@/lib/sms-queue-status';
 
 export type EnqueueSmsInput = {
   tenantId: string;
@@ -43,7 +44,7 @@ export async function enqueueSmsDispatch(input: EnqueueSmsInput): Promise<Enqueu
     message,
     sender_id: input.senderId?.trim() || null,
     idempotency_key: idempotencyKey,
-    status: 'pending',
+    status: SMS_QUEUE_STATUS.pending,
     scheduled_at: new Date().toISOString(),
   };
 
@@ -223,7 +224,7 @@ export async function sendSingleSMS({
     recipientId,
     idempotencyKey,
   });
-  if (queued.status === 'failed' || queued.status === 'cancelled') {
+  if (hasSmsQueueStatus(queued.status, SMS_QUEUE_STATUS.failed) || hasSmsQueueStatus(queued.status, SMS_QUEUE_STATUS.cancelled)) {
     throw new Error('This SMS idempotency key is already attached to a failed queue item. Use a new key for a deliberate resend.');
   }
 

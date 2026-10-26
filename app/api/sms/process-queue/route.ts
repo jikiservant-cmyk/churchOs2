@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import crypto from 'node:crypto';
 import { createAdminClient } from '@/lib/supabase/server';
 import { dispatchSmsQueueItems } from '@/lib/sms-dispatch';
+import { SMS_QUEUE_STATUS } from '@/lib/sms-queue-status';
 
 const QUEUE_SECRET = process.env.QUEUE_PROCESSOR_SECRET;
 const HAS_STRONG_QUEUE_SECRET = Boolean(QUEUE_SECRET && Buffer.byteLength(QUEUE_SECRET) >= 32 && !QUEUE_SECRET.includes('REPLACE_ME'));
@@ -27,12 +28,12 @@ async function run(request: Request) {
     const now = new Date().toISOString();
     const [pendingResult, expiredResult] = await Promise.all([
       admin.schema('church').from('sms_queue').select('id')
-        .eq('status', 'pending')
+        .eq('status', SMS_QUEUE_STATUS.pending)
         .or(`scheduled_at.is.null,scheduled_at.lte.${now}`)
         .order('scheduled_at', { ascending: true })
         .limit(20),
       admin.schema('church').from('sms_queue').select('id')
-        .eq('status', 'processing')
+        .eq('status', SMS_QUEUE_STATUS.processing)
         .or(`locked_until.is.null,locked_until.lte.${now}`)
         .order('locked_until', { ascending: true })
         .limit(20),

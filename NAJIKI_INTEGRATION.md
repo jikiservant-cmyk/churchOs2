@@ -226,7 +226,7 @@ unified webhook can settle them against the activation ledger.
 }
 ```
 
-This is the only thing that can move an SMS from `queued` to `delivered`/`failed`.
+The webhook requires the configured application code and a recipient matching the queued log. It stores Na'jiki's stable `smsId` in `najiki_sms_id` and the downstream `providerId` in `provider_message_id`; delivery callbacks that arrive before queue correlation data is committed receive a retryable response rather than being acknowledged and lost. This is the only thing that can move an SMS from `queued` to `delivered`/`failed`.
 
 ---
 

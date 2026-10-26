@@ -1,6 +1,6 @@
 # SMS queue and Na'jiki Edge dispatch
 
-This integration uses the **existing database tables and RPCs**. It does not require a new migration or SQL to run.
+This integration uses the existing queue tables plus the RPC definitions in `migrations/009_najiki_sms_edge_dispatch.sql`. Apply that migration after its documented base tables exist, then apply `migrations/010_sms_queue_status_normalization.sql` to normalize older lowercase queue rows.
 
 ## Dispatch flow
 
@@ -33,7 +33,7 @@ The Edge Function loads phone, message, tenant, sender, attempts, and idempotenc
 - `fail_sms_queue_item(p_sms_id uuid, p_lock_token uuid, p_error text)` → `jsonb`
 - `complete_sms_queue_item(p_sms_id uuid, p_lock_token uuid, p_najiki_sms_id text, p_najiki_reference text, p_gateway_status text)` → `boolean`
 
-The log upsert uses the existing unique conflict target `tenant_id,idempotency_key`. The debit results handled by the dispatcher are `debited`, `already_debited`, `insufficient_balance`, and `wallet_missing`.
+The `sms_logs` table's declared unique constraint is on `idempotency_key`; the Edge Function uses that exact conflict target. Queue states are lowercase (`pending`, `processing`, `sent`, `failed`, `cancelled`) to match the corrected database contract. The debit results handled by the dispatcher are `debited`, `already_debited`, `insufficient_balance`, and `wallet_missing`.
 
 ## Runtime configuration
 
