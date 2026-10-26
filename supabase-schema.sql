@@ -1766,7 +1766,7 @@ CREATE TABLE IF NOT EXISTS church.sms_queue (
   message text NOT NULL,
   sender_id text,
   idempotency_key text UNIQUE,
-  status text NOT NULL DEFAULT 'PENDING',
+  status text NOT NULL DEFAULT 'pending',
   attempts int NOT NULL DEFAULT 0,
   max_attempts int NOT NULL DEFAULT 3,
   last_error text,
@@ -1798,12 +1798,12 @@ AS $$
 BEGIN
   RETURN QUERY
   UPDATE church.sms_queue q
-  SET status = 'PROCESSING',
+  SET status = 'processing',
       updated_at = now()
   WHERE q.id IN (
     SELECT id
     FROM church.sms_queue
-    WHERE status = 'PENDING'
+    WHERE status = 'pending'
       AND scheduled_at <= now()
       AND (p_tenant_id IS NULL OR tenant_id = p_tenant_id)
     ORDER BY created_at ASC

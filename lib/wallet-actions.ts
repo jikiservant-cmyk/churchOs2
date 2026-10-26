@@ -14,6 +14,7 @@ import {
   getNajikiConfig,
   NajikiApiError,
 } from '@/lib/najiki/client';
+import { getPublicGivingGateError } from '@/lib/public-giving';
 
 // Format phone numbers for Na'jiki's payment API as digits-only E.164.
 // Na'jiki normalizes provider-specific formatting internally.
@@ -283,6 +284,11 @@ export async function initiateDonationPayment(params: {
   phoneNumber: string;
   category: string;
 }) {
+  // Server-side enforcement is required: hiding the public form is not enough
+  // because callers can invoke a Server Action directly.
+  const givingGateError = getPublicGivingGateError();
+  if (givingGateError) return givingGateError;
+
   if (!params || typeof params !== 'object') return { error: 'Invalid donation request.' };
   const { churchId, phoneNumber, category } = params;
   if (typeof churchId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(churchId)) {

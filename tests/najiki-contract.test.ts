@@ -39,6 +39,7 @@ import {
   notificationTenantCode,
   parsePaymentNotification,
   parseSmsDeliveryNotification,
+  buildSmsDeliveryLogPatch,
   planPaymentReceiptSms,
   transactionLookupCandidates,
   verifyNajikiWebhook,
@@ -643,6 +644,13 @@ describe('inbound webhook payload handling', () => {
     assert.equal(notification.smsId, 'sms_abc')
     assert.equal(notification.status, 'delivered')
     assert.equal(notification.providerId, 'AT+123456789')
+
+    const logPatch = buildSmsDeliveryLogPatch(notification, 'delivered', '2026-10-26T10:00:00.000Z')
+    assert.equal(logPatch.najiki_sms_id, 'sms_abc')
+    assert.equal(logPatch.provider_message_id, 'AT+123456789')
+    assert.equal(logPatch.najiki_reference, 'SMS-1234')
+    assert.equal(logPatch.status, 'delivered')
+    assert.equal(logPatch.message_provider_status, 'delivered')
   })
 
   test('plans the receipt SMS only after the payment is confirmed', () => {

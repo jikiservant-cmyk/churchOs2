@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { normalizeUgPhone } from '@/lib/utils';
 import { tenantScopedAdmin } from '@/lib/supabase/tenant-scoped';
 import { isSmsWithinSegmentLimit } from '@/supabase/functions/_shared/sms-length';
+import { hasSmsQueueStatus, SMS_QUEUE_STATUS } from '@/lib/sms-queue-status';
 
 export interface EnqueueBroadcastParams {
   tenantId: string;
@@ -71,21 +72,22 @@ export async function enqueueBroadcast(params: EnqueueBroadcastParams): Promise<
       recipient_phone: phone,
       message,
       sender_id: params.senderId?.trim() || null,
-      status: 'pending',
+      status: SMS_QUEUE_STATUS.pending,
       scheduled_at: new Date().toISOString(),
       idempotency_key: `bcast_${batchId}_${recipient.id}_${i}`,
     });
   }
 
-  const queueIds: string[] = [];
-  for (let offset = 0; offset < rows.length; offset += 100) {
-    const { data, error } = await scopedDb
-      .church('sms_queue')
-      .insert(rows.slice(offset, offset + 100))
-      .select('id');
-    if (error) throw new Error(`Queue insert failed at offset ${offset}: ${error.message}`);
-    queueIds.push(...(data ?? []).map((row: { id: string }) => row.id));
-  }
+  // Insert the whole bounded batch in one PostgreSQL statement. Splitting it
+  // into multiple requests could leave a partially queued broadcast if a later
+  // chunk failed; the queue worker might then send an incomplete batch while
+  // the client sees an error and retries.
+  const { data, error } = await scopedDb
+    .church('sms_queue')
+    .insert(rows)
+    .select('id');
+  if (error) throw new Error(`Queue insert failed: ${error.message}`);
+  const queueIds = (data ?? []).map((row: { id: string }) => row.id);
 
   return { broadcastId: batchId, enqueued: queueIds.length, skipped, queueIds };
 }
@@ -104,8 +106,10 @@ export async function getBroadcastStatus(
   if (error) throw new Error(`Could not read queue batch status: ${error.message}`);
   if (!rows?.length) return null;
 
-  const sent = rows.filter((row: { status: string }) => row.status === 'sent').length;
-  const failed = rows.filter((row: { status: string }) => row.status === 'failed' || row.status === 'cancelled').length;
+  const sent = rows.filter((row: { status: string }) => hasSmsQueueStatus(row.status, SMS_QUEUE_STATUS.sent)).length;
+  const failed = rows.filter((row: { status: string }) =>
+    hasSmsQueueStatus(row.status, SMS_QUEUE_STATUS.failed) || hasSmsQueueStatus(row.status, SMS_QUEUE_STATUS.cancelled),
+  ).length;
   const pending = rows.length - sent - failed;
   const status: BroadcastStatus['status'] = pending > 0
     ? sent + failed === 0 ? 'QUEUED' : 'PROCESSING'

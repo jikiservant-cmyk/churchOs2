@@ -286,6 +286,24 @@ export function parseSmsDeliveryNotification(
   }
 }
 
+/** Map Najiki callback identifiers to their distinct ChurchOS log columns. */
+export function buildSmsDeliveryLogPatch(
+  notification: NajikiSmsDeliveryNotification,
+  normalizedStatus: 'delivered' | 'failed',
+  updatedAt = new Date().toISOString(),
+): Record<string, unknown> {
+  const patch: Record<string, unknown> = {
+    status: normalizedStatus,
+    message_provider_status: notification.status,
+    updated_at: updatedAt,
+  }
+  if (notification.smsId) patch.najiki_sms_id = notification.smsId
+  if (notification.reference) patch.najiki_reference = notification.reference
+  // providerId is the downstream carrier message ID; smsId is Na'jiki's own ID.
+  if (notification.providerId) patch.provider_message_id = notification.providerId
+  return patch
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Reconciliation: matching a Na'jiki notification to a churchOs ledger row
 // ─────────────────────────────────────────────────────────────────────────────

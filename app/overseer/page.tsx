@@ -36,17 +36,24 @@ export default async function OverseerPage() {
     }
   }
 
-  const churches = ('churches' in data && data.churches) ? data.churches : [];
-  const invites = ('invites' in data && data.invites) ? data.invites : [];
+  if ('error' in data) {
+    return (
+      <main className="min-h-screen bg-[#E4D5BC] px-6 py-16 text-[#1E1208]">
+        <section role="alert" className="mx-auto max-w-xl rounded-2xl border border-[#B5622A]/25 bg-[#F0E6D3] p-8 shadow-sm">
+          <div className="mb-4 flex items-center gap-3">
+            <Shield className="h-6 w-6 text-[#B5622A]" />
+            <h1 className="text-xl font-bold">Overseer dashboard unavailable</h1>
+          </div>
+          <p className="text-sm text-[#6B513E]">{data.error}</p>
+          <Link href="/overseer" className="mt-6 inline-flex items-center gap-2 rounded-xl bg-[#2B1A0E] px-4 py-2.5 text-sm font-semibold text-white">
+            <RefreshCw className="h-4 w-4" /> Retry
+          </Link>
+        </section>
+      </main>
+    );
+  }
 
-  const totals = ('totals' in data && data.totals) ? data.totals : {
-    total_churches: churches.length,
-    total_members: 0,
-    total_giving: 0,
-    active_pastors: 0,
-    denomination_name: context?.denomination_name || 'Diocese Network',
-  };
-
+  const { churches, invites, totals } = data;
   const denominationName = context?.denomination_name || totals.denomination_name || 'Denomination Oversight';
   const denominationSlug = context?.denomination_slug || totals.denomination_slug;
 
