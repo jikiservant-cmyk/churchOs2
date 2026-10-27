@@ -168,6 +168,9 @@ const CALL_SITE_SIG = 'p_user_id uuid, p_name text, p_slug text, p_role text, p_
 
 async function scenario({ nulls = 16, total = 18, blanks = 0, v3 = 'reviewed' } = {}) {
   const d = new PGlite();
+  // The gate checks has_function_privilege('authenticated', …) when that role
+  // exists; create it so the check actually runs in these scenarios.
+  await d.exec('CREATE ROLE authenticated;');
   await d.exec('CREATE SCHEMA church;');
   await d.exec(`CREATE TABLE church.churches (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -364,6 +367,17 @@ async function tryExec(d, sql) {
   const d = await scenario({ nulls: 0, blanks: 3 });
   const err = await tryExec(d, pin(m014, await fingerprintOf(d)));
   check('014 refuses on blank (non-NULL) passkeys', /3 church\(es\) have a blank passkey/.test(err ?? ''));
+  await d.close();
+}
+
+// M. The app's role must be able to call the function at all.
+{
+  const d = await scenario({ nulls: 0 });
+  await d.exec(`REVOKE EXECUTE ON FUNCTION public.provision_church_v3(${CALL_SITE_SIG}) FROM PUBLIC, authenticated`);
+  const err = await tryExec(d, pin(m014, await fingerprintOf(d)));
+  check('014 refuses when authenticated cannot EXECUTE provisioning',
+    /authenticated cannot EXECUTE provision_church_v3/.test(err ?? ''), err?.slice(0, 80));
+  check('014 leaves passkey nullable in that case', (await nullable(d)) === 'YES');
   await d.close();
 }
 

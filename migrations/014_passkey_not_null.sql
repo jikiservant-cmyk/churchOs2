@@ -20,6 +20,8 @@
 --      the argument list the app sends, so the check cannot land on the wrong
 --      object. pg_proc also holds procedures, aggregates and window functions
 --      under the same name; both lookups filter p.prokind = 'f'.
+--   3b. `authenticated` holds EXECUTE on it — the app calls with the user's
+--      token, so a function nobody can call cannot provision anything.
 --   4. That overload's deployed text hashes to the fingerprint recorded below,
 --      i.e. it is byte-identical to the definition a human reviewed.
 --
@@ -128,6 +130,17 @@ BEGIN
     RAISE EXCEPTION
       'Refusing NOT NULL: % overloads of provision_church_v3 accept the call-site signature. Resolve the ambiguity before trusting this gate.',
       v_overloads;
+  END IF;
+
+  -- 3b. The app calls this with the user's token (lib/provision-actions.ts
+  -- uses createClient(), not the admin client), so `authenticated` must hold
+  -- EXECUTE. A function nobody can call cannot provision a church, whatever
+  -- its body says. The role check keeps this portable to databases without
+  -- Supabase's role set.
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated')
+     AND NOT has_function_privilege('authenticated', v_oid, 'EXECUTE') THEN
+    RAISE EXCEPTION
+      'Refusing NOT NULL: authenticated cannot EXECUTE provision_church_v3, so church signup fails for every user. Grant EXECUTE to authenticated (and check service_role separately).';
   END IF;
 
   -- 4. The reviewed definition, identified by content rather than by name.
