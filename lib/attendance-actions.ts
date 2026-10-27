@@ -204,7 +204,10 @@ export async function getUsherSession(churchSlug: string) {
 
 export async function logoutUsher(churchSlug: string) {
   const cookieStore = await cookies();
-  const cookieName = `usher_session_${churchSlug.toLowerCase()}`;
+  // Must canonicalise exactly like getUsherSession(), otherwise a slug with
+  // uppercase or punctuation deletes a cookie name that was never set.
+  const canonicalSlug = churchSlug.toLowerCase().trim().replace(/[^a-z0-9-]/g, '');
+  const cookieName = `usher_session_${canonicalSlug}`;
   cookieStore.delete(cookieName);
   return { success: true };
 }

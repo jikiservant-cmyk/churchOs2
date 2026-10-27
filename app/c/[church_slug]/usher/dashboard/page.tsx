@@ -4,7 +4,6 @@ import { getUsherSession } from '@/lib/attendance-actions';
 import { tenantScopedAdmin } from '@/lib/supabase/tenant-scoped';
 import { UsherDashboardClient } from '@/components/attendance/UsherDashboardClient';
 import { LogOut, Activity } from 'lucide-react';
-import Link from 'next/link';
 
 export const metadata: Metadata = {
   title: 'Usher Dashboard | pastorOs',
@@ -64,12 +63,20 @@ export default async function UsherDashboard({ params }: { params: Promise<{ chu
             </div>
           </div>
           
-          <Link 
-            href={`/${church_slug}/usher`} 
-            className="p-2 text-[#9A7E65] hover:text-red-500 transition-colors"
-          >
-            <LogOut className="w-5 h-5" />
-          </Link>
+          {/*
+            Logging out must clear the usher_session cookie, not merely navigate
+            to the entry page: ushers share one tablet between services, and a
+            plain <Link> left the 24h session valid for the next person.
+          */}
+          <form action={`/api/auth/usher-logout?church=${encodeURIComponent(church_slug)}`} method="POST">
+            <button
+              type="submit"
+              aria-label="Log out"
+              className="p-2 text-[#9A7E65] hover:text-red-500 transition-colors"
+            >
+              <LogOut className="w-5 h-5" />
+            </button>
+          </form>
         </div>
       </header>
 

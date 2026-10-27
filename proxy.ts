@@ -6,6 +6,10 @@ const SERVER_TO_SERVER_ENDPOINTS = new Set([
   '/api/sms/process-queue',
   '/api/najiki/webhook',
   '/api/webhooks/najiki',
+  // Usher sessions are JWTs in their own cookie, not Supabase sessions. This
+  // endpoint performs its own origin check, so it must not fail closed just
+  // because Supabase auth cannot be reached — otherwise ushers cannot log out.
+  '/api/auth/usher-logout',
 ]);
 const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
