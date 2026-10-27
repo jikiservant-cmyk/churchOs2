@@ -157,6 +157,7 @@ check('011 text never interpolates a passkey value',
   await d.exec(readFileSync('migrations/012_usher_passkey_backfill.sql', 'utf8'));
   const codes2 = (await d.query(`SELECT passkey FROM church.churches WHERE slug <> 'church-0' ORDER BY slug`)).rows.map(r => r.passkey);
   check('012 re-run leaves healthy codes alone', JSON.stringify(codes) === JSON.stringify(codes2));
+  await d.close();
 }
 
 // ── 014: passkey NOT NULL, gated ────────────────────────────────────────────
@@ -184,7 +185,21 @@ async function scenario({ nulls = 16, total = 18, blanks = 0, v3 = 'reviewed' } 
       RETURN gen_random_uuid(); END`,
     nopasskey: `BEGIN RETURN gen_random_uuid(); END`,
   };
-  if (bodies[v3]) {
+  if (v3 === 'decoyprocedure') {
+    // PostgreSQL forbids a procedure sharing both name AND argument types with
+    // a function (42723), so a *different* signature is the only form that can
+    // coexist. The function must still be the one that gets fingerprinted.
+    await d.exec(`CREATE FUNCTION public.provision_church_v3(${CALL_SITE_SIG})
+      RETURNS uuid LANGUAGE plpgsql SECURITY DEFINER AS $fn$ ${bodies.reviewed} $fn$;`);
+    await d.exec(`CREATE PROCEDURE public.provision_church_v3(p_slug text)
+      LANGUAGE plpgsql AS $fn$ BEGIN PERFORM 1; END $fn$;`);
+  } else if (v3 === 'procedureonly') {
+    // A procedure carrying the exact call-site signature and no function at
+    // all. Without the prokind filter the gate would fingerprint this and
+    // proceed; with it, there is nothing callable and it must refuse.
+    await d.exec(`CREATE PROCEDURE public.provision_church_v3(${CALL_SITE_SIG})
+      LANGUAGE plpgsql AS $fn$ BEGIN PERFORM 1; END $fn$;`);
+  } else if (bodies[v3]) {
     await d.exec(`CREATE FUNCTION public.provision_church_v3(${CALL_SITE_SIG})
       RETURNS uuid LANGUAGE plpgsql SECURITY DEFINER AS $fn$ ${bodies[v3]} $fn$;`);
   } else if (v3 === 'wrongsignature') {
@@ -202,6 +217,7 @@ const fingerprintOf = async (d) => (await d.query(`
   SELECT encode(sha256(convert_to(pg_get_functiondef(p.oid),'UTF8')),'hex') AS fp
     FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
    WHERE n.nspname='public' AND p.proname='provision_church_v3'
+     AND p.prokind = 'f'
      AND pg_get_function_identity_arguments(p.oid) = $1`, [CALL_SITE_SIG])).rows[0]?.fp;
 
 // Fill in the pinned fingerprint the way an operator would after review.
@@ -224,6 +240,7 @@ async function tryExec(d, sql) {
   check('014 refuses before the backfill', err !== null, err?.slice(0, 60));
   check('014 refusal names the NULL count', /16 church\(es\) have a NULL passkey/.test(err ?? ''));
   check('014 refusal leaves passkey nullable', (await nullable(d)) === 'YES');
+  await d.close();
 }
 
 // B. Captured, reviewed, pinned, backfilled: applies.
@@ -233,6 +250,7 @@ async function tryExec(d, sql) {
   const err = await tryExec(d, pin(m014, await fingerprintOf(d)));
   check('014 applies after backfill with a pinned definition', err === null, err?.slice(0, 90));
   check('014 makes passkey NOT NULL', (await nullable(d)) === 'NO');
+  await d.close();
 }
 
 // C. Re-running is harmless.
@@ -242,6 +260,7 @@ async function tryExec(d, sql) {
   await d.exec(pin(m014, await fingerprintOf(d)));
   const err = await tryExec(d, pin(m014, await fingerprintOf(d)));
   check('014 is re-runnable', err === null, err?.slice(0, 90));
+  await d.close();
 }
 
 // D. Unreviewed: the pin is still the placeholder.
@@ -251,13 +270,15 @@ async function tryExec(d, sql) {
   check('014 refuses while the definition is unpinned', /no reviewed definition pinned/.test(err ?? ''));
   check('014 tells you the deployed fingerprint to pin',
     /sha256:[0-9a-f]{64}/.test(err ?? ''), err?.slice(0, 80));
+  await d.close();
 }
 
 // E. No provisioning function at all.
 {
   const d = await scenario({ nulls: 0, v3: 'missing' });
   const err = await tryExec(d, pin(m014, 'a'.repeat(64)));
-  check('014 refuses without provision_church_v3', /does not exist/.test(err ?? ''));
+  check('014 refuses without provision_church_v3', /no function public\.provision_church_v3 exists/.test(err ?? ''));
+  await d.close();
 }
 
 // F. The deployed overload does not accept what the app sends.
@@ -266,6 +287,7 @@ async function tryExec(d, sql) {
   const err = await tryExec(d, pin(m014, 'a'.repeat(64)));
   check('014 refuses when no overload matches the call site',
     /no overload of provision_church_v3 accepts/.test(err ?? ''), err?.slice(0, 70));
+  await d.close();
 }
 
 // G. Correct signature, pinned, but the body never assigns a passkey.
@@ -274,6 +296,7 @@ async function tryExec(d, sql) {
   const err = await tryExec(d, pin(m014, await fingerprintOf(d)));
   check('014 refuses when the reviewed body never mentions passkey',
     /never mentions passkey/.test(err ?? ''), err?.slice(0, 70));
+  await d.close();
 }
 
 // H. The function changed after review.
@@ -289,6 +312,51 @@ async function tryExec(d, sql) {
   const err = await tryExec(d, pin(m014, reviewed));
   check('014 detects a definition changed after review',
     /changed since review/.test(err ?? ''), err?.slice(0, 70));
+  await d.close();
+}
+
+// K. A procedure sharing the name must not affect the function that is
+//    fingerprinted. (Different signature — PostgreSQL forbids identical ones.)
+{
+  const d = await scenario({ nulls: 0, v3: 'decoyprocedure' });
+  const fp = await fingerprintOf(d);
+  const err = await tryExec(d, pin(m014, fp));
+  check('014 picks the function when a same-named procedure also exists',
+    err === null, err?.slice(0, 90));
+  check('014 still applies the constraint in that case',
+    (await nullable(d)) === 'NO');
+  await d.close();
+}
+
+// L. Only a procedure carries the call-site signature. Prove the filter matters
+//    by showing what the migration would have done without it.
+{
+  const withoutProkind = m014.replace(/\n\s*AND p\.prokind = 'f'/g, '');
+  check('the prokind filter is present in both lookups', withoutProkind !== m014);
+
+  const unfixed = await scenario({ nulls: 0, v3: 'procedureonly' });
+  const procFp = (await unfixed.query(`
+    SELECT encode(sha256(convert_to(pg_get_functiondef(p.oid),'UTF8')),'hex') AS fp
+      FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+     WHERE n.nspname='public' AND p.proname='provision_church_v3'`)).rows[0].fp;
+  const unfixedErr = await tryExec(unfixed, pin(withoutProkind, procFp));
+  // Measured, not assumed: pg_get_function_identity_arguments renders a
+  // procedure's arguments with "IN " prefixes, so the signature lookup could
+  // never have matched one. The gate still held — but it reported that the
+  // *call site* was wrong, which would send an operator hunting a nonexistent
+  // app bug. The filter makes the diagnosis accurate.
+  check('without the filter the gate still holds, but misdiagnoses',
+    unfixedErr !== null && /no overload of provision_church_v3 accepts/.test(unfixedErr),
+    unfixedErr?.slice(0, 70));
+  check('…and therefore reports a call-site mismatch that does not exist',
+    !/no function public\.provision_church_v3 exists/.test(unfixedErr ?? ''));
+
+  const fixed = await scenario({ nulls: 0, v3: 'procedureonly' });
+  const fixedErr = await tryExec(fixed, pin(m014, procFp));
+  check('014 with the filter refuses a procedure-only database',
+    /no function public\.provision_church_v3 exists/.test(fixedErr ?? ''),
+    fixedErr?.slice(0, 80));
+  check('014 leaves passkey nullable in that case', (await nullable(fixed)) === 'YES');
 }
 
 // I. Blank strings are not a usable passkey.
@@ -296,6 +364,7 @@ async function tryExec(d, sql) {
   const d = await scenario({ nulls: 0, blanks: 3 });
   const err = await tryExec(d, pin(m014, await fingerprintOf(d)));
   check('014 refuses on blank (non-NULL) passkeys', /3 church\(es\) have a blank passkey/.test(err ?? ''));
+  await d.close();
 }
 
 // J. Refusal messages must not leak credential values.
@@ -304,6 +373,7 @@ async function tryExec(d, sql) {
   const err = (await tryExec(d, pin(m014, await fingerprintOf(d)))) ?? '';
   check('014 refusal lists slugs, never passkeys',
     /church-0/.test(err) && !/CODE\dXYZ/.test(err), err.slice(0, 50));
+  await d.close();
 }
 
 const failed = results.filter(r => !r.pass);

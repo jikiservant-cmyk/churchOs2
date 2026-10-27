@@ -16,8 +16,10 @@
 --
 --   1. 011 has been applied.
 --   2. Every church has a non-empty passkey (012 ran and was verified).
---   3. Exactly one overload of public.provision_church_v3 matches the argument
---      list the app sends, so the check cannot land on the wrong function.
+--   3. Exactly one *function* overload of public.provision_church_v3 matches
+--      the argument list the app sends, so the check cannot land on the wrong
+--      object. pg_proc also holds procedures, aggregates and window functions
+--      under the same name; both lookups filter p.prokind = 'f'.
 --   4. That overload's deployed text hashes to the fingerprint recorded below,
 --      i.e. it is byte-identical to the definition a human reviewed.
 --
@@ -92,20 +94,28 @@ BEGIN
       v_blank_count, v_blank_slugs;
   END IF;
 
-  -- 3. Exactly one overload with the signature the app calls.
+  -- 3. Exactly one FUNCTION overload with the signature the app calls.
+  --
+  -- p.prokind = 'f' is load-bearing. pg_proc also holds procedures ('p'),
+  -- aggregates ('a') and window functions ('w'), any of which can share this
+  -- name. Without the filter a procedure called provision_church_v3 would
+  -- inflate the count — and min(p.oid) could return the procedure, handing
+  -- pg_get_functiondef the wrong object to fingerprint.
   SELECT count(*) INTO v_overloads
     FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-   WHERE n.nspname = 'public' AND p.proname = 'provision_church_v3';
+   WHERE n.nspname = 'public' AND p.proname = 'provision_church_v3'
+     AND p.prokind = 'f';
 
   IF v_overloads = 0 THEN
     RAISE EXCEPTION
-      'Refusing NOT NULL: public.provision_church_v3 does not exist, so provisioning is already broken. Capture it first (scripts/capture-rpc.mjs).';
+      'Refusing NOT NULL: no function public.provision_church_v3 exists, so provisioning is already broken. Capture it first (scripts/capture-rpc.mjs).';
   END IF;
 
   SELECT count(*), min(p.oid)
     INTO v_overloads, v_oid
     FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
    WHERE n.nspname = 'public' AND p.proname = 'provision_church_v3'
+     AND p.prokind = 'f'
      AND pg_get_function_identity_arguments(p.oid) = v_expected_signature;
 
   IF v_overloads = 0 THEN

@@ -171,10 +171,31 @@ unless all of these hold:
 | 011 applied | `passkey_hash` column exists | `…Apply migrations/011…` |
 | No NULL passkeys | `count(*) WHERE passkey IS NULL` | `…16 church(es) have a NULL passkey (church-0, …)` |
 | No blank passkeys | `trim(passkey) = ''` | `…have a blank passkey…` |
-| Exactly one overload matches the call site | `pg_get_function_identity_arguments` equals `p_user_id uuid, p_name text, p_slug text, p_role text, p_invite_code text` | `…no overload of provision_church_v3 accepts (…)` |
+| Exactly one **function** overload matches the call site | both `pg_proc` lookups filter `p.prokind = 'f'`; `pg_get_function_identity_arguments` equals `p_user_id uuid, p_name text, p_slug text, p_role text, p_invite_code text` | `…no function public.provision_church_v3 exists…` / `…no overload of provision_church_v3 accepts (…)` |
 | The definition was reviewed | sha256 of `pg_get_functiondef` equals the pinned value | `…has changed since review. Pinned …, deployed …` |
 | Nothing pinned yet | the constant is still `'UNREVIEWED'` | `…no reviewed definition pinned. Current deployed fingerprint is sha256:…` |
 | Provisioning exists | `pg_proc` lookup | `…does not exist, so provisioning is already broken…` |
+
+**On `p.prokind = 'f'`** (added after a live preflight): `pg_proc` holds
+procedures, aggregates and window functions alongside functions, so both
+lookups now count functions only. The measured effect is narrower than it looks,
+and worth stating plainly rather than overselling:
+
+* PostgreSQL **forbids** a procedure sharing both name and argument types with a
+  function (`42723`), so the two-identical-signatures case cannot arise.
+* `pg_get_function_identity_arguments` renders a procedure's arguments with
+  `IN ` prefixes (`IN p_user_id uuid, …`), so the signature comparison could
+  never have matched a procedure anyway.
+* Therefore the filter does not change whether the gate passes. It changes the
+  **diagnosis**: with only a procedure named `provision_church_v3` present, the
+  unfiltered version reports *"no overload accepts (…)"* — pointing at the app
+  call site, which is fine — instead of *"no function exists"*, pointing at the
+  real problem. Both refuse; one sends you hunting a bug that isn't there.
+
+It is still the right filter: the first lookup asks "does this function exist",
+and relying on another function's argument-formatting quirk for safety is not a
+contract. Both facts are pinned by tests that run the unfiltered variant and
+assert its misleading message.
 
 **The fingerprint row is the one that matters.** An earlier revision tested
 `prosrc ILIKE '%passkey%'`, which proves only that the word appears somewhere —
@@ -198,7 +219,7 @@ Rotation is the other write path and is verified in code, not SQL —
 
 Inside the `BEGIN…COMMIT`, so a refusal rolls back cleanly and changes nothing.
 
-### Verified behaviour (`npm run test:sql`, 38 checks)
+### Verified behaviour (`npm run test:sql`, 45 checks)
 
 ```
 PASS  014 refuses before the backfill — 16 church(es) have a NULL passkey
@@ -234,6 +255,15 @@ SELECT slug, passkey FROM church.churches ORDER BY slug;
 ```
 
 ---
+
+### Known limitation
+
+`pg_get_functiondef` covers `SECURITY DEFINER` and `SET search_path` — they are
+part of the definition text — but **not the ACL**. Re-granting `EXECUTE` on
+`provision_church_v3` to `anon` would not change the fingerprint. That is worth
+a separate look during the review: a `SECURITY DEFINER` provisioning function
+executable by `anon` is a different class of problem from whether it assigns a
+passkey.
 
 ## Current live state (as reported)
 
