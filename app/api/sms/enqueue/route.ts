@@ -12,7 +12,7 @@ import { dispatchSmsQueueItems } from '@/lib/sms-dispatch';
 import { normalizeUgPhone } from '@/lib/utils';
 import { readBoundedJson } from '@/lib/http/read-json';
 import { checkRateLimit } from '@/lib/security/rate-limit';
-import { isSameOriginRequest } from '@/lib/auth-security';
+import { isSameOriginRequestForHeaders } from '@/lib/auth-security';
 import { isSmsWithinSegmentLimit, smsSegmentCount } from '@/supabase/functions/_shared/sms-length';
 
 const MAX_REQUEST_BYTES = 64 * 1024;
@@ -21,7 +21,7 @@ const MAX_SMS_CHARACTERS = 500;
 
 export async function POST(req: Request) {
   try {
-    if (!isSameOriginRequest(req.url, req.headers.get('origin'))) {
+    if (!isSameOriginRequestForHeaders(req.headers.get('origin'), req.headers)) {
       return NextResponse.json({ error: 'Cross-origin request denied.' }, { status: 403 });
     }
     const parsed = await readBoundedJson<unknown>(req, MAX_REQUEST_BYTES);

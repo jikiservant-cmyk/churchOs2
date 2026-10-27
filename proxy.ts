@@ -1,6 +1,6 @@
 import { createServerClient } from '@supabase/ssr';
 import { NextResponse, type NextRequest } from 'next/server';
-import { isSameOriginRequest } from '@/lib/auth-security';
+import { isSameOriginRequestForHeaders, publicUrlFor } from '@/lib/auth-security';
 
 const SERVER_TO_SERVER_ENDPOINTS = new Set([
   '/api/sms/process-queue',
@@ -21,7 +21,7 @@ export async function proxy(request: NextRequest) {
   if (isApiMutation && !isTrustedServerEndpoint) {
     const origin = request.headers.get('origin');
     const fetchSite = request.headers.get('sec-fetch-site');
-    if (!isSameOriginRequest(request.url, origin) || fetchSite === 'cross-site') {
+    if (!isSameOriginRequestForHeaders(origin, request.headers) || fetchSite === 'cross-site') {
       return NextResponse.json({ error: 'Cross-origin request blocked' }, { status: 403 });
     }
   }
@@ -61,14 +61,14 @@ export async function proxy(request: NextRequest) {
     if (error) throw error;
 
     if (isAdminRoute && !user) {
-      return NextResponse.redirect(new URL('/?error=Session%20Expired', request.url));
+      return NextResponse.redirect(publicUrlFor('/?error=Session%20Expired', request.headers, request.url));
     }
   } catch (error) {
     console.error('Proxy auth verification failed:', error);
     // Fail closed for protected pages and cookie-authenticated mutations when
     // Supabase cannot validate the session. Public reads may still render.
     if (isAdminRoute) {
-      return NextResponse.redirect(new URL('/?error=Session%20Expired', request.url));
+      return NextResponse.redirect(publicUrlFor('/?error=Session%20Expired', request.headers, request.url));
     }
     if (isApiMutation) {
       return NextResponse.json({ error: 'Authentication service unavailable' }, { status: 503 });

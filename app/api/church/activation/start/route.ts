@@ -4,11 +4,11 @@ import { startActivationPayment } from '@/lib/activation';
 import { normalizeUgPhone } from '@/lib/utils';
 import { checkRateLimit } from '@/lib/security/rate-limit';
 import { readBoundedJson } from '@/lib/http/read-json';
-import { isSameOriginRequest } from '@/lib/auth-security';
+import { isSameOriginRequestForHeaders } from '@/lib/auth-security';
 
 export async function POST(req: NextRequest) {
   try {
-    if (!isSameOriginRequest(req.url, req.headers.get('origin'))) {
+    if (!isSameOriginRequestForHeaders(req.headers.get('origin'), req.headers)) {
       return NextResponse.json({ error: 'Cross-origin request denied.' }, { status: 403 });
     }
     const supabase = await createClient();
