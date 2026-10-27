@@ -149,10 +149,18 @@ export function validateContract(name, parsed) {
 const args = process.argv.slice(2);
 const checkMode = args.includes('--check');
 const force = args.includes('--force');
-const withValues = args.includes('--show-values'); // never use on a live dump
 const outIdx = args.indexOf('--out');
 const outPath = outIdx !== -1 ? args[outIdx + 1] : 'migrations/013_provision_church_v3.sql';
-const inputPath = args.find((a, i) => !a.startsWith('--') && i !== outIdx + 1);
+// A fingerprint observed on the live database, e.g. from
+//   SELECT encode(sha256(convert_to(pg_get_functiondef(p.oid),'UTF8')),'hex') ...
+// It answers "is this the function that is deployed?", which is NOT the same
+// question as "has a human read this body?". --expect settles the first only.
+const expectIdx = args.indexOf('--expect');
+const expected = expectIdx !== -1 ? args[expectIdx + 1] : null;
+// Indexes of values belonging to flags; -1 when the flag is absent, so the
+// subtraction below cannot accidentally exclude argument 0.
+const flagValues = [outIdx, expectIdx].filter(i => i !== -1).map(i => i + 1);
+const inputPath = args.find((a, i) => !a.startsWith('--') && !flagValues.includes(i));
 
 const RPC_NAME = 'provision_church_v3';
 
@@ -166,6 +174,10 @@ if (!inputPath) {
 }
 
 if (!existsSync(inputPath)) fail(`Input not found: ${inputPath}`);
+
+if (expected !== null && !/^[0-9a-f]{64}$/.test(expected)) {
+  fail(`--expect must be 64 lowercase hex characters (sha256), got ${expected.length} characters.`);
+}
 
 const raw = readFileSync(inputPath, 'utf8');
 const parsed = extractFunction(raw, RPC_NAME);
@@ -227,6 +239,16 @@ if (blocking.length && !force) {
 
 report(fingerprint);
 
+// Bind the capture to the deployed function before anything is committed.
+if (expected !== null && fingerprint !== expected) {
+  fail(
+    `Refusing to write ${outPath}: this dump is not the deployed function.\n` +
+    `   expected  sha256:${expected}\n` +
+    `   this file sha256:${fingerprint}\n` +
+    `   Re-dump with pg_get_functiondef, or check you captured the right overload.`
+  );
+}
+
 // A definition that does not match the call site must never land in the repo:
 // committing it would replace one silent drift with another.
 if (!contract.ok) {
@@ -250,7 +272,7 @@ const header = `-- 013 — public.${RPC_NAME}, captured from the deployed databa
 --   parameters   ${contract.params?.join(', ')}
 --   writes a readable passkey: ${writesPasskey ? 'yes' : 'NO'}
 --   embedded credentials:     ${blocking.length ? 'FOUND — DO NOT COMMIT' : 'none detected'}
---   sha256 fingerprint:       ${fingerprint}
+--   sha256 fingerprint:       ${fingerprint}${expected !== null ? '\n--   matches the live database: yes' : ''}
 --
 -- Paste this fingerprint into migrations/014_passkey_not_null.sql as
 -- v_expected_fingerprint once you have reviewed the body below.
@@ -258,6 +280,7 @@ const header = `-- 013 — public.${RPC_NAME}, captured from the deployed databa
 `;
 writeFileSync(outPath, header + parsed.statement + '\n');
 console.log(`\n✔ wrote ${outPath}`);
+if (expected !== null) console.log('\n✔ this file is byte-identical to the deployed function.');
 console.log(`\nNext: review the body, then pin it in migrations/014_passkey_not_null.sql:`);
 console.log(`   v_expected_fingerprint CONSTANT text := '${fingerprint}';`);
 console.log(`\nUntil that is filled in, 014 refuses to run.\n`);

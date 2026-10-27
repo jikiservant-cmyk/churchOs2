@@ -60,7 +60,8 @@ function run(files) {
   writeFileSync(input, files.dump);
   let stdout = '', stderr = '', code = 0;
   try {
-    stdout = execFileSync('node', [SCRIPT, input, '--out', out], { encoding: 'utf8', stdio: 'pipe' });
+    stdout = execFileSync('node', [SCRIPT, input, '--out', out, ...(files.args ?? [])],
+      { encoding: 'utf8', stdio: 'pipe' });
   } catch (e) {
     stdout = e.stdout?.toString() ?? '';
     stderr = e.stderr?.toString() ?? '';
@@ -144,6 +145,31 @@ describe('capture-rpc.mjs', () => {
     // …and it must be recorded in the file, so the pin survives a lost terminal.
     assert.ok(r.content.includes(printed[1]), 'written migration does not record the fingerprint');
     assert.match(r.combined, /v_expected_fingerprint CONSTANT text := '[0-9a-f]{64}'/);
+  });
+
+  it('--expect confirms the dump is the deployed function', () => {
+    const live = createHash('sha256').update(GOOD.trim(), 'utf8').digest('hex');
+    const r = run({ dump: GOOD, args: ['--expect', live] });
+    assert.equal(r.code, 0, r.combined);
+    assert.ok(r.wrote);
+    assert.match(r.combined, /byte-identical to the deployed function/);
+    assert.match(r.content, /matches the live database: yes/);
+  });
+
+  it('--expect refuses a dump that is not the deployed function', () => {
+    // A different (e.g. older) capture of the same name and signature.
+    const r = run({ dump: GOOD, args: ['--expect', 'a'.repeat(64)] });
+    assert.notEqual(r.code, 0, 'expected a non-zero exit');
+    assert.equal(r.wrote, false, 'must not write a definition it cannot vouch for');
+    assert.match(r.combined, /not the deployed function/);
+    assert.match(r.combined, /expected  sha256:aaaa/);
+  });
+
+  it('--expect rejects a malformed fingerprint instead of comparing nonsense', () => {
+    const r = run({ dump: GOOD, args: ['--expect', 'not-a-hash'] });
+    assert.notEqual(r.code, 0);
+    assert.equal(r.wrote, false);
+    assert.match(r.combined, /64 lowercase hex characters/);
   });
 
   it('extracts only the target function from a multi-statement dump', () => {

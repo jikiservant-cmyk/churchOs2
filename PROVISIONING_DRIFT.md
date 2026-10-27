@@ -103,6 +103,46 @@ If you want the file committed without the terminal ever showing the body, run
 the capture on your own machine and open a PR from there — the output is a
 normal migration file.
 
+### Bind the capture to the deployed function
+
+A live check confirmed the overload gate matches exactly one
+`public.provision_church_v3`, that `p_invite_code` defaults to `NULL`, and that
+`sha256(bytea)` is available — so the fingerprint comparison in 014 will run.
+
+The sha256 of the deployed definition was observed on 2026-10-27:
+
+```text
+efcfe2af7b9690be07608c1399ef6e21ab91ddbb810ecd0ac81c249ba7e68b44
+```
+
+**This is a fingerprint, not a review.** It was computed without anyone reading
+the body. Do not paste it into `v_expected_fingerprint` — that would let 014
+pass while nobody has confirmed what the function does, which is precisely the
+failure the pin exists to prevent.
+
+What it is good for: proving the file you review is the function that is
+actually deployed. Pass it to the capture:
+
+```bash
+node scripts/capture-rpc.mjs provision_church_v3.def.sql \
+  --out migrations/013_provision_church_v3.sql \
+  --expect efcfe2af7b9690be07608c1399ef6e21ab91ddbb810ecd0ac81c249ba7e68b44
+```
+
+The script refuses to write if the dump hashes to anything else, which catches
+a stale dump, a wrong overload, or a definition edited by hand afterwards. A
+match is recorded in the migration header as `matches the live database: yes`.
+
+Sequence, and it is deliberately two people's work:
+
+1. Capture with `--expect` — proves *which* function, not *what* it does.
+2. Someone reads the body and confirms provisioning sets a passkey and enforces
+   the invite code.
+3. Only then pin the fingerprint into 014.
+
+Any later change to the function changes its hash, and 014 refuses on the old
+pin — so a re-deploy cannot silently inherit a review it never had.
+
 ### Verify the committed copy
 
 ```bash
