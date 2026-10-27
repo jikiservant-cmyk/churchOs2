@@ -256,14 +256,52 @@ SELECT slug, passkey FROM church.churches ORDER BY slug;
 
 ---
 
-### Known limitation
+### Known limitation — the fingerprint does not cover grants
 
-`pg_get_functiondef` covers `SECURITY DEFINER` and `SET search_path` — they are
-part of the definition text — but **not the ACL**. Re-granting `EXECUTE` on
-`provision_church_v3` to `anon` would not change the fingerprint. That is worth
-a separate look during the review: a `SECURITY DEFINER` provisioning function
-executable by `anon` is a different class of problem from whether it assigns a
-passkey.
+`pg_get_functiondef` covers `SECURITY DEFINER` and `SET search_path`, because
+both are part of the definition text. It does **not** cover the ACL. Re-granting
+`EXECUTE` to `anon` leaves the fingerprint unchanged and 014 would still pass.
+
+Review the grants separately. Read-only, no body retrieved:
+
+```sql
+SELECT p.oid::regprocedure::text                                   AS routine,
+       pg_get_userbyid(p.proowner)                                 AS owner,
+       p.prosecdef                                                 AS security_definer,
+       p.proconfig                                                 AS proconfig,
+       coalesce(array_to_string(p.proacl, ' | '),
+                '<default: EXECUTE to PUBLIC>')                    AS raw_acl,
+       has_function_privilege('anon',          p.oid, 'EXECUTE')  AS anon_can_execute,
+       has_function_privilege('authenticated', p.oid, 'EXECUTE')  AS authenticated_can_execute,
+       has_function_privilege('service_role',  p.oid, 'EXECUTE')  AS service_role_can_execute
+  FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+ WHERE n.nspname = 'public' AND p.proname = 'provision_church_v3' AND p.prokind = 'f';
+```
+
+**Why `has_function_privilege` and not just `proacl`:** a raw ACL of
+`<default: EXECUTE to PUBLIC>` means every role — including `anon` — can call
+the function. Verified against PostgreSQL 16:
+
+| State | `raw_acl` | `anon_can_execute` |
+|---|---|---|
+| Default (no REVOKE run) | `<default: EXECUTE to PUBLIC>` | **true** |
+| `REVOKE … FROM PUBLIC, anon` + `GRANT … TO authenticated, service_role` | `authenticated=X \| service_role=X` | false |
+
+**The trap:** revoking from `anon` alone does nothing here. The privilege does
+not come from a grant to `anon`; it is inherited from `PUBLIC`. A partial fix
+that only targets `anon` leaves the function world-callable while looking like
+it was locked down.
+
+`supabase-schema.sql:338` states the intended posture for provisioning —
+`REVOKE EXECUTE … FROM PUBLIC, anon` then `GRANT … TO authenticated,
+service_role` — but that block applies to `v2`. The deployed `v3` may predate
+it.
+
+A `SECURITY DEFINER` provisioning function executable by `anon` is a different
+class of problem from whether it assigns a passkey, which is exactly why it
+cannot be folded into the fingerprint. **Expected good state:** `security_definer
+= true`, `proconfig` pins `search_path`, `anon_can_execute = false`,
+`authenticated_can_execute = true`.
 
 ## Current live state (as reported)
 
