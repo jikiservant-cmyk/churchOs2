@@ -13,7 +13,7 @@ import { isSameOriginRequestForHeaders, publicUrlFor } from '@/lib/auth-security
  * HTML form post, so it functions with JavaScript disabled or before hydration.
  */
 export async function POST(req: Request) {
-  if (!isSameOriginRequestForHeaders(req.headers.get('origin'), req.headers)) {
+  if (!isSameOriginRequestForHeaders(req.headers.get('origin'), req.headers, req.url)) {
     return NextResponse.json({ error: 'Cross-origin request denied.' }, { status: 403 });
   }
 

@@ -71,7 +71,13 @@ describe('authentication boundary helpers', () => {
         `rejects ${origin}`);
     }
 
-    // Missing Host cannot be validated, so it fails closed.
+    // A synthesized Request (tests, internal callers) may carry no Host header
+    // at all; then the request URL is the only origin evidence available.
+    assert.equal(
+      isSameOriginRequestForHeaders('https://church.test', new Headers(), 'https://church.test/api/x'),
+      true,
+    );
+    // With neither headers nor a URL, there is nothing to validate.
     assert.equal(isSameOriginRequestForHeaders('https://church.example', new Headers()), false);
   });
 });

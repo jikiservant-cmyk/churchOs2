@@ -40,9 +40,8 @@ function firstHeaderValue(value: string | null): string | null {
  * Next.js applies to Server Actions. `APP_URL` and `X-Forwarded-Host` are
  * server-controlled additions for proxied deployments.
  */
-export function allowedRequestHosts(headers: Headers): Set<string> {
-  const hosts = new Set<string>();
-  const add = (value: string | null) => {
+export function allowedRequestHosts(headers: Headers, requestUrl?: string): Set<string> {
+  const add = (value: string | null, into: Set<string>) => {
     if (!value) return;
     let host = value;
     try {
@@ -52,13 +51,53 @@ export function allowedRequestHosts(headers: Headers): Set<string> {
       return;
     }
     const normalized = host.trim().toLowerCase();
-    if (normalized) hosts.add(normalized);
+    if (normalized) into.add(normalized);
   };
 
-  add(process.env.APP_URL ?? null);
-  add(firstHeaderValue(headers.get('x-forwarded-host')));
-  add(firstHeaderValue(headers.get('host')));
-  return hosts;
+  // Hosts this request actually arrived on. `Host` is set by the browser and
+  // cannot be forged cross-site; X-Forwarded-Host covers reverse proxies.
+  const requestHosts = new Set<string>();
+  add(firstHeaderValue(headers.get('x-forwarded-host')), requestHosts);
+  add(firstHeaderValue(headers.get('host')), requestHosts);
+
+  // A synthesized Request (tests, internal calls) may carry neither header. In
+  // that case the URL is all we have, and it is not the bind address problem
+  // described above.
+  if (requestHosts.size === 0 && requestUrl) {
+    try {
+      add(new URL(requestUrl).host, requestHosts);
+    } catch {
+      // ignore
+    }
+  }
+
+  // APP_URL is always acceptable, so a deployment behind a rewrites/proxy layer
+  // keeps working even when Host is rewritten to the upstream socket.
+  add(process.env.APP_URL ?? null, requestHosts);
+
+  return requestHosts;
+}
+
+/**
+ * Same-origin check for cookie-authenticated browser mutations, resolved from
+ * headers instead of the internal request URL. Missing/`null` Origins and
+ * non-canonical origin strings are rejected.
+ */
+export function isSameOriginRequestForHeaders(
+  originHeader: string | null,
+  headers: Headers,
+  requestUrl?: string,
+): boolean {
+  if (!originHeader) return false;
+
+  try {
+    const supplied = new URL(originHeader);
+    // Canonical serialized origin only: no path, query, credentials or suffix.
+    if (supplied.origin !== originHeader) return false;
+    return allowedRequestHosts(headers, requestUrl).has(supplied.host.toLowerCase());
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -82,20 +121,3 @@ export function publicUrlFor(pathname: string, headers: Headers, fallbackUrl: st
   return new URL(pathname, fallbackUrl);
 }
 
-/**
- * Same-origin check for cookie-authenticated browser mutations, resolved from
- * headers instead of the internal request URL. Missing/`null` Origins and
- * non-canonical origin strings are rejected.
- */
-export function isSameOriginRequestForHeaders(originHeader: string | null, headers: Headers): boolean {
-  if (!originHeader) return false;
-
-  try {
-    const supplied = new URL(originHeader);
-    // Canonical serialized origin only: no path, query, credentials or suffix.
-    if (supplied.origin !== originHeader) return false;
-    return allowedRequestHosts(headers).has(supplied.host.toLowerCase());
-  } catch {
-    return false;
-  }
-}

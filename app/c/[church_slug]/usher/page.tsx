@@ -14,13 +14,11 @@ export default function UsherEntryPage({ params }: { params: Promise<{ church_sl
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!passkey || passkey.length < 4) return;
+    if (!passkey || passkey.length < 6) return;
 
     setIsLoading(true);
     try {
-      console.log('Attempting login for:', church_slug);
       const result = await validateUsherPasskey(church_slug, passkey);
-      console.log('Login result:', result);
       
       if (result.success) {
         toast.success('Access granted');
@@ -55,7 +53,7 @@ export default function UsherEntryPage({ params }: { params: Promise<{ church_sl
               <KeyRound className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-[#9A7E65] opacity-50" />
               <input
                 type="text"
-                maxLength={12}
+                maxLength={32}
                 value={passkey}
                 onChange={(e) => setPasskey(e.target.value.replace(/[^a-zA-Z0-9_-]/g, '').toUpperCase())}
                 placeholder="PASSKEY"

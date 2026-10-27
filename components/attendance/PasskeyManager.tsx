@@ -30,8 +30,8 @@ export function PasskeyManager({
   };
 
   const handleUpdate = async (newPasskey: string) => {
-    if (newPasskey.length < 4) {
-      toast.error('Passkey must be at least 4 characters');
+    if (newPasskey.length < 6) {
+      toast.error('Passkey must be at least 6 characters');
       return;
     }
 

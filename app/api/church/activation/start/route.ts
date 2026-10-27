@@ -8,7 +8,7 @@ import { isSameOriginRequestForHeaders } from '@/lib/auth-security';
 
 export async function POST(req: NextRequest) {
   try {
-    if (!isSameOriginRequestForHeaders(req.headers.get('origin'), req.headers)) {
+    if (!isSameOriginRequestForHeaders(req.headers.get('origin'), req.headers, req.url)) {
       return NextResponse.json({ error: 'Cross-origin request denied.' }, { status: 403 });
     }
     const supabase = await createClient();

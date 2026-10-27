@@ -13,7 +13,7 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-
 
 export async function POST(req: Request) {
   try {
-    if (!isSameOriginRequestForHeaders(req.headers.get('origin'), req.headers)) {
+    if (!isSameOriginRequestForHeaders(req.headers.get('origin'), req.headers, req.url)) {
       return NextResponse.json({ error: 'Cross-origin request denied.' }, { status: 403 });
     }
     const parsed = await readBoundedJson<unknown>(req, MAX_REQUEST_BYTES);

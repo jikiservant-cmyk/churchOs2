@@ -27,6 +27,11 @@ const CHURCH = {
 };
 
 const MODE = process.env.MOCK_MODE || 'ok'; // 'ok' | 'no-church'
+// 'missing-columns' — the DB was built from this repo: passkey_hash /
+//   passkey_version were never created, so PostgREST answers 42703.
+// 'provisioned'     — provision_tenant set an unknowable random passkey_hash
+//   while `passkey` still holds the readable 6-digit default.
+const SCENARIO = process.env.MOCK_SCENARIO || 'ok';
 
 const log = (...a) => console.log('[mock]', ...a);
 
@@ -50,6 +55,26 @@ const server = http.createServer((req, res) => {
     if (MODE === 'no-church') return send(200, wantsObject ? {} : []);
 
     if (table === 'churches') {
+      if (SCENARIO === 'missing-columns') {
+        const sel = url.searchParams.get('select') || '';
+        for (const col of ['passkey_hash', 'passkey_version', 'passkey_updated_at']) {
+          if (sel.includes(col)) {
+            return send(400, {
+              code: '42703',
+              message: `column church.churches.${col} does not exist`,
+              details: null,
+              hint: null,
+            });
+          }
+        }
+      }
+      if (SCENARIO === 'provisioned') {
+        // Hash of a value nobody knows, exactly like provision_tenant generates.
+        const unknown = crypto.randomBytes(32).toString('hex');
+        return wantsObject
+          ? send(200, { ...CHURCH, passkey: '483920', passkey_hash: unknown, passkey_version: 1 })
+          : send(200, [{ ...CHURCH, passkey: '483920', passkey_hash: unknown, passkey_version: 1 }]);
+      }
       // Honour ?id=eq.<uuid> so the re-bind lookup behaves realistically.
       const idFilter = url.searchParams.get('id');
       const matches = !idFilter || idFilter === `eq.${CHURCH.id}`;

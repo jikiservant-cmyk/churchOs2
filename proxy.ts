@@ -25,7 +25,7 @@ export async function proxy(request: NextRequest) {
   if (isApiMutation && !isTrustedServerEndpoint) {
     const origin = request.headers.get('origin');
     const fetchSite = request.headers.get('sec-fetch-site');
-    if (!isSameOriginRequestForHeaders(origin, request.headers) || fetchSite === 'cross-site') {
+    if (!isSameOriginRequestForHeaders(origin, request.headers, request.url) || fetchSite === 'cross-site') {
       return NextResponse.json({ error: 'Cross-origin request blocked' }, { status: 403 });
     }
   }
