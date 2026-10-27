@@ -5,6 +5,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { PGlite } from '@electric-sql/pglite';
 import { writeFileSync, readFileSync, existsSync, rmSync, mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -76,6 +77,31 @@ function run(files) {
   };
   rmSync(dir, { recursive: true, force: true });
   return result;
+}
+
+// The pin is only usable if its `args` matches pg_get_function_identity_arguments
+// byte for byte. Verified against a real PostgreSQL rather than by inspection,
+// using the three signatures confirmed on the live database.
+async function identityArgsMatches(createSql, argsName) {
+  const db = new PGlite();
+  await db.exec('CREATE SCHEMA IF NOT EXISTS private;');
+  await db.exec(createSql);
+  const { rows } = await db.query(
+    'SELECT pg_get_function_identity_arguments(p.oid) AS a FROM pg_proc p WHERE p.proname = $1',
+    [argsName]);
+  await db.close();
+  return rows[0].a;
+}
+
+function dumpFor({ schema = 'public', name, params }) {
+  return `CREATE OR REPLACE FUNCTION ${schema}.${name}(${params})
+RETURNS uuid LANGUAGE plpgsql SECURITY DEFINER AS $function$
+DECLARE v uuid;
+BEGIN
+  INSERT INTO church.churches (name, slug, passkey) VALUES ('x','y','ABCDEF1234') RETURNING id INTO v;
+  RETURN v;
+END $function$;
+`;
 }
 
 describe('capture-rpc.mjs', () => {
@@ -198,6 +224,73 @@ describe('capture-rpc.mjs', () => {
     assert.notEqual(r.code, 0);
     assert.equal(r.wrote, false);
     assert.match(r.combined, /64 lowercase hex characters/);
+  });
+
+  it('reproduces pg_get_function_identity_arguments for each live signature', async () => {
+    const cases = [
+      {
+        label: 'public.provision_church_v3',
+        schema: 'public', name: 'provision_church_v3',
+        params: 'p_user_id uuid, p_name text, p_slug text, p_role text, p_invite_code text DEFAULT NULL',
+      },
+      {
+        label: 'private.provision_church_v3_impl',
+        schema: 'private', name: 'provision_church_v3_impl',
+        params: 'p_user_id uuid, p_name text, p_slug text, p_role text, p_invite_code text DEFAULT NULL',
+      },
+      {
+        // FOUR arguments on the live database — not the five the repo's v2 declares.
+        label: 'public.provision_church_v2 (live, 4 args)',
+        schema: 'public', name: 'provision_church_v2',
+        params: 'p_user_id uuid, p_name text, p_slug text, p_role text',
+      },
+    ];
+
+    for (const c of cases) {
+      const expected = await identityArgsMatches(
+        `CREATE FUNCTION ${c.schema}.${c.name}(${c.params}) RETURNS uuid LANGUAGE sql AS $f$ SELECT gen_random_uuid() $f$;`,
+        c.name);
+      const r = run({ dump: dumpFor(c), args: ['--rpc', `${c.schema}.${c.name}`] });
+      assert.equal(r.code, 0, `${c.label}: ${r.combined}`);
+      const entry = r.combined.match(/\{"schema":"[^"]+","name":"[^"]+","args":"[^"]*","fingerprint":"[0-9a-f]{64}"\}/);
+      assert.ok(entry, `${c.label}: no pin entry printed`);
+      assert.equal(JSON.parse(entry[0]).args, expected, `${c.label}: args do not round-trip`);
+      assert.equal(JSON.parse(entry[0]).schema, c.schema, `${c.label}: wrong schema in pin`);
+    }
+  });
+
+  it('keeps OUT / INOUT / VARIADIC modes and drops IN, as PostgreSQL does', async () => {
+    const cases = [
+      { name: 'h_out', sql: 'IN a uuid, OUT o integer, IN c text DEFAULT $q$' + 'z' + '$q$'.replace(/\$q\$/g, "'") },
+    ];
+    // Simpler explicit cases, each compared against the database.
+    const shapes = [
+      ['h_inout',   'INOUT x int'],
+      ['h_var',     'a uuid, VARIADIC b int[]'],
+      ['h_mixed',   'OUT o1 int, IN i1 text'],
+      ['h_comma',   "a uuid, b text DEFAULT 'x,y'"],
+    ];
+    for (const [name, params] of shapes) {
+      const expected = await identityArgsMatches(
+        `CREATE FUNCTION public.${name}(${params}) RETURNS int LANGUAGE sql AS $f$ SELECT 1 $f$;`, name);
+      const r = run({ dump: dumpFor({ name, params }), args: ['--rpc', `public.${name}`] });
+      assert.equal(r.code, 0, `${name}: ${r.combined}`);
+      const entry = r.combined.match(/\{"schema":"[^"]+","name":"[^"]+","args":"[^"]*","fingerprint":"[0-9a-f]{64}"\}/);
+      assert.equal(JSON.parse(entry[0]).args, expected, `${name}: expected ${JSON.stringify(expected)}`);
+    }
+  });
+
+  it('distinguishes the live 4-argument v2 from the repo\'s 5-argument v2', async () => {
+    // A stale pin taken from supabase-schema.sql must not silently match.
+    const live = await identityArgsMatches(
+      `CREATE FUNCTION public.provision_church_v2(p_user_id uuid, p_name text, p_slug text, p_role text) RETURNS uuid LANGUAGE sql AS $f$ SELECT gen_random_uuid() $f$;`,
+      'provision_church_v2');
+    const repo = await identityArgsMatches(
+      `CREATE FUNCTION public.provision_church_v2b(p_user_id uuid, p_name text, p_slug text, p_role text, p_ip text DEFAULT NULL) RETURNS uuid LANGUAGE sql AS $f$ SELECT gen_random_uuid() $f$;`,
+      'provision_church_v2b');
+    assert.notEqual(live, repo);
+    assert.equal(live.split(',').length, 4);
+    assert.equal(repo.split(',').length, 5);
   });
 
   it('extracts only the target function from a multi-statement dump', () => {

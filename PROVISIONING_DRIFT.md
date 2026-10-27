@@ -219,7 +219,7 @@ Rotation is the other write path and is verified in code, not SQL —
 
 Inside the `BEGIN…COMMIT`, so a refusal rolls back cleanly and changes nothing.
 
-### Verified behaviour (`npm run test:sql`, 84 checks)
+### Verified behaviour (`npm run test:sql`, 94 checks)
 
 ```
 PASS  014 refuses before the backfill — 16 church(es) have a NULL passkey
@@ -335,6 +335,44 @@ investigation started from, but still a failure. 014 emits an advisory NOTICE
 when a pinned body appears to write NULL to `passkey`, and the distinction is
 covered by tests rather than left to the comment.
 
+### Confirmed live signatures
+
+The three bodies were recaptured and reviewed on the database side. Identity
+arguments, exactly as `pg_get_function_identity_arguments` renders them — these
+are the strings a pin must contain:
+
+```
+public.provision_church_v3      (p_user_id uuid, p_name text, p_slug text, p_role text, p_invite_code text)
+private.provision_church_v3_impl (p_user_id uuid, p_name text, p_slug text, p_role text, p_invite_code text)
+public.provision_church_v2      (p_user_id uuid, p_name text, p_slug text, p_role text)
+```
+
+**The deployed v2 takes four arguments. The repository's v2 declares five** —
+`supabase-schema.sql` adds `p_ip text DEFAULT NULL`. So the repo cannot recreate
+the deployed v2 either, and a pin copied from the schema file will fail with
+`no function matches pinned …`. 014 now reports the signatures that do exist
+when a pin misses, rather than a bare "does not exist":
+
+```
+PASS  014 rejects a pin using the repo's 5-argument v2 signature
+PASS  014 then shows the 4-argument signature that is deployed
+```
+
+Whether the deployed v2 lost `p_ip` deliberately is a separate question; it is
+recorded, not silently reconciled.
+
+Body review confirms: v3 is a thin wrapper; the private helper validates the
+user and optional invite, then calls v2; v2 performs the tenant, church and
+profile inserts. The church insert names neither passkey column, so the default
+installed by 014 is what covers it.
+
+**Caveats from that review, stated plainly:** it was a definition review, not an
+end-to-end signup test, and no database changes were made.
+
+Grants: `authenticated` can execute all three — that is what the app path needs.
+`service_role` has EXECUTE on v2 but **not** on v3 or the private helper. That
+is an admin-tooling inconsistency, not a signup blocker, and it is unchanged.
+
 ### The chain is confirmed from the database side
 
 Live inspection agreed with the repository read:
@@ -379,6 +417,15 @@ PASS  014 detects a changed routine deep in the chain
 `scripts/capture-rpc.mjs --rpc private.provision_church_v3_impl` captures a
 non-`public` routine and prints a ready-to-paste `v_pins` entry, with `args`
 normalised to `pg_get_function_identity_arguments` form so the pin matches.
+
+**That normalisation was wrong and is now measured.** The first version dropped
+`OUT` parameters and every mode prefix. PostgreSQL does neither — `IN` is
+implied and omitted, but `OUT`, `INOUT` and `VARIADIC` are kept, and types are
+canonicalised (`int` comes back as `integer`). For the three deployed signatures
+(all plain `IN`) the old code happened to be right; for any function with an
+`OUT` parameter it would have produced a pin that could never match. The
+behaviour is now tested against a real PostgreSQL and pinned in
+`tests/sql/capture-rpc.test.mjs`, including the exact three live signatures.
 
 ### Known limitation — the fingerprint does not cover grants### Known limitation — the fingerprint does not cover grants
 

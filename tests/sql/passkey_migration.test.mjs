@@ -166,7 +166,8 @@ check('011 text never interpolates a passkey value',
 // insert. 014 pins every routine in that chain rather than the wrapper alone.
 const m014 = readFileSync('migrations/014_passkey_not_null.sql', 'utf8');
 const CALL_SITE_SIG = 'p_user_id uuid, p_name text, p_slug text, p_role text, p_invite_code text';
-const V2_SIG = 'p_user_id uuid, p_name text, p_slug text, p_role text, p_ip text';
+// FOUR arguments on the live database, not the five supabase-schema.sql declares.
+const V2_SIG = 'p_user_id uuid, p_name text, p_slug text, p_role text';
 const IMPL_SIG = CALL_SITE_SIG;
 
 async function scenario({ nulls = 0, total = 18, blanks = 0, chain = 'full' } = {}) {
@@ -187,7 +188,7 @@ async function scenario({ nulls = 0, total = 18, blanks = 0, chain = 'full' } = 
   if (chain !== 'missing') {
     // v2 does the insert and — exactly like the live one — never mentions
     // passkey. NOT NULL without a DEFAULT would make this fail 23502.
-    await d.exec(`CREATE FUNCTION public.provision_church_v2(p_user_id uuid, p_name text, p_slug text, p_role text, p_ip text)
+    await d.exec(`CREATE FUNCTION public.provision_church_v2(p_user_id uuid, p_name text, p_slug text, p_role text)
       RETURNS uuid LANGUAGE plpgsql SECURITY DEFINER SET search_path = ''
       AS $fn$ DECLARE v uuid; BEGIN
         INSERT INTO church.churches (name, slug) VALUES (p_name, p_slug) RETURNING id INTO v;
@@ -197,7 +198,7 @@ async function scenario({ nulls = 0, total = 18, blanks = 0, chain = 'full' } = 
     await d.exec(`CREATE FUNCTION private.provision_church_v3_impl(p_user_id uuid, p_name text, p_slug text, p_role text, p_invite_code text)
       RETURNS uuid LANGUAGE plpgsql SECURITY DEFINER SET search_path = ''
       AS $fn$ BEGIN
-        RETURN public.provision_church_v2(p_user_id, p_name, p_slug, p_role, NULL);
+        RETURN public.provision_church_v2(p_user_id, p_name, p_slug, p_role);
       END $fn$;`);
     await d.exec(`CREATE FUNCTION public.provision_church_v3(p_user_id uuid, p_name text, p_slug text, p_role text, p_invite_code text)
       RETURNS uuid LANGUAGE plpgsql SECURITY INVOKER SET search_path = ''
@@ -209,7 +210,7 @@ async function scenario({ nulls = 0, total = 18, blanks = 0, chain = 'full' } = 
     await d.exec(`CREATE FUNCTION private.provision_church_v3_impl(p_user_id uuid, p_name text, p_slug text, p_role text, p_invite_code text)
       RETURNS uuid LANGUAGE plpgsql SECURITY DEFINER SET search_path = ''
       AS $fn$ BEGIN
-        RETURN public.provision_church_v2(p_user_id, p_name, p_slug, p_role, NULL);
+        RETURN public.provision_church_v2(p_user_id, p_name, p_slug, p_role);
       END $fn$;`);
     await d.exec(`CREATE FUNCTION public.provision_church_v3(p_user_id uuid, p_name text, p_slug text, p_role text, p_invite_code text)
       RETURNS uuid LANGUAGE plpgsql SECURITY INVOKER SET search_path = ''
@@ -339,14 +340,34 @@ async function tryExec(d, sql) {
   await d.close();
 }
 
-// E. A pinned routine that no longer exists.
+// E. A pinned routine that no longer exists at all.
 {
   const d = await scenario({ chain: 'full' });
   const pins = await fullChainPins(d);
   pins.push({ schema: 'public', name: 'provision_church_v9', args: IMPL_SIG, fingerprint: 'a'.repeat(64) });
   const err = await tryExec(d, pinChain(m014, pins));
   check('014 refuses a stale pin for a routine that does not exist',
-    /does not exist/.test(err ?? ''), err?.slice(0, 70));
+    /no function matches pinned/.test(err ?? ''), err?.slice(0, 60));
+  check('…and says so plainly when nothing shares the name',
+    /Existing: none/.test(err ?? ''), err?.slice(-40));
+  await d.close();
+}
+
+// E2. THE live trap: the deployed v2 takes FOUR arguments, the repository's
+//     takes five. A pin copied from supabase-schema.sql must fail, and the
+//     message must show the signature that actually exists.
+{
+  const d = await scenario({ chain: 'full' });
+  const pins = await fullChainPins(d);
+  const v2 = pins.find(p => p.name === 'provision_church_v2');
+  v2.args = 'p_user_id uuid, p_name text, p_slug text, p_role text, p_ip text';
+  const err = await tryExec(d, pinChain(m014, pins));
+  check('014 rejects a pin using the repo\'s 5-argument v2 signature',
+    /no function matches pinned/.test(err ?? ''), err?.slice(0, 60));
+  check('014 then shows the 4-argument signature that is deployed',
+    /public\.provision_church_v2\(p_user_id uuid, p_name text, p_slug text, p_role text\)/.test(err ?? ''),
+    err?.slice(-140));
+  check('014 leaves passkey nullable after a pin miss', (await nullable(d)) === 'YES');
   await d.close();
 }
 

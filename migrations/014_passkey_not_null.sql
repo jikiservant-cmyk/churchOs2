@@ -71,11 +71,16 @@ DECLARE
   -- An empty array means "nothing reviewed", which refuses. Do not populate
   -- this from a fingerprint alone: the point is that a human read each body.
   v_pins CONSTANT jsonb := '[]'::jsonb;
-  -- Example shape (do not uncomment without doing the review):
+  -- Example shape (do not uncomment without doing the review). The signatures
+  -- below are the ones confirmed on the live database — note v2 takes FOUR
+  -- arguments there, not the five the repository's v2 declares. `args` must
+  -- match pg_get_function_identity_arguments byte for byte, so copy whatever
+  -- scripts/capture-rpc.mjs prints rather than editing this block by hand:
+  --
   -- v_pins CONSTANT jsonb := '[
   --   {"schema":"public", "name":"provision_church_v3",      "args":"p_user_id uuid, p_name text, p_slug text, p_role text, p_invite_code text", "fingerprint":"…"},
   --   {"schema":"private","name":"provision_church_v3_impl", "args":"p_user_id uuid, p_name text, p_slug text, p_role text, p_invite_code text", "fingerprint":"…"},
-  --   {"schema":"public", "name":"provision_church_v2",      "args":"p_user_id uuid, p_name text, p_slug text, p_role text, p_ip text", "fingerprint":"…"}
+  --   {"schema":"public", "name":"provision_church_v2",      "args":"p_user_id uuid, p_name text, p_slug text, p_role text", "fingerprint":"…"}
   -- ]'::jsonb;
 
   v_expected_signature CONSTANT text :=
@@ -203,9 +208,19 @@ BEGIN
        AND pg_get_function_identity_arguments(p.oid) = v_args;
 
     IF v_overloads = 0 THEN
+      -- Name the signatures that DO exist. A mismatched pin is otherwise a
+      -- dead end: "does not exist" when the function is right there, differing
+      -- only by a type spelling or an extra argument, is the single most
+      -- confusing way for this gate to fail.
       RAISE EXCEPTION
-        'Refusing NOT NULL: pinned routine %.%(%) does not exist. The chain changed; re-capture and re-review.',
-        v_schema, v_name, v_args;
+        'Refusing NOT NULL: no function matches pinned %(%) in schema %. Existing: %. Copy the exact signature from the capture output rather than editing it by hand.',
+        v_name, v_args, v_schema,
+        coalesce((
+          SELECT string_agg(n.nspname || '.' || p.proname || '(' ||
+                            pg_get_function_identity_arguments(p.oid) || ')', ' | ' ORDER BY 1)
+            FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+           WHERE p.proname = v_name AND p.prokind = 'f'
+        ), 'none');
     END IF;
     IF v_overloads > 1 THEN
       RAISE EXCEPTION

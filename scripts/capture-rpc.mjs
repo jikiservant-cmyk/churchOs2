@@ -121,20 +121,89 @@ function extractFunction(sql, name, schema = 'public') {
   };
 }
 
-// Normalise a dump's parameter list into what pg_get_function_identity_arguments
-// returns, because that is what migrations/014 compares against: `name type`,
-// no DEFAULT, no IN/OUT markers, comma-space separated.
+// Split a parameter list on top-level commas only, so a DEFAULT expression
+// containing a comma (`DEFAULT 'a,b'`, `DEFAULT ARRAY[1,2]`) does not split a
+// parameter in half and silently corrupt the pin.
+function splitParams(params) {
+  const out = [];
+  let depth = 0, quote = null, current = '';
+  for (let i = 0; i < params.length; i++) {
+    const ch = params[i];
+    if (quote) {
+      current += ch;
+      if (ch === quote && params[i - 1] !== '\\') quote = null;
+      continue;
+    }
+    if (ch === "'" || ch === '"') { quote = ch; current += ch; continue; }
+    if (ch === '(' || ch === '[') depth++;
+    if (ch === ')' || ch === ']') depth--;
+    if (ch === ',' && depth === 0) { out.push(current); current = ''; continue; }
+    current += ch;
+  }
+  if (current.trim()) out.push(current);
+  return out;
+}
+
+// Normalise a dump's parameter list into exactly what
+// pg_get_function_identity_arguments returns, because that is what
+// migrations/014 compares against.
+//
+// Measured against PostgreSQL 16 rather than assumed:
+//
+//   (p_user_id uuid, p_invite_code text DEFAULT NULL) -> "p_user_id uuid, p_invite_code text"
+//   (INOUT x int)                                     -> "INOUT x integer"
+//   (a uuid, VARIADIC b int[])                        -> "a uuid, VARIADIC b integer[]"
+//   (OUT o1 int, IN i1 text DEFAULT 'z')               -> "OUT o1 integer, i1 text"
+//
+// So: IN is dropped (it is implied), OUT / INOUT / VARIADIC are KEPT, and any
+// DEFAULT clause is removed. An earlier revision dropped OUT parameters and all
+// mode prefixes; for the three deployed provisioning signatures — all plain IN
+// — it happened to be right, but it would have emitted an unmatchable pin for
+// any function with an OUT parameter.
+// PostgreSQL reports canonical type names: `int` comes back as `integer`.
+// A dump from pg_get_functiondef is already canonical, so this map only matters
+// for a hand-written or reformatted one — but a pin with `int` instead of
+// `integer` fails at 014 as "routine does not exist", which is a bad error for
+// a cosmetic difference.
+const TYPE_ALIASES = {
+  int: 'integer', int4: 'integer',
+  int2: 'smallint', int8: 'bigint',
+  bool: 'boolean',
+  float4: 'real', float8: 'double precision',
+  decimal: 'numeric',
+  varchar: 'character varying', char: 'character',
+  timestamptz: 'timestamp with time zone',
+  timestamp: 'timestamp without time zone',
+  timetz: 'time with time zone',
+  time: 'time without time zone',
+  varbit: 'bit varying',
+};
+
+function canonicalType(type) {
+  const m = type.trim().match(/^(.*?)(\[\])?$/);
+  const base = m[1].toLowerCase().split(/[\s(]/)[0];
+  const mapped = TYPE_ALIASES[base];
+  if (!mapped) return type.trim();
+  // Preserve any modifier, e.g. varchar(50) -> character varying(50).
+  const rest = type.trim().slice(base.length);
+  return `${mapped}${rest}`;
+}
+
 function identityArgs(params) {
-  return params
-    .split(',')
+  return splitParams(params)
     .map(p => p.trim())
     .filter(Boolean)
-    .filter(p => !/^OUT\b/i.test(p))              // identity args exclude OUT params
-    .map(p => p
-      .replace(/\s+DEFAULT\s+[\s\S]*$/i, '')      // drop the default expression
-      .replace(/^(IN|INOUT|OUT)\s+/i, '')
-      .replace(/\s+/g, ' ')
-      .trim())
+    .map(p => {
+      const stripped = p
+        .replace(/\s+DEFAULT\s+[\s\S]*$/i, '')   // drop the default expression
+        .replace(/^IN\s+/i, '')                    // IN is implied, PostgreSQL omits it
+        .replace(/\s+/g, ' ')
+        .trim();
+      const m = stripped.match(/^(?:(INOUT|OUT|VARIADIC)\s+)?(\S+)\s+([\s\S]+)$/);
+      if (!m) return stripped;
+      const [, mode, name, type] = m;
+      return `${mode ? mode + ' ' : ''}${name} ${canonicalType(type)}`;
+    })
     .join(', ');
 }
 
