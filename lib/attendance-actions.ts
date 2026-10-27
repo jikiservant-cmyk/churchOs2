@@ -467,7 +467,15 @@ export async function updateChurchPasskey(churchId: string, newPasskey: string, 
 
     const nextVersion = (church?.passkey_version || 1) + 1;
 
-    // F-04 & F-08 remediation: store hash, wipe plaintext, bump version to invalidate existing usher JWT sessions immediately
+    // F-04 & F-08 remediation: store the hash, keep the readable code, and bump
+    // the version to invalidate existing usher JWT sessions immediately.
+    //
+    // The readable copy is NOT wiped. It is a shared code displayed on the admin
+    // screen and handed to ushers, not a per-user secret; removing it left the
+    // pastor staring at an empty field unable to tell anyone the new code.
+    //
+    // This must never write `passkey: null`. Once the column is NOT NULL, an
+    // explicit NULL fails with 23502 — a DEFAULT does not apply to it.
     const { error } = await adminSupabase
       .schema('church')
       .from('churches')

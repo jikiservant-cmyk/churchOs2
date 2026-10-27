@@ -335,6 +335,27 @@ investigation started from, but still a failure. 014 emits an advisory NOTICE
 when a pinned body appears to write NULL to `passkey`, and the distinction is
 covered by tests rather than left to the comment.
 
+### The chain is confirmed from the database side
+
+Live inspection agreed with the repository read:
+
+```
+public.provision_church_v3            (wrapper, invoker)  -> delegates
+  private.provision_church_v3_impl    (SECURITY DEFINER)  -> delegates
+    public.provision_church_v2        (SECURITY DEFINER)  -> INSERT, names no passkey column
+```
+
+v2 inserts the church without naming `passkey` or `passkey_hash`, which is the
+**omitted-column** case the default covers — not the explicit-NULL case it
+doesn't. So the `DEFAULT` installed by 014 is load-bearing for every future
+church, and rotation is the path that must never write `null`
+(`updateChurchPasskey` writes `passkey: trimmedKey`).
+
+That is now enforced rather than documented: `tests/passkey-write-invariants.test.ts`
+fails the build if any application code writes `passkey: null` or
+`passkey = null`. Verified by injecting exactly that change — two assertions
+fire — so the guard is not vacuous.
+
 ### The pin now covers the chain
 
 The earlier pin attested to `public.provision_church_v3` — a wrapper that
