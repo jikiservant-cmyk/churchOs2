@@ -219,7 +219,7 @@ Rotation is the other write path and is verified in code, not SQL —
 
 Inside the `BEGIN…COMMIT`, so a refusal rolls back cleanly and changes nothing.
 
-### Verified behaviour (`npm run test:sql`, 80 checks)
+### Verified behaviour (`npm run test:sql`, 84 checks)
 
 ```
 PASS  014 refuses before the backfill — 16 church(es) have a NULL passkey
@@ -311,9 +311,29 @@ is now handled structurally rather than by asking the body to change:
 
 **014 installs the column DEFAULT before setting NOT NULL.** With
 `DEFAULT upper(substr(replace(gen_random_uuid()::text,'-',''),1,10))` in place,
-any insert that omits `passkey` — including v2's — gets a fresh random code.
+an insert that omits `passkey` — including v2's — gets a fresh random code.
 `supabase-schema.sql` already declares exactly this default; the live column
 simply does not have it yet.
+
+**A default is not a NULL guard.** It applies to an omitted column, not to a
+`NULL` written explicitly. Measured on PG 16:
+
+| Insert | Result |
+|---|---|
+| `INSERT (id)` | default applied |
+| `INSERT (id, p) VALUES (id, DEFAULT)` | default applied |
+| `INSERT (id, p) VALUES (id, 'MINE')` | value kept |
+| `INSERT (id, p) VALUES (id, NULL)` | `23502` — default **not** applied |
+| `INSERT (id, p) VALUES (id, NULL::text)` | `23502` |
+
+The deployed v2 was reported to set neither column, which is the omission case
+and is covered. But "the column has a default" must not be read as "no write
+path can fail": a chain that later writes `passkey = NULL` — which is exactly
+what `updateChurchPasskey` did before it was fixed — hits `23502` instead of
+silently blanking the field. That is a better failure than the one this whole
+investigation started from, but still a failure. 014 emits an advisory NOTICE
+when a pinned body appears to write NULL to `passkey`, and the distinction is
+covered by tests rather than left to the comment.
 
 ### The pin now covers the chain
 

@@ -283,6 +283,29 @@ async function tryExec(d, sql) {
   const created = (await d.query(`SELECT passkey FROM church.churches WHERE slug='new-church'`)).rows[0];
   check('the generated code satisfies the portal validator',
     /^[A-Za-z0-9_-]{6,32}$/.test(created?.passkey ?? ''), `length ${created?.passkey?.length}`);
+
+  // A DEFAULT covers an omitted column, not an explicit NULL. Encode the whole
+  // matrix so no future reader concludes the default makes NULL safe.
+  const tryInsert = async (label, sql) => {
+    try { await d.query(sql); return null; } catch (e) { return `${e.code ?? ''}`; }
+  };
+  check('DEFAULT keyword gets a generated code',
+    (await tryInsert('d', `INSERT INTO church.churches (name, slug, passkey) VALUES ('D','d-default','PLACEHOLDER')`) === null));
+  await d.query(`UPDATE church.churches SET passkey = DEFAULT WHERE slug='d-default'`);
+  const dflt = (await d.query(`SELECT passkey FROM church.churches WHERE slug='d-default'`)).rows[0].passkey;
+  check('UPDATE … SET passkey = DEFAULT yields a valid code',
+    /^[A-Za-z0-9_-]{6,32}$/.test(dflt ?? ''), String(dflt));
+
+  const nullErr = await tryInsert('n', `INSERT INTO church.churches (name, slug, passkey) VALUES ('N','n-null', NULL)`);
+  check('an explicit NULL is still rejected (23502) — the default does not apply',
+    nullErr === '23502', `got ${nullErr ?? 'success'}`);
+
+  const castNullErr = await tryInsert('c', `INSERT INTO church.churches (name, slug, passkey) VALUES ('N2','n-null2', NULL::text)`);
+  check('…and NULL::text is rejected too', castNullErr === '23502', `got ${castNullErr ?? 'success'}`);
+
+  const explicit = await tryInsert('e', `INSERT INTO church.churches (name, slug, passkey) VALUES ('E','e-explicit','MYCODE123')`);
+  check('an explicit value is kept, never overwritten by the default',
+    explicit === null && (await d.query(`SELECT passkey FROM church.churches WHERE slug='e-explicit'`)).rows[0].passkey === 'MYCODE123');
   await d.close();
 }
 
