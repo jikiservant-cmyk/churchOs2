@@ -31,6 +31,9 @@ const MODE = process.env.MOCK_MODE || 'ok'; // 'ok' | 'no-church'
 //   passkey_version were never created, so PostgREST answers 42703.
 // 'provisioned'     — provision_tenant set an unknowable random passkey_hash
 //   while `passkey` still holds the readable 6-digit default.
+// 'backfilled'      — the state after 011 + 012: the hash columns exist but
+//   every hash is NULL, and `passkey` holds a 10-hex code from the backfill.
+//   This is what production looks like now, and nothing had tested against it.
 const SCENARIO = process.env.MOCK_SCENARIO || 'ok';
 
 const log = (...a) => console.log('[mock]', ...a);
@@ -67,6 +70,12 @@ const server = http.createServer((req, res) => {
             });
           }
         }
+      }
+      if (SCENARIO === 'backfilled') {
+        // 011 applied (columns exist, hashes empty) + 012 applied (10-hex code).
+        const row = { ...CHURCH, passkey: 'A3E5397FAC', passkey_hash: null, passkey_version: 1,
+                      passkey_updated_at: new Date().toISOString() };
+        return wantsObject ? send(200, row) : send(200, [row]);
       }
       if (SCENARIO === 'provisioned') {
         // Hash of a value nobody knows, exactly like provision_tenant generates.

@@ -13,13 +13,32 @@ import { CHURCH_ADMIN_ROLES, hasAllowedRole } from './auth-security';
 
 import crypto from 'crypto';
 
+// Returns a human-readable reason when the usher secret is unusable, or null.
+// The login path checks this explicitly so a misconfiguration is reported as a
+// misconfiguration instead of falling through to the generic catch below —
+// which is what it used to do, and which reads as a network blip.
+function usherSecretProblem(): string | null {
+  const jwtSecretValue = process.env.USHER_JWT_SECRET;
+  if (!jwtSecretValue) {
+    return 'USHER_JWT_SECRET is not set. Usher sessions are disabled until it is.';
+  }
+  if (jwtSecretValue === 'REPLACE_ME_WITH_A_STRONG_RANDOM_SECRET') {
+    return 'USHER_JWT_SECRET is still the placeholder value. Set a real 32+ byte secret.';
+  }
+  if (Buffer.byteLength(jwtSecretValue) < 32) {
+    return `USHER_JWT_SECRET is ${Buffer.byteLength(jwtSecretValue)} bytes; at least 32 are required.`;
+  }
+  return null;
+}
+
 function getJwtSecret(): Uint8Array {
   // F-04: no silent fallback to the service-role key. A dedicated secret is now
   // mandatory, which is what makes rotation and revocation auditable.
-  const jwtSecretValue = process.env.USHER_JWT_SECRET;
-  if (!jwtSecretValue || jwtSecretValue === 'REPLACE_ME_WITH_A_STRONG_RANDOM_SECRET' || Buffer.byteLength(jwtSecretValue) < 32) {
-    throw new Error('USHER_JWT_SECRET is not configured. Usher sessions are disabled until it is set.');
+  const problem = usherSecretProblem();
+  if (problem) {
+    throw new Error(problem);
   }
+  const jwtSecretValue = process.env.USHER_JWT_SECRET!;
   // Domain-separate the usher secret to prevent raw key reuse
   const derivedSecret = crypto.createHmac('sha256', 'usher_jwt_domain_separation').update(jwtSecretValue).digest();
   return derivedSecret;
@@ -114,6 +133,17 @@ export async function validateUsherPasskey(churchSlug: string, passkey: string) 
     const providedPasskey = (passkey || '').trim();
     if (!providedPasskey || providedPasskey.length < 6 || providedPasskey.length > 32 || !/^[A-Za-z0-9_-]+$/.test(providedPasskey)) {
       return { success: false, error: 'Invalid passkey format.' };
+    }
+
+    // Now that the passkey columns exist, this is the most likely next failure
+    // on a fresh deployment. Name it rather than reporting a generic error.
+    const secretProblem = usherSecretProblem();
+    if (secretProblem) {
+      console.error('[validateUsherPasskey] Usher secret unusable:', secretProblem);
+      return {
+        success: false,
+        error: `Usher login is misconfigured: ${secretProblem} An administrator must set USHER_JWT_SECRET (32+ bytes) in the environment.`,
+      };
     }
 
     const providedHash = computePasskeyHash(providedPasskey);
