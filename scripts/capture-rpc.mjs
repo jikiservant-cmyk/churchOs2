@@ -89,9 +89,11 @@ function redact(sql) {
 }
 
 // ── Extract a single function statement from a possibly multi-statement dump.
-function extractFunction(sql, name) {
+function extractFunction(sql, name, schema = 'public') {
+  // Match the schema explicitly when one was given, else accept any/none.
+  const qualifier = schema ? `${schema}\\.` : '(?:[a-z_][a-z0-9_]*\\.)?';
   const head = new RegExp(
-    `CREATE\\s+(?:OR\\s+REPLACE\\s+)?FUNCTION\\s+(?:public\\.)?${name}\\s*\\(`, 'i');
+    `CREATE\\s+(?:OR\\s+REPLACE\\s+)?FUNCTION\\s+${qualifier}${name}\\s*\\(`, 'i');
   const start = sql.search(head);
   if (start === -1) return null;
 
@@ -117,6 +119,23 @@ function extractFunction(sql, name) {
     params: sql.slice(sql.indexOf('(', start) + 1, argsEnd),
     body: sql.slice(tagStart + tag.length, tagEnd),
   };
+}
+
+// Normalise a dump's parameter list into what pg_get_function_identity_arguments
+// returns, because that is what migrations/014 compares against: `name type`,
+// no DEFAULT, no IN/OUT markers, comma-space separated.
+function identityArgs(params) {
+  return params
+    .split(',')
+    .map(p => p.trim())
+    .filter(Boolean)
+    .filter(p => !/^OUT\b/i.test(p))              // identity args exclude OUT params
+    .map(p => p
+      .replace(/\s+DEFAULT\s+[\s\S]*$/i, '')      // drop the default expression
+      .replace(/^(IN|INOUT|OUT)\s+/i, '')
+      .replace(/\s+/g, ' ')
+      .trim())
+    .join(', ');
 }
 
 function parseParamNames(params) {
@@ -156,13 +175,21 @@ const outPath = outIdx !== -1 ? args[outIdx + 1] : 'migrations/013_provision_chu
 // It answers "is this the function that is deployed?", which is NOT the same
 // question as "has a human read this body?". --expect settles the first only.
 const expectIdx = args.indexOf('--expect');
+const rpcIdx = args.indexOf('--rpc');
 const expected = expectIdx !== -1 ? args[expectIdx + 1] : null;
 // Indexes of values belonging to flags; -1 when the flag is absent, so the
 // subtraction below cannot accidentally exclude argument 0.
-const flagValues = [outIdx, expectIdx].filter(i => i !== -1).map(i => i + 1);
+const flagValues = [outIdx, expectIdx, rpcIdx].filter(i => i !== -1).map(i => i + 1);
 const inputPath = args.find((a, i) => !a.startsWith('--') && !flagValues.includes(i));
 
-const RPC_NAME = 'provision_church_v3';
+// Targets may be schema-qualified, because the provisioning chain is not all
+// in `public`: on the live database it is
+//   public.provision_church_v3 -> private.provision_church_v3_impl -> public.provision_church_v2
+// and a pin that covers less than the whole chain attests to the wrong thing.
+const targetSpec = rpcIdx !== -1 ? args[rpcIdx + 1] : 'public.provision_church_v3';
+const [TARGET_SCHEMA, RPC_NAME] = targetSpec.includes('.')
+  ? targetSpec.split('.')
+  : ['public', targetSpec];
 
 function fail(msg) {
   console.error(`\n✖ ${msg}\n`);
@@ -180,8 +207,8 @@ if (expected !== null && !/^[0-9a-f]{64}$/.test(expected)) {
 }
 
 const raw = readFileSync(inputPath, 'utf8');
-const parsed = extractFunction(raw, RPC_NAME);
-if (!parsed) fail(`No CREATE FUNCTION public.${RPC_NAME} found in ${basename(inputPath)}.`);
+const parsed = extractFunction(raw, RPC_NAME, TARGET_SCHEMA);
+if (!parsed) fail(`No CREATE FUNCTION ${TARGET_SCHEMA}.${RPC_NAME} found in ${basename(inputPath)}.`);
 
 const scanText = checkMode ? raw : parsed.statement;
 const findings = scanSecrets(scanText);
@@ -201,10 +228,15 @@ function fingerprintOf(statement) {
 
 function report(fingerprint) {
   if (fingerprint) console.log(`Fingerprint  sha256:${fingerprint}`);
-  console.log(`\nRPC          public.${RPC_NAME}`);
-  console.log(`Parameters   ${contract.params?.join(', ') ?? '?'}`);
+  console.log(`\nRPC          ${TARGET_SCHEMA}.${RPC_NAME}`);
+  const args = identityArgs(parsed.params);
+  console.log(`Parameters   ${args || '(none)'}`);
   console.log(`Writes passkey  ${writesPasskey ? 'yes' : 'NO — passkey NOT NULL cannot be enforced until this is fixed'}`);
-  console.log(`Contract     ${contract.ok ? 'matches the call site' : 'MISMATCH'}`);
+  if (!contract.contract) {
+    console.log('Contract     no contract for this routine — it is reviewed as part of the chain, not on its own');
+  } else {
+    console.log(`Contract     ${contract.ok ? 'matches the call site' : 'MISMATCH'}`);
+  }
   for (const p of contract.problems ?? []) console.log(`   ✖ ${p}`);
 
   if (findings.length === 0) {
@@ -259,7 +291,7 @@ if (!contract.ok) {
   );
 }
 
-const header = `-- 013 — public.${RPC_NAME}, captured from the deployed database.
+const header = `-- 013 — ${TARGET_SCHEMA}.${RPC_NAME}, captured from the deployed database.
 --
 -- The application has always called this function (lib/provision-actions.ts),
 -- but the repository only ever defined provision_church_v2. A database rebuilt
@@ -281,6 +313,12 @@ const header = `-- 013 — public.${RPC_NAME}, captured from the deployed databa
 writeFileSync(outPath, header + parsed.statement + '\n');
 console.log(`\n✔ wrote ${outPath}`);
 if (expected !== null) console.log('\n✔ this file is byte-identical to the deployed function.');
-console.log(`\nNext: review the body, then pin it in migrations/014_passkey_not_null.sql:`);
-console.log(`   v_expected_fingerprint CONSTANT text := '${fingerprint}';`);
-console.log(`\nUntil that is filled in, 014 refuses to run.\n`);
+console.log(`\nNext: review the body, then add this entry to v_pins in migrations/014_passkey_not_null.sql:`);
+console.log(`   ${JSON.stringify({
+  schema: TARGET_SCHEMA,
+  name: RPC_NAME,
+  args: identityArgs(parsed.params),
+  fingerprint,
+})}`);
+console.log(`\n014 pins every routine on the church-insert path and refuses if a pinned`);
+console.log(`body calls one that was not pinned. Capture the whole chain.\n`);

@@ -219,7 +219,7 @@ Rotation is the other write path and is verified in code, not SQL —
 
 Inside the `BEGIN…COMMIT`, so a refusal rolls back cleanly and changes nothing.
 
-### Verified behaviour (`npm run test:sql`, 61 checks)
+### Verified behaviour (`npm run test:sql`, 80 checks)
 
 ```
 PASS  014 refuses before the backfill — 16 church(es) have a NULL passkey
@@ -256,120 +256,90 @@ SELECT slug, passkey FROM church.churches ORDER BY slug;
 
 ---
 
-### Observed ACL, and why it is a bug rather than a policy choice
+### CORRECTION — my "signup is broken" conclusion was wrong
 
-The live preflight returned, for `public.provision_church_v3(uuid,text,text,text,text)`:
+I claimed that `prosecdef = false` on `public.provision_church_v3` meant church
+signup was failing at RLS. **That was wrong, and the analysis behind it was
+incomplete.**
 
-| Property | Observed | Repo intent (`supabase-schema.sql`) |
+The deployed routine is a thin **invoker wrapper**. It delegates to
+`private.provision_church_v3_impl`, which is **SECURITY DEFINER**, which calls
+`public.provision_church_v2`, also **SECURITY DEFINER**. Both are owned by
+`postgres`, which holds **BYPASSRLS**. The insert therefore runs with the
+owner's privileges and RLS is never consulted.
+
+The mistake was methodological: I read one routine's attribute and reasoned
+about the whole path. `prosecdef` on a wrapper says nothing about what the
+wrapper calls. `tests/sql/provisioning-invariant.test.mjs` still models what
+would happen *if* the chain were flattened to invoker-only — that remains a
+useful refactor guard — but it is explicitly labelled hypothetical now, and it
+is not a statement about the deployment.
+
+Signup is not known to be broken. The live end-to-end test could not be run
+either: there are **zero existing auth users without an admin profile**, so
+there is no first-time signup case to exercise.
+
+### What the ACL still tells us
+
+| Property | Observed | Reading |
 |---|---|---|
-| `prosecdef` | **false** | `SECURITY DEFINER` (v2, line ~197) |
-| `search_path` | `""` (empty) | `public, church, auth` (v2) |
-| `anon` EXECUTE | no | no — matches |
-| `authenticated` EXECUTE | yes | yes — matches |
-| `service_role` EXECUTE | **no** | yes (v2 line ~339) |
+| `public.provision_church_v3` `prosecdef` | false | fine — it is a wrapper; the DEFINER hop is one level down |
+| `private.provision_church_v3_impl` | SECURITY DEFINER, owned by `postgres` | this is where privilege actually changes |
+| `public.provision_church_v2` | SECURITY DEFINER, owned by `postgres` | performs the insert |
+| owner `postgres` | `BYPASSRLS` | RLS is not a barrier on this path |
+| `anon` EXECUTE | no | correct |
+| `authenticated` EXECUTE | yes | correct — the app calls with the user's token |
+| `service_role` EXECUTE | no | inconsistent with the repo's declared grants; breaks admin tooling, not signup |
 
-`service_role` lacking EXECUTE is **survivable**: `lib/provision-actions.ts:133`
-calls `supabase.rpc('provision_church_v3', …)` where `supabase` comes from
-`createClient()` (line 54) — the user-scoped client, so the call runs as
-`authenticated`. The admin client at line 55 is used only for lookups. Nothing
-on the provisioning path needs `service_role`. It is still inconsistent, and it
-would break any server-side admin tooling that tries to provision.
+So the grants are in reasonable shape. The remaining oddity is `service_role`,
+which nothing on the signup path needs.
 
-`SECURITY DEFINER` being **off is not survivable.** A SECURITY INVOKER function
-runs with the caller's privileges, so each of its writes must satisfy RLS for
-`authenticated`. The declared policies give that role:
+### The finding that actually blocks 014
 
-* `public.tenants` — **SELECT only** (FOR ALL belongs to `service_role`)
-* `public.admin_profiles` — **SELECT only** (FOR ALL belongs to `service_role`)
-* `church.churches` — FOR ALL, but `WITH CHECK (id = church.my_tenant_id())`
+**`public.provision_church_v2` inserts into `church.churches` without setting
+`passkey` or `passkey_hash`, and no trigger fills them.**
 
-`church.my_tenant_id()` reads `public.admin_profiles` for `auth.uid()`. A user
-who is registering has no profile row yet, so it returns NULL, so `id = NULL`
-is NULL, so the check fails. That is the chicken-and-egg at the centre of
-provisioning: it must create the profile and the church before the user is
-entitled to either.
-
-**Reproduced against PostgreSQL 16** — `tests/sql/provisioning-invariant.test.mjs`:
+Measured on PostgreSQL 16:
 
 ```
-ok  SECURITY INVOKER is rejected by RLS before it can create anything
-    new row violates row-level security policy for table "churches"
-ok  the first blocked write is the tenant, so no partial church is created
-ok  SECURITY DEFINER is the only mode that completes
-ok  an empty search_path breaks any unqualified reference
-    relation "churches" does not exist
-ok  a fully-qualified body works under search_path = ''
+passkey NOT NULL + DEFAULT, insert (name, slug)  ->  33D5C1F52E   (succeeds)
+passkey NOT NULL, no DEFAULT, same insert        ->  23502: null value in column "passkey" violates not-null constraint
 ```
 
-Conclusion: **church signup is failing on the live deployment.** The failure
-surfaces in the app as *"Church setup could not be completed. Check the invite
-code or try again."* (`lib/provision-actions.ts`), which points at the invite
-code rather than at a privilege problem.
+So the naive 014 would have converted every future signup into a `23502`. That
+is now handled structurally rather than by asking the body to change:
 
-The empty `search_path` is itself defensible — `SET search_path = ''` is the
-recommended hardening, because it forces fully qualified references and blocks
-search-path injection. It only works if the body qualifies every object. Under
-SECURITY DEFINER that is a correctness detail; combined with SECURITY INVOKER it
-is moot, because the function never gets far enough to hit a missing relation.
+**014 installs the column DEFAULT before setting NOT NULL.** With
+`DEFAULT upper(substr(replace(gen_random_uuid()::text,'-',''),1,10))` in place,
+any insert that omits `passkey` — including v2's — gets a fresh random code.
+`supabase-schema.sql` already declares exactly this default; the live column
+simply does not have it yet.
 
-**So the answer to "is it intentional?" is no, or at least not coherently.**
-Nobody chooses a provisioning function that cannot provision. Two candidate
-causes, and the body review will distinguish them:
+### The pin now covers the chain
 
-1. It was created without `SECURITY DEFINER` and has never worked since.
-2. It was recently altered (e.g. by a migration that rewrote it, or a schema
-   restore that dropped the attribute), and signups broke at that moment.
+The earlier pin attested to `public.provision_church_v3` — a wrapper that
+contains no insert at all. A change to the private helper or to v2 would not
+have changed it. 014 now:
 
-### How the reviewer confirms it
+* takes a `v_pins` array of `{schema, name, args, fingerprint}` entries and
+  verifies each one against `pg_get_functiondef`;
+* **walks the chain transitively**: if a pinned body references a routine that
+  is not pinned, it refuses and names every reachable routine that still needs
+  review. Pinning only the wrapper fails with both
+  `private.provision_church_v3_impl` and `public.provision_church_v2` listed.
 
-Compare the checks, read-only:
-
-```sql
-SELECT count(*) FILTER (WHERE row_security_active('church.churches'::regclass)) AS rls_on
-  FROM church.churches;
+```
+PASS  014 refuses a wrapper-only pin
+PASS  014 names the unreviewed helper
+PASS  014 names the unreviewed v2
+PASS  014 detects a changed routine deep in the chain
 ```
 
-The decisive test is a rolled-back attempt to provision as `authenticated`:
+`scripts/capture-rpc.mjs --rpc private.provision_church_v3_impl` captures a
+non-`public` routine and prints a ready-to-paste `v_pins` entry, with `args`
+normalised to `pg_get_function_identity_arguments` form so the pin matches.
 
-```sql
-BEGIN;
-SELECT set_config('request.jwt.claims',
-                  json_build_object('sub', '<an existing auth.users id>')::text, true);
-SET LOCAL ROLE authenticated;
-SELECT public.provision_church_v3('<same id>'::uuid, 'ZZ Test', 'zz-test-provision', 'pastor', NULL);
-ROLLBACK;   -- nothing is kept
-```
-
-A `row-level security policy` error confirms the diagnosis. A success means the
-live policies differ from the repo's and this analysis does not apply — also
-worth knowing. Either way it is rolled back.
-
-**Repair options**, to be chosen after reading the body:
-
-* `ALTER FUNCTION … SECURITY DEFINER;` plus a pinned `search_path` that matches
-  what the body actually references, and `REVOKE EXECUTE … FROM PUBLIC` — the
-  repo's declared intent. This is the smallest change.
-* Or add `INSERT` policies for `authenticated` on `public.tenants` and
-  `public.admin_profiles`. Not recommended: it widens what any signed-in user
-  can write in order to work around a missing function attribute.
-
-Do not fix this by making the app use the admin client — that moves a
-`SECURITY DEFINER` function's power into the web tier, where every future bug
-inherits it.
-
-### What this does to 014's priority
-
-014 gets *less* urgent, not more. Its purpose is to stop a future write path
-from creating a church without a passkey. Right now there are no future
-churches, because provisioning fails before the INSERT. Applying 014 would be
-harmless and pointless; **fixing provisioning is what matters**, and the body
-review that 014 depends on is the same review that finds the cause.
-
-014 keeps an `authenticated`-EXECUTE gate (3b) so it cannot pass on a function
-nobody can call, but it cannot detect a missing `SECURITY DEFINER` — that is a
-design decision the reviewer has to make with the body in hand.
-
-### Known limitation — the fingerprint does not cover grants
+### Known limitation — the fingerprint does not cover grants### Known limitation — the fingerprint does not cover grants
 
 `pg_get_functiondef` covers `SECURITY DEFINER` and `SET search_path`, because
 both are part of the definition text. It does **not** cover the ACL. Re-granting

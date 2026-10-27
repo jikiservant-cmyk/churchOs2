@@ -161,17 +161,20 @@ check('011 text never interpolates a passkey value',
 }
 
 // ── 014: passkey NOT NULL, gated ────────────────────────────────────────────
-// The gate pins the exact overload and the exact reviewed text, so the tests
-// have to play the part of an operator who captured and pinned a definition.
+// Provisioning is a chain on the live database: an invoker-mode wrapper
+// delegates to a SECURITY DEFINER helper, which calls v2, which performs the
+// insert. 014 pins every routine in that chain rather than the wrapper alone.
 const m014 = readFileSync('migrations/014_passkey_not_null.sql', 'utf8');
 const CALL_SITE_SIG = 'p_user_id uuid, p_name text, p_slug text, p_role text, p_invite_code text';
+const V2_SIG = 'p_user_id uuid, p_name text, p_slug text, p_role text, p_ip text';
+const IMPL_SIG = CALL_SITE_SIG;
 
-async function scenario({ nulls = 16, total = 18, blanks = 0, v3 = 'reviewed' } = {}) {
+async function scenario({ nulls = 0, total = 18, blanks = 0, chain = 'full' } = {}) {
   const d = new PGlite();
-  // The gate checks has_function_privilege('authenticated', …) when that role
-  // exists; create it so the check actually runs in these scenarios.
   await d.exec('CREATE ROLE authenticated;');
   await d.exec('CREATE SCHEMA church;');
+  await d.exec('CREATE SCHEMA private;');
+  await d.exec('GRANT USAGE ON SCHEMA private, church TO authenticated;');
   await d.exec(`CREATE TABLE church.churches (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
       name text NOT NULL, slug text NOT NULL UNIQUE, passkey text);`);
@@ -181,210 +184,197 @@ async function scenario({ nulls = 16, total = 18, blanks = 0, v3 = 'reviewed' } 
       [`C${i}`, `church-${i}`, value]);
   }
 
-  const bodies = {
-    reviewed: `BEGIN
-      INSERT INTO church.churches (name, slug, passkey)
-      VALUES (p_name, p_slug, upper(substr(replace(gen_random_uuid()::text,'-',''),1,10)));
-      RETURN gen_random_uuid(); END`,
-    nopasskey: `BEGIN RETURN gen_random_uuid(); END`,
-  };
-  if (v3 === 'decoyprocedure') {
-    // PostgreSQL forbids a procedure sharing both name AND argument types with
-    // a function (42723), so a *different* signature is the only form that can
-    // coexist. The function must still be the one that gets fingerprinted.
-    await d.exec(`CREATE FUNCTION public.provision_church_v3(${CALL_SITE_SIG})
-      RETURNS uuid LANGUAGE plpgsql SECURITY DEFINER AS $fn$ ${bodies.reviewed} $fn$;`);
-    await d.exec(`CREATE PROCEDURE public.provision_church_v3(p_slug text)
-      LANGUAGE plpgsql AS $fn$ BEGIN PERFORM 1; END $fn$;`);
-  } else if (v3 === 'procedureonly') {
-    // A procedure carrying the exact call-site signature and no function at
-    // all. Without the prokind filter the gate would fingerprint this and
-    // proceed; with it, there is nothing callable and it must refuse.
-    await d.exec(`CREATE PROCEDURE public.provision_church_v3(${CALL_SITE_SIG})
-      LANGUAGE plpgsql AS $fn$ BEGIN PERFORM 1; END $fn$;`);
-  } else if (bodies[v3]) {
-    await d.exec(`CREATE FUNCTION public.provision_church_v3(${CALL_SITE_SIG})
-      RETURNS uuid LANGUAGE plpgsql SECURITY DEFINER AS $fn$ ${bodies[v3]} $fn$;`);
-  } else if (v3 === 'wrongsignature') {
-    // The repo's v2 shape, ported to v3's name: no p_invite_code.
-    await d.exec(`CREATE FUNCTION public.provision_church_v3(
-        p_user_id uuid, p_name text, p_slug text, p_role text, p_ip text)
-      RETURNS uuid LANGUAGE plpgsql AS $fn$ BEGIN RETURN gen_random_uuid(); END $fn$;`);
+  if (chain !== 'missing') {
+    // v2 does the insert and — exactly like the live one — never mentions
+    // passkey. NOT NULL without a DEFAULT would make this fail 23502.
+    await d.exec(`CREATE FUNCTION public.provision_church_v2(p_user_id uuid, p_name text, p_slug text, p_role text, p_ip text)
+      RETURNS uuid LANGUAGE plpgsql SECURITY DEFINER SET search_path = ''
+      AS $fn$ DECLARE v uuid; BEGIN
+        INSERT INTO church.churches (name, slug) VALUES (p_name, p_slug) RETURNING id INTO v;
+        RETURN v; END $fn$;`);
   }
-
+  if (chain === 'full') {
+    await d.exec(`CREATE FUNCTION private.provision_church_v3_impl(p_user_id uuid, p_name text, p_slug text, p_role text, p_invite_code text)
+      RETURNS uuid LANGUAGE plpgsql SECURITY DEFINER SET search_path = ''
+      AS $fn$ BEGIN
+        RETURN public.provision_church_v2(p_user_id, p_name, p_slug, p_role, NULL);
+      END $fn$;`);
+    await d.exec(`CREATE FUNCTION public.provision_church_v3(p_user_id uuid, p_name text, p_slug text, p_role text, p_invite_code text)
+      RETURNS uuid LANGUAGE plpgsql SECURITY INVOKER SET search_path = ''
+      AS $fn$ BEGIN
+        RETURN private.provision_church_v3_impl(p_user_id, p_name, p_slug, p_role, p_invite_code);
+      END $fn$;`);
+  } else if (chain === 'wrapperonly') {
+    // Wrapper that delegates to a routine the reviewer did not pin.
+    await d.exec(`CREATE FUNCTION private.provision_church_v3_impl(p_user_id uuid, p_name text, p_slug text, p_role text, p_invite_code text)
+      RETURNS uuid LANGUAGE plpgsql SECURITY DEFINER SET search_path = ''
+      AS $fn$ BEGIN
+        RETURN public.provision_church_v2(p_user_id, p_name, p_slug, p_role, NULL);
+      END $fn$;`);
+    await d.exec(`CREATE FUNCTION public.provision_church_v3(p_user_id uuid, p_name text, p_slug text, p_role text, p_invite_code text)
+      RETURNS uuid LANGUAGE plpgsql SECURITY INVOKER SET search_path = ''
+      AS $fn$ BEGIN
+        RETURN private.provision_church_v3_impl(p_user_id, p_name, p_slug, p_role, p_invite_code);
+      END $fn$;`);
+  }
   await d.exec(readFileSync('migrations/011_usher_passkey_columns.sql', 'utf8'));
   return d;
 }
 
-const fingerprintOf = async (d) => (await d.query(`
+const fp = async (d, schema, name, args) => (await d.query(`
   SELECT encode(sha256(convert_to(pg_get_functiondef(p.oid),'UTF8')),'hex') AS fp
     FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-   WHERE n.nspname='public' AND p.proname='provision_church_v3'
-     AND p.prokind = 'f'
-     AND pg_get_function_identity_arguments(p.oid) = $1`, [CALL_SITE_SIG])).rows[0]?.fp;
+   WHERE n.nspname = $1 AND p.proname = $2 AND p.prokind = 'f'
+     AND pg_get_function_identity_arguments(p.oid) = $3`,
+  [schema, name, args])).rows[0]?.fp;
 
-// Fill in the pinned fingerprint the way an operator would after review.
-const pin = (sql, fp) => sql.replace(/(v_expected_fingerprint CONSTANT text := )'UNREVIEWED'/, `$1'${fp}'`);
+async function fullChainPins(d) {
+  return [
+    { schema: 'public',  name: 'provision_church_v3',      args: CALL_SITE_SIG, fingerprint: await fp(d, 'public', 'provision_church_v3', CALL_SITE_SIG) },
+    { schema: 'private', name: 'provision_church_v3_impl', args: IMPL_SIG,      fingerprint: await fp(d, 'private', 'provision_church_v3_impl', IMPL_SIG) },
+    { schema: 'public',  name: 'provision_church_v2',      args: V2_SIG,        fingerprint: await fp(d, 'public', 'provision_church_v2', V2_SIG) },
+  ];
+}
+
+const pinChain = (sql, pins) =>
+  sql.replace(/v_pins CONSTANT jsonb := '\[\]'::jsonb;/, `v_pins CONSTANT jsonb := '${JSON.stringify(pins)}'::jsonb;`);
 
 const nullable = async (d) => (await d.query(
   `SELECT is_nullable FROM information_schema.columns
     WHERE table_schema='church' AND table_name='churches' AND column_name='passkey'`
 )).rows[0].is_nullable;
 
+const passkeyDefault = async (d) => (await d.query(
+  `SELECT column_default FROM information_schema.columns
+    WHERE table_schema='church' AND table_name='churches' AND column_name='passkey'`
+)).rows[0].column_default;
+
 async function tryExec(d, sql) {
   try { await d.exec(sql); return null; }
   catch (e) { try { await d.exec('ROLLBACK'); } catch { /* already closed */ } return e.message; }
 }
 
-// A. Before the backfill: must refuse and leave the column alone.
+// A. Nothing reviewed yet.
 {
-  const d = await scenario({ nulls: 16 });
-  const err = await tryExec(d, pin(m014, await fingerprintOf(d)));
-  check('014 refuses before the backfill', err !== null, err?.slice(0, 60));
-  check('014 refusal names the NULL count', /16 church\(es\) have a NULL passkey/.test(err ?? ''));
-  check('014 refusal leaves passkey nullable', (await nullable(d)) === 'YES');
+  const d = await scenario({ chain: 'full' });
+  const err = await tryExec(d, m014);
+  check('014 refuses while no chain is pinned', /no reviewed chain pinned/.test(err ?? ''), err?.slice(0, 60));
+  check('014 names the routines worth reviewing',
+    /public\.provision_church_v3/.test(err ?? '') && /private\.provision_church_v3_impl/.test(err ?? ''),
+    (err ?? '').slice(-90));
+  check('014 leaves passkey nullable when unpinned', (await nullable(d)) === 'YES');
   await d.close();
 }
 
-// B. Captured, reviewed, pinned, backfilled: applies.
+// B. The whole chain reviewed: applies.
 {
-  const d = await scenario({ nulls: 16 });
-  await d.exec(readFileSync('migrations/012_usher_passkey_backfill.sql', 'utf8'));
-  const err = await tryExec(d, pin(m014, await fingerprintOf(d)));
-  check('014 applies after backfill with a pinned definition', err === null, err?.slice(0, 90));
+  const d = await scenario({ chain: 'full' });
+  const err = await tryExec(d, pinChain(m014, await fullChainPins(d)));
+  check('014 applies when the whole chain is pinned', err === null, err?.slice(0, 90));
   check('014 makes passkey NOT NULL', (await nullable(d)) === 'NO');
+  check('014 installs a DEFAULT so inserts omitting passkey still work',
+    (await passkeyDefault(d)) !== null, String(await passkeyDefault(d)));
+
+  // The point of the default: v2's insert shape must still work afterwards.
+  let insertErr = null;
+  try { await d.query(`INSERT INTO church.churches (name, slug) VALUES ('New','new-church')`); }
+  catch (e) { insertErr = e.message; }
+  check('a provisioned church can still be inserted without a passkey', insertErr === null, insertErr ?? 'ok');
+  const created = (await d.query(`SELECT passkey FROM church.churches WHERE slug='new-church'`)).rows[0];
+  check('the generated code satisfies the portal validator',
+    /^[A-Za-z0-9_-]{6,32}$/.test(created?.passkey ?? ''), `length ${created?.passkey?.length}`);
   await d.close();
 }
 
-// C. Re-running is harmless.
+// C. THE regression this migration exists for: pinning only the wrapper.
 {
-  const d = await scenario({ nulls: 16 });
-  await d.exec(readFileSync('migrations/012_usher_passkey_backfill.sql', 'utf8'));
-  await d.exec(pin(m014, await fingerprintOf(d)));
-  const err = await tryExec(d, pin(m014, await fingerprintOf(d)));
+  const d = await scenario({ chain: 'wrapperonly' });
+  const wrapperOnly = [{
+    schema: 'public', name: 'provision_church_v3', args: CALL_SITE_SIG,
+    fingerprint: await fp(d, 'public', 'provision_church_v3', CALL_SITE_SIG),
+  }];
+  const err = await tryExec(d, pinChain(m014, wrapperOnly));
+  check('014 refuses a wrapper-only pin', /calls routines that were not reviewed/.test(err ?? ''), err?.slice(0, 70));
+  check('014 names the unreviewed helper', /private\.provision_church_v3_impl/.test(err ?? ''));
+  check('014 names the unreviewed v2', /public\.provision_church_v2/.test(err ?? ''));
+  check('014 leaves passkey nullable in that case', (await nullable(d)) === 'YES');
+  await d.close();
+}
+
+// D. A pinned routine changed after review.
+{
+  const d = await scenario({ chain: 'full' });
+  const pins = await fullChainPins(d);
+  await d.exec(`CREATE OR REPLACE FUNCTION public.provision_church_v2(${V2_SIG})
+    RETURNS uuid LANGUAGE plpgsql SECURITY DEFINER SET search_path = ''
+    AS $fn$ DECLARE v uuid; BEGIN
+      INSERT INTO church.churches (name, slug, passkey) VALUES (p_name, p_slug, 'HANDEDIT') RETURNING id INTO v;
+      RETURN v; END $fn$;`);
+  const err = await tryExec(d, pinChain(m014, pins));
+  check('014 detects a changed routine deep in the chain',
+    /provision_church_v2 has changed since review/.test(err ?? ''), err?.slice(0, 70));
+  await d.close();
+}
+
+// E. A pinned routine that no longer exists.
+{
+  const d = await scenario({ chain: 'full' });
+  const pins = await fullChainPins(d);
+  pins.push({ schema: 'public', name: 'provision_church_v9', args: IMPL_SIG, fingerprint: 'a'.repeat(64) });
+  const err = await tryExec(d, pinChain(m014, pins));
+  check('014 refuses a stale pin for a routine that does not exist',
+    /does not exist/.test(err ?? ''), err?.slice(0, 70));
+  await d.close();
+}
+
+// F. Data gates.
+{
+  const d = await scenario({ chain: 'full', nulls: 16 });
+  const err = await tryExec(d, pinChain(m014, await fullChainPins(d)));
+  check('014 refuses before the backfill', /16 church\(es\) have a NULL passkey/.test(err ?? ''));
+  await d.close();
+}
+{
+  const d = await scenario({ chain: 'full', nulls: 0, blanks: 3 });
+  const err = await tryExec(d, pinChain(m014, await fullChainPins(d)));
+  check('014 refuses on blank passkeys', /3 church\(es\) have a blank passkey/.test(err ?? ''));
+  await d.close();
+}
+
+// G. The app's role must be able to call the function at all.
+{
+  const d = await scenario({ chain: 'full' });
+  await d.exec(`REVOKE EXECUTE ON FUNCTION public.provision_church_v3(${CALL_SITE_SIG}) FROM PUBLIC, authenticated`);
+  const err = await tryExec(d, pinChain(m014, await fullChainPins(d)));
+  check('014 refuses when authenticated cannot EXECUTE provisioning',
+    /authenticated cannot EXECUTE provision_church_v3/.test(err ?? ''), err?.slice(0, 80));
+  await d.close();
+}
+
+// H. Re-running is harmless once applied.
+{
+  const d = await scenario({ chain: 'full' });
+  const pins = await fullChainPins(d);
+  await d.exec(pinChain(m014, pins));
+  const err = await tryExec(d, pinChain(m014, pins));
   check('014 is re-runnable', err === null, err?.slice(0, 90));
   await d.close();
 }
 
-// D. Unreviewed: the pin is still the placeholder.
+// I. An existing default is left alone.
 {
-  const d = await scenario({ nulls: 0 });
-  const err = await tryExec(d, m014);
-  check('014 refuses while the definition is unpinned', /no reviewed definition pinned/.test(err ?? ''));
-  check('014 tells you the deployed fingerprint to pin',
-    /sha256:[0-9a-f]{64}/.test(err ?? ''), err?.slice(0, 80));
-  await d.close();
-}
-
-// E. No provisioning function at all.
-{
-  const d = await scenario({ nulls: 0, v3: 'missing' });
-  const err = await tryExec(d, pin(m014, 'a'.repeat(64)));
-  check('014 refuses without provision_church_v3', /no function public\.provision_church_v3 exists/.test(err ?? ''));
-  await d.close();
-}
-
-// F. The deployed overload does not accept what the app sends.
-{
-  const d = await scenario({ nulls: 0, v3: 'wrongsignature' });
-  const err = await tryExec(d, pin(m014, 'a'.repeat(64)));
-  check('014 refuses when no overload matches the call site',
-    /no overload of provision_church_v3 accepts/.test(err ?? ''), err?.slice(0, 70));
-  await d.close();
-}
-
-// G. Correct signature, pinned, but the body never assigns a passkey.
-{
-  const d = await scenario({ nulls: 0, v3: 'nopasskey' });
-  const err = await tryExec(d, pin(m014, await fingerprintOf(d)));
-  check('014 refuses when the reviewed body never mentions passkey',
-    /never mentions passkey/.test(err ?? ''), err?.slice(0, 70));
-  await d.close();
-}
-
-// H. The function changed after review.
-{
-  const d = await scenario({ nulls: 0 });
-  const reviewed = await fingerprintOf(d);   // what a human signed off on
-  // The function is edited afterwards — same name, same signature, new body.
-  await d.exec(`CREATE OR REPLACE FUNCTION public.provision_church_v3(${CALL_SITE_SIG})
-    RETURNS uuid LANGUAGE plpgsql SECURITY DEFINER AS $fn$
-    BEGIN INSERT INTO church.churches (name, slug, passkey)
-      VALUES (p_name, p_slug, upper(substr(replace(gen_random_uuid()::text,'-',''),1,8)));
-      RETURN gen_random_uuid(); END $fn$;`);
-  const err = await tryExec(d, pin(m014, reviewed));
-  check('014 detects a definition changed after review',
-    /changed since review/.test(err ?? ''), err?.slice(0, 70));
-  await d.close();
-}
-
-// K. A procedure sharing the name must not affect the function that is
-//    fingerprinted. (Different signature — PostgreSQL forbids identical ones.)
-{
-  const d = await scenario({ nulls: 0, v3: 'decoyprocedure' });
-  const fp = await fingerprintOf(d);
-  const err = await tryExec(d, pin(m014, fp));
-  check('014 picks the function when a same-named procedure also exists',
-    err === null, err?.slice(0, 90));
-  check('014 still applies the constraint in that case',
-    (await nullable(d)) === 'NO');
-  await d.close();
-}
-
-// L. Only a procedure carries the call-site signature. Prove the filter matters
-//    by showing what the migration would have done without it.
-{
-  const withoutProkind = m014.replace(/\n\s*AND p\.prokind = 'f'/g, '');
-  check('the prokind filter is present in both lookups', withoutProkind !== m014);
-
-  const unfixed = await scenario({ nulls: 0, v3: 'procedureonly' });
-  const procFp = (await unfixed.query(`
-    SELECT encode(sha256(convert_to(pg_get_functiondef(p.oid),'UTF8')),'hex') AS fp
-      FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-     WHERE n.nspname='public' AND p.proname='provision_church_v3'`)).rows[0].fp;
-  const unfixedErr = await tryExec(unfixed, pin(withoutProkind, procFp));
-  // Measured, not assumed: pg_get_function_identity_arguments renders a
-  // procedure's arguments with "IN " prefixes, so the signature lookup could
-  // never have matched one. The gate still held — but it reported that the
-  // *call site* was wrong, which would send an operator hunting a nonexistent
-  // app bug. The filter makes the diagnosis accurate.
-  check('without the filter the gate still holds, but misdiagnoses',
-    unfixedErr !== null && /no overload of provision_church_v3 accepts/.test(unfixedErr),
-    unfixedErr?.slice(0, 70));
-  check('…and therefore reports a call-site mismatch that does not exist',
-    !/no function public\.provision_church_v3 exists/.test(unfixedErr ?? ''));
-
-  const fixed = await scenario({ nulls: 0, v3: 'procedureonly' });
-  const fixedErr = await tryExec(fixed, pin(m014, procFp));
-  check('014 with the filter refuses a procedure-only database',
-    /no function public\.provision_church_v3 exists/.test(fixedErr ?? ''),
-    fixedErr?.slice(0, 80));
-  check('014 leaves passkey nullable in that case', (await nullable(fixed)) === 'YES');
-}
-
-// I. Blank strings are not a usable passkey.
-{
-  const d = await scenario({ nulls: 0, blanks: 3 });
-  const err = await tryExec(d, pin(m014, await fingerprintOf(d)));
-  check('014 refuses on blank (non-NULL) passkeys', /3 church\(es\) have a blank passkey/.test(err ?? ''));
-  await d.close();
-}
-
-// M. The app's role must be able to call the function at all.
-{
-  const d = await scenario({ nulls: 0 });
-  await d.exec(`REVOKE EXECUTE ON FUNCTION public.provision_church_v3(${CALL_SITE_SIG}) FROM PUBLIC, authenticated`);
-  const err = await tryExec(d, pin(m014, await fingerprintOf(d)));
-  check('014 refuses when authenticated cannot EXECUTE provisioning',
-    /authenticated cannot EXECUTE provision_church_v3/.test(err ?? ''), err?.slice(0, 80));
-  check('014 leaves passkey nullable in that case', (await nullable(d)) === 'YES');
+  const d = await scenario({ chain: 'full' });
+  await d.query(`ALTER TABLE church.churches ALTER COLUMN passkey SET DEFAULT 'PRESET01'`);
+  const err = await tryExec(d, pinChain(m014, await fullChainPins(d)));
+  check('014 does not overwrite an existing default', err === null && (await passkeyDefault(d))?.includes('PRESET01'),
+    String(await passkeyDefault(d)));
   await d.close();
 }
 
 // J. Refusal messages must not leak credential values.
 {
-  const d = await scenario({ nulls: 2, total: 4 });
-  const err = (await tryExec(d, pin(m014, await fingerprintOf(d)))) ?? '';
+  const d = await scenario({ chain: 'full', nulls: 2, total: 4 });
+  const err = (await tryExec(d, pinChain(m014, await fullChainPins(d)))) ?? '';
   check('014 refusal lists slugs, never passkeys',
     /church-0/.test(err) && !/CODE\dXYZ/.test(err), err.slice(0, 50));
   await d.close();

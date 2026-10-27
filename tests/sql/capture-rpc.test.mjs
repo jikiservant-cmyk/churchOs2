@@ -131,6 +131,26 @@ describe('capture-rpc.mjs', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
+  it('captures a schema-qualified routine in a non-public schema', () => {
+    const dump = GOOD
+      .replace('public.provision_church_v3', 'private.provision_church_v3_impl');
+    const r = run({ dump, args: ['--rpc', 'private.provision_church_v3_impl'] });
+    assert.equal(r.code, 0, r.combined);
+    assert.ok(r.wrote);
+    assert.match(r.combined, /private\.provision_church_v3_impl/);
+    // No contract exists for the helper, so contract checks must not fire.
+    assert.doesNotMatch(r.combined, /missing parameter/);
+  });
+
+  it('will not capture the wrong schema silently', () => {
+    // The dump holds public.provision_church_v3; asking for the private helper
+    // must fail rather than capture whatever matches the name.
+    const r = run({ dump: GOOD, args: ['--rpc', 'private.provision_church_v3_impl'] });
+    assert.notEqual(r.code, 0);
+    assert.equal(r.wrote, false);
+    assert.match(r.combined, /No CREATE FUNCTION private\.provision_church_v3_impl/);
+  });
+
   it('emits the fingerprint that migrations/014 pins', () => {
     const r = run({ dump: GOOD });
     assert.equal(r.code, 0, r.combined);
@@ -144,7 +164,15 @@ describe('capture-rpc.mjs', () => {
 
     // …and it must be recorded in the file, so the pin survives a lost terminal.
     assert.ok(r.content.includes(printed[1]), 'written migration does not record the fingerprint');
-    assert.match(r.combined, /v_expected_fingerprint CONSTANT text := '[0-9a-f]{64}'/);
+    // The hint must be a ready v_pins entry for migrations/014, with args
+    // normalised to pg_get_function_identity_arguments form.
+    const entry = r.combined.match(/\{"schema":"[^"]+","name":"[^"]+","args":"[^"]*","fingerprint":"[0-9a-f]{64}"\}/);
+    assert.ok(entry, 'no v_pins entry printed');
+    const parsed = JSON.parse(entry[0]);
+    assert.equal(parsed.schema, 'public');
+    assert.equal(parsed.name, 'provision_church_v3');
+    assert.equal(parsed.args, 'p_user_id uuid, p_name text, p_slug text, p_role text, p_invite_code text');
+    assert.equal(parsed.fingerprint, expected);
   });
 
   it('--expect confirms the dump is the deployed function', () => {

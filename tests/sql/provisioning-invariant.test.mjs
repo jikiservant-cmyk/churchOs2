@@ -1,14 +1,21 @@
-// Why `provision_church_v3` being SECURITY INVOKER is not a style question.
+// WHAT THIS FILE DOES *NOT* SAY
+// -----------------------------
+// An earlier revision of this file concluded that church signup was broken,
+// because the ACL preflight reported prosecdef = false on
+// public.provision_church_v3. **That conclusion was wrong and is retracted.**
 //
-// The live ACL preflight reported prosecdef = false. A SECURITY INVOKER
-// function runs with the caller's privileges, so every write it performs is
-// subject to RLS for the `authenticated` role. This file reproduces the
-// repository's declared policies against a real PostgreSQL and shows that such
-// a function cannot create a church.
+// The deployed routine is a thin INVOKER wrapper. It delegates to
+// private.provision_church_v3_impl, which is SECURITY DEFINER, which calls
+// public.provision_church_v2, also SECURITY DEFINER. Both are owned by a role
+// with BYPASSRLS, so the insert runs with the owner's privileges and RLS is not
+// a barrier. Reading the wrapper's prosecdef in isolation says nothing about
+// whether the path works.
 //
-// This is a MODEL of supabase-schema.sql, not the deployed database. It pins
-// the reasoning so that "just flip it to SECURITY INVOKER" cannot be presented
-// later as a harmless simplification.
+// This file therefore tests a HYPOTHETICAL: what would happen if the chain were
+// flattened to invoker-only. It is a refactor guard, not a description of the
+// deployment. If someone ever removes the SECURITY DEFINER hop to "simplify"
+// the chain, signup breaks exactly as reproduced below — and that is the reason
+// to keep these tests.
 //
 // Declared policies being modelled (line numbers from supabase-schema.sql):
 //   public.tenants        383-367  SELECT for authenticated, FOR ALL for service_role
@@ -94,8 +101,8 @@ async function callAsAuthenticated(db, name) {
   }
 }
 
-describe('provisioning cannot run as SECURITY INVOKER against these policies', () => {
-  it('SECURITY INVOKER is rejected by RLS before it can create anything', async () => {
+describe('an invoker-only provisioning path would be blocked by these policies', () => {
+  it('a flattened, invoker-only path is rejected by RLS (hypothetical, not live)', async () => {
     const db = await buildSchema();
     await define(db, 'prov_invoker', 'INVOKER', 'public, church');
     const err = await callAsAuthenticated(db, 'prov_invoker');
