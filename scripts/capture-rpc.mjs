@@ -291,8 +291,22 @@ const fingerprint = fingerprintOf(parsed.statement);
 // 014 pins the reviewed definition by content, so this has to be the hash of
 // exactly what pg_get_functiondef returns — the statement as written, not the
 // migration file that wraps it in a header.
+// Hash the definition exactly as pg_get_functiondef returns it.
+//
+// pg_get_functiondef ends with a newline. An earlier version hashed the
+// trimmed statement, so every pin it produced disagreed with the database by
+// a single trailing byte and 014 reported "changed since review" on a
+// definition nobody had touched. Measured:
+//
+//   pg_get_functiondef(oid) last 12 chars  -> "$function$\n"
+//   sha256(raw)     == encode(sha256(...)) inside PostgreSQL
+//   sha256(trimmed) != that
+//
+// The extractor trims to find the statement boundary, so the newline is put
+// back here. pg_get_functiondef emits exactly one trailing newline.
 function fingerprintOf(statement) {
-  return createHash('sha256').update(statement, 'utf8').digest('hex');
+  const text = statement.replace(/\s+$/, '') + '\n';
+  return createHash('sha256').update(text, 'utf8').digest('hex');
 }
 
 function report(fingerprint) {

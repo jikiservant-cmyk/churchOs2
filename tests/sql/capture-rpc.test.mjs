@@ -183,9 +183,11 @@ describe('capture-rpc.mjs', () => {
     const printed = r.combined.match(/sha256:([0-9a-f]{64})/);
     assert.ok(printed, 'no fingerprint printed');
 
-    // It must be the hash of the definition as pg_get_functiondef returns it,
-    // because that is what 014 recomputes inside the database.
-    const expected = createHash('sha256').update(GOOD.trim(), 'utf8').digest('hex');
+    // It must be the hash of the definition exactly as pg_get_functiondef
+    // returns it — which ends with a newline — because that is what 014
+    // recomputes inside the database. Hashing the trimmed text produced
+    // fingerprints that never matched; see tests/sql/fingerprint-parity.test.mjs.
+    const expected = createHash('sha256').update(GOOD.trim() + '\n', 'utf8').digest('hex');
     assert.equal(printed[1], expected, 'fingerprint does not match the definition text');
 
     // …and it must be recorded in the file, so the pin survives a lost terminal.
@@ -202,7 +204,7 @@ describe('capture-rpc.mjs', () => {
   });
 
   it('--expect confirms the dump is the deployed function', () => {
-    const live = createHash('sha256').update(GOOD.trim(), 'utf8').digest('hex');
+    const live = createHash('sha256').update(GOOD.trim() + '\n', 'utf8').digest('hex');
     const r = run({ dump: GOOD, args: ['--expect', live] });
     assert.equal(r.code, 0, r.combined);
     assert.ok(r.wrote);

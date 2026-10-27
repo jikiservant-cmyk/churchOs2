@@ -267,6 +267,32 @@ async function tryExec(d, sql) {
   await d.close();
 }
 
+// B0. Full circle: the SQL-only generator's output is fed straight into 014.
+//     This is the workflow the operator will actually use — no Node, no manual
+//     copying of digests — so it is worth testing as one unit rather than two.
+{
+  const d = await scenario({ chain: 'full' });
+  const { rows } = await d.query(readFileSync('scripts/capture-v3-pins.sql', 'utf8'));
+  check('SQL generator finds all three chain routines', rows[0].routines_pinned === 3,
+    String(rows[0].routines_pinned));
+
+  const err = await tryExec(d, pinChain(m014, rows[0].v_pins));
+  check('014 accepts pins produced entirely inside the database', err === null, err?.slice(0, 90));
+  check('…and then enforces NOT NULL', (await nullable(d)) === 'NO');
+
+  // A pin generated before an edit must stop matching after it.
+  const before = rows[0].v_pins;
+  await d.exec(`CREATE OR REPLACE FUNCTION public.provision_church_v2(V2SIG_REPLACED)
+    RETURNS uuid LANGUAGE plpgsql SECURITY DEFINER SET search_path = ''
+    AS $fn$ DECLARE v uuid; BEGIN
+      INSERT INTO church.churches (name, slug, passkey) VALUES (p_name, p_slug, 'HANDEDIT') RETURNING id INTO v;
+      RETURN v; END $fn$;`.replace('V2SIG_REPLACED', V2_SIG));
+  const stale = await d.query(readFileSync('scripts/capture-v3-pins.sql', 'utf8'));
+  check('the generator sees a changed body as a different fingerprint',
+    JSON.stringify(stale.rows[0].v_pins) !== JSON.stringify(before));
+  await d.close();
+}
+
 // B. The whole chain reviewed: applies.
 {
   const d = await scenario({ chain: 'full' });

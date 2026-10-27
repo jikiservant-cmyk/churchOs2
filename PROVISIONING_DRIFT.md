@@ -143,6 +143,44 @@ Sequence, and it is deliberately two people's work:
 Any later change to the function changes its hash, and 014 refuses on the old
 pin — so a re-deploy cannot silently inherit a review it never had.
 
+### Generate the pins without leaving the database
+
+The reviewer has database access but not a checkout. That is enough —
+`scripts/capture-v3-pins.sql` builds the entire `v_pins` array inside
+PostgreSQL and returns one JSON value to paste into 014.
+
+```sql
+-- run this, copy the `v_pins` column
+\i scripts/capture-v3-pins.sql
+```
+
+It returns three entries in call order, `routines_pinned` must be `3`, and
+nothing in the output is sensitive — digests and signatures only, no bodies.
+
+This is not just a convenience. Because it calls `pg_get_functiondef` in the
+same database that 014 later compares against, it **cannot disagree with it by
+a byte**. The Node script could, and did:
+
+> `pg_get_functiondef` ends with a newline. The script was hashing the trimmed
+> statement, so every pin it produced was off by one trailing byte and 014
+> would have reported *"changed since review"* on a definition nobody had
+> touched.
+>
+> ```
+> pg_get_functiondef(oid) last 12 chars  ->  "$function$\n"
+> sha256(raw)     = the number 014 computes
+> sha256(trimmed) = the number the script used to print
+> ```
+
+That is fixed — `fingerprintOf` restores the newline — and
+`tests/sql/fingerprint-parity.test.mjs` now asserts, for all three deployed
+signatures plus an OUT-parameter case, that the script and the database produce
+the *same* digest. The test also asserts the two differ when the newline is
+stripped, so the regression cannot quietly come back.
+
+Either route now produces bytes that 014 accepts; the SQL route is preferred
+when the reviewer is not the person with a checkout.
+
 ### Verify the committed copy
 
 ```bash
@@ -219,7 +257,7 @@ Rotation is the other write path and is verified in code, not SQL —
 
 Inside the `BEGIN…COMMIT`, so a refusal rolls back cleanly and changes nothing.
 
-### Verified behaviour (`npm run test:sql`, 94 checks)
+### Verified behaviour (`npm run test:sql`, 112 checks)
 
 ```
 PASS  014 refuses before the backfill — 16 church(es) have a NULL passkey
