@@ -11,7 +11,8 @@
     "clean": "next clean",
     "typecheck": "tsc --noEmit",
     "check": "npm run typecheck && npm run lint && npm test && npm run security:audit && npm run build",
-    "security:audit": "npm audit --omit=dev --audit-level=moderate"
+    "security:audit": "npm audit --omit=dev --audit-level=moderate",
+    "test:migrations": "node tests/sql/passkey_migration.test.mjs"
   },
   "dependencies": {
     "@fontsource/outfit": "^5.3.0",
@@ -40,6 +41,7 @@
     "uuid": "^14.0.0"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "^0.5.12",
     "@tailwindcss/postcss": "4.1.11",
     "@types/node": "^20",
     "@types/papaparse": "^5.5.2",

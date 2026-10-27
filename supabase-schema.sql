@@ -297,7 +297,9 @@ BEGIN
     v_tenant_uuid,
     p_name,
     v_canonical_slug,
-    upper(substring(replace(encode(gen_random_bytes(16), 'base64'), '/', 'A'), 1, 8)),
+    -- 10 uppercase hex characters: matches the portal validator
+    -- (^[A-Za-z0-9_-]{6,32}$) with no dependency on pgcrypto.
+    upper(substr(replace(gen_random_uuid()::text, '-', ''), 1, 10)),
     1,
     'church',
     p_ip

@@ -19,10 +19,9 @@ churchOs-fixes/
 │   └── db/
 │       └── members.ts                        → lib/db/members.ts (NEW)
 ├── migrations/
-│   ├── 001_performance_indexes.sql           → Run in Supabase SQL Editor
-│   ├── 002_passkey_hashing.sql               → Run in Supabase SQL Editor
-│   ├── 003_sms_queue_table.sql               → Run in Supabase SQL Editor
-│   └── 004_cron_jobs.sql                     → Run in Supabase SQL Editor
+│   ├── 005…010                               → In the repo's migrations/ folder
+│   ├── 011_usher_passkey_columns.sql         → Run in Supabase SQL Editor
+│   └── 012_usher_passkey_backfill.sql        → Run in Supabase SQL Editor
 └── supabase/
     └── functions/
         ├── church-najiki-dispatch/index.ts   → Single queue-row Na'jiki dispatcher
@@ -53,10 +52,9 @@ Add the new variables from `.env.example` to your `.env.local`:
 Open Supabase Dashboard → SQL Editor and run each file in order:
 
 ```
-001_performance_indexes.sql   ← Safe to run first, no dependencies
-002_passkey_hashing.sql       ← Hashes existing passkeys (run once only)
-003_sms_queue_table.sql       ← Creates the async SMS queue table
-004_cron_jobs.sql             ← Requires pg_cron extension enabled first
+005…010 (already in migrations/)  ← Apply in order
+011_usher_passkey_columns.sql     ← Adds the usher passkey columns (additive)
+012_usher_passkey_backfill.sql    ← Issues a passkey where none exists
 ```
 
 **Before running 002:** Check no passkeys are already hashed:
@@ -114,7 +112,7 @@ export async function POST(request: NextRequest) {
 | `003_sms_queue_table.sql` + Edge Function | SMS sends no longer block HTTP responses |
 | `004_cron_jobs.sql` | `refresh_inactive_30_days` no longer full-table scans |
 | `lib/rate-limit.ts` | Prevents one bad client from starving the others |
-| `002_passkey_hashing.sql` | Passkeys no longer stored in plaintext |
+| `011_usher_passkey_columns.sql` | Usher portal can look up a passkey at all |
 | `next.config.ts` | ESLint errors caught at build time, not in production |
 
 ---

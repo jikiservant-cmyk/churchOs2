@@ -98,6 +98,19 @@ export async function validateUsherPasskey(churchSlug: string, passkey: string) 
       return { success: false, error: 'Church not found.' };
     }
 
+    // No credential stored at all: the previous rotation path wrote hash-only
+    // and nulled `passkey`, so churches that rotated before migration 011 have
+    // nothing to compare against. Say so instead of blaming the code the usher
+    // typed — no input can ever succeed here.
+    const hasReadablePasskey = typeof church.passkey === 'string' && church.passkey.trim() !== '';
+    if (!church.passkey_hash && !hasReadablePasskey) {
+      console.error('[validateUsherPasskey] Church has no usher passkey configured:', canonicalSlug);
+      return {
+        success: false,
+        error: 'No usher passkey is configured for this church yet. Ask an administrator to set one under Attendance → Usher passkey.',
+      };
+    }
+
     const providedPasskey = (passkey || '').trim();
     if (!providedPasskey || providedPasskey.length < 6 || providedPasskey.length > 32 || !/^[A-Za-z0-9_-]+$/.test(providedPasskey)) {
       return { success: false, error: 'Invalid passkey format.' };
