@@ -13,13 +13,32 @@ import { CHURCH_ADMIN_ROLES, hasAllowedRole } from './auth-security';
 
 import crypto from 'crypto';
 
+// Returns a human-readable reason when the usher secret is unusable, or null.
+// The login path checks this explicitly so a misconfiguration is reported as a
+// misconfiguration instead of falling through to the generic catch below —
+// which is what it used to do, and which reads as a network blip.
+function usherSecretProblem(): string | null {
+  const jwtSecretValue = process.env.USHER_JWT_SECRET;
+  if (!jwtSecretValue) {
+    return 'USHER_JWT_SECRET is not set. Usher sessions are disabled until it is.';
+  }
+  if (jwtSecretValue === 'REPLACE_ME_WITH_A_STRONG_RANDOM_SECRET') {
+    return 'USHER_JWT_SECRET is still the placeholder value. Set a real 32+ byte secret.';
+  }
+  if (Buffer.byteLength(jwtSecretValue) < 32) {
+    return `USHER_JWT_SECRET is ${Buffer.byteLength(jwtSecretValue)} bytes; at least 32 are required.`;
+  }
+  return null;
+}
+
 function getJwtSecret(): Uint8Array {
   // F-04: no silent fallback to the service-role key. A dedicated secret is now
   // mandatory, which is what makes rotation and revocation auditable.
-  const jwtSecretValue = process.env.USHER_JWT_SECRET;
-  if (!jwtSecretValue || jwtSecretValue === 'REPLACE_ME_WITH_A_STRONG_RANDOM_SECRET' || Buffer.byteLength(jwtSecretValue) < 32) {
-    throw new Error('USHER_JWT_SECRET is not configured. Usher sessions are disabled until it is set.');
+  const problem = usherSecretProblem();
+  if (problem) {
+    throw new Error(problem);
   }
+  const jwtSecretValue = process.env.USHER_JWT_SECRET!;
   // Domain-separate the usher secret to prevent raw key reuse
   const derivedSecret = crypto.createHmac('sha256', 'usher_jwt_domain_separation').update(jwtSecretValue).digest();
   return derivedSecret;
@@ -68,16 +87,47 @@ export async function validateUsherPasskey(churchSlug: string, passkey: string) 
     const supabase = await createAdminClient();
     
     // Use strict equality (.eq) instead of ilike so % and _ cannot act as wildcards
-    const { data: church } = await supabase
+    const { data: church, error: churchQueryError } = await supabase
       .schema('church')
       .from('churches')
       .select('id, name, passkey, passkey_hash, passkey_version')
       .eq('slug', canonicalSlug)
       .maybeSingle();
 
+    if (churchQueryError) {
+      // 42703 = undefined_column. The portal would otherwise report
+      // "Church not found." for a church that plainly exists, which sends
+      // operators hunting for a typo instead of a missing migration.
+      if ((churchQueryError as any).code === '42703') {
+        console.error(
+          '[validateUsherPasskey] church.churches is missing passkey columns — run migrations/011_usher_passkey_columns.sql',
+          churchQueryError.message,
+        );
+        return {
+          success: false,
+          error: 'Usher login is misconfigured: this database is missing required columns. Ask an administrator to run migration 011.',
+        };
+      }
+      console.error('[validateUsherPasskey] Church lookup failed:', churchQueryError.message);
+      return { success: false, error: 'Could not verify the church. Please try again.' };
+    }
+
     if (!church) {
       console.error('[validateUsherPasskey] No church found for slug.');
       return { success: false, error: 'Church not found.' };
+    }
+
+    // No credential stored at all: the previous rotation path wrote hash-only
+    // and nulled `passkey`, so churches that rotated before migration 011 have
+    // nothing to compare against. Say so instead of blaming the code the usher
+    // typed — no input can ever succeed here.
+    const hasReadablePasskey = typeof church.passkey === 'string' && church.passkey.trim() !== '';
+    if (!church.passkey_hash && !hasReadablePasskey) {
+      console.error('[validateUsherPasskey] Church has no usher passkey configured:', canonicalSlug);
+      return {
+        success: false,
+        error: 'No usher passkey is configured for this church yet. Ask an administrator to set one under Attendance → Usher passkey.',
+      };
     }
 
     const providedPasskey = (passkey || '').trim();
@@ -85,33 +135,60 @@ export async function validateUsherPasskey(churchSlug: string, passkey: string) 
       return { success: false, error: 'Invalid passkey format.' };
     }
 
+    // Now that the passkey columns exist, this is the most likely next failure
+    // on a fresh deployment. Name it rather than reporting a generic error.
+    const secretProblem = usherSecretProblem();
+    if (secretProblem) {
+      console.error('[validateUsherPasskey] Usher secret unusable:', secretProblem);
+      return {
+        success: false,
+        error: `Usher login is misconfigured: ${secretProblem} An administrator must set USHER_JWT_SECRET (32+ bytes) in the environment.`,
+      };
+    }
+
     const providedHash = computePasskeyHash(providedPasskey);
     let isMatch = false;
+    let matchedVia: 'hash' | 'plaintext' | null = null;
 
+    // Compare against the stored hash when there is one.
     if (church.passkey_hash) {
-      // Timing-safe comparison of cryptographic hash
       const expectedBuf = Buffer.from(church.passkey_hash, 'hex');
       const actualBuf = Buffer.from(providedHash, 'hex');
-      if (expectedBuf.length === actualBuf.length && crypto.timingSafeEqual(expectedBuf, actualBuf)) {
+      if (expectedBuf.length > 0 && expectedBuf.length === actualBuf.length &&
+          crypto.timingSafeEqual(expectedBuf, actualBuf)) {
         isMatch = true;
+        matchedVia = 'hash';
       }
-    } else if (church.passkey) {
-      // Legacy plaintext timing-safe fallback and transparent migration to hash
-      const expectedBuf = Buffer.from((church.passkey || '').trim());
+    }
+
+    // Also accept the readable `passkey` column, even while a hash exists.
+    //
+    // This column is the code the admin screen displays and the operator reads
+    // out of the database, so it has to keep working. Churches provisioned
+    // before migration 011 carry a hash derived from `slug:uuid` — a value
+    // nobody was ever shown — which previously shadowed the readable code and
+    // made the portal impossible to enter. Accepting the plaintext repairs those
+    // rows, and the hash is then rewritten to match.
+    if (!isMatch && typeof church.passkey === 'string' && church.passkey.trim()) {
+      const expectedBuf = Buffer.from(church.passkey.trim());
       const actualBuf = Buffer.from(providedPasskey);
       if (expectedBuf.length === actualBuf.length && crypto.timingSafeEqual(expectedBuf, actualBuf)) {
         isMatch = true;
-        // Upgrade database to store passkey_hash and wipe plaintext
-        supabase
-          .schema('church')
-          .from('churches')
-          .update({
-            passkey_hash: providedHash,
-            passkey: null,
-            passkey_version: church.passkey_version || 1
-          })
-          .eq('id', church.id)
-          .then();
+        matchedVia = 'plaintext';
+      }
+    }
+
+    // Self-heal: keep `passkey_hash` in step with the code that just worked, so
+    // subsequent logins take the hash path. The readable passkey is retained —
+    // the admin UI and the portal link both display it.
+    if (isMatch && matchedVia === 'plaintext' && church.passkey_hash !== providedHash) {
+      const { error: healError } = await supabase
+        .schema('church')
+        .from('churches')
+        .update({ passkey_hash: providedHash })
+        .eq('id', church.id);
+      if (healError) {
+        console.warn('[validateUsherPasskey] Could not refresh passkey_hash:', healError.message);
       }
     }
 
@@ -204,7 +281,10 @@ export async function getUsherSession(churchSlug: string) {
 
 export async function logoutUsher(churchSlug: string) {
   const cookieStore = await cookies();
-  const cookieName = `usher_session_${churchSlug.toLowerCase()}`;
+  // Must canonicalise exactly like getUsherSession(), otherwise a slug with
+  // uppercase or punctuation deletes a cookie name that was never set.
+  const canonicalSlug = churchSlug.toLowerCase().trim().replace(/[^a-z0-9-]/g, '');
+  const cookieName = `usher_session_${canonicalSlug}`;
   cookieStore.delete(cookieName);
   return { success: true };
 }
@@ -368,8 +448,11 @@ export async function updateChurchPasskey(churchId: string, newPasskey: string, 
     }
 
     const trimmedKey = typeof newPasskey === 'string' ? newPasskey.trim() : '';
-    if (trimmedKey.length < 8 || trimmedKey.length > 32 || !/^[A-Za-z0-9_-]+$/.test(trimmedKey)) {
-      return { error: 'Passkey must be at least 8 characters long and contain only letters, numbers, hyphens, and underscores.' };
+    // 6..32 matches both the schema default (a 6-digit code) and the login
+    // validator. Rotation used to demand 8, which rejected codes the portal
+    // would happily accept.
+    if (trimmedKey.length < 6 || trimmedKey.length > 32 || !/^[A-Za-z0-9_-]+$/.test(trimmedKey)) {
+      return { error: 'Passkey must be 6–32 characters using only letters, numbers, hyphens and underscores.' };
     }
 
     const passkeyHash = computePasskeyHash(trimmedKey);
@@ -384,12 +467,23 @@ export async function updateChurchPasskey(churchId: string, newPasskey: string, 
 
     const nextVersion = (church?.passkey_version || 1) + 1;
 
-    // F-04 & F-08 remediation: store hash, wipe plaintext, bump version to invalidate existing usher JWT sessions immediately
+    // F-04 & F-08 remediation: store the hash, keep the readable code, and bump
+    // the version to invalidate existing usher JWT sessions immediately.
+    //
+    // The readable copy is NOT wiped. It is a shared code displayed on the admin
+    // screen and handed to ushers, not a per-user secret; removing it left the
+    // pastor staring at an empty field unable to tell anyone the new code.
+    //
+    // This must never write `passkey: null`. Once the column is NOT NULL, an
+    // explicit NULL fails with 23502 — a DEFAULT does not apply to it.
     const { error } = await adminSupabase
       .schema('church')
       .from('churches')
       .update({
-        passkey: null,
+        // Keep the readable copy: the admin screen and the copyable portal link
+        // both render `passkey`. Nulling it left the pastor looking at an empty
+        // field after rotating, with no way to tell the ushers the new code.
+        passkey: trimmedKey,
         passkey_hash: passkeyHash,
         passkey_version: nextVersion,
         passkey_updated_at: new Date().toISOString()

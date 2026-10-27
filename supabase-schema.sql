@@ -74,7 +74,10 @@ CREATE TABLE IF NOT EXISTS church.churches (
   name text NOT NULL,
   code text UNIQUE,
   slug text NOT NULL UNIQUE CONSTRAINT slug_canonical CHECK (slug ~ '^[a-z0-9]+(-[a-z0-9]+)*$'),
-  passkey text NOT NULL DEFAULT lpad(floor(random() * 900000 + 100000)::text, 6, '0'),
+  -- 10 hex chars from gen_random_uuid(), matching migrations/012 and
+  -- provision_church_v2. The previous default used random(), which is a PRNG,
+  -- not a CSPRNG, despite the comment further down claiming otherwise.
+  passkey text NOT NULL DEFAULT upper(substr(replace(gen_random_uuid()::text, '-', ''), 1, 10)),
   app_type text DEFAULT 'church',
   theme_color text DEFAULT 'bg-blue-600',
   logo_url text,
@@ -84,6 +87,15 @@ CREATE TABLE IF NOT EXISTS church.churches (
   meeting_days smallint[] DEFAULT NULL,
   created_at timestamptz DEFAULT now()
 );
+
+-- Usher passkey verification columns. Referenced by lib/attendance-actions.ts
+-- and by provisioning since the beginning, but never created here — which made
+-- the usher portal answer "Church not found." on any database built from this
+-- file. See migrations/011_usher_passkey_columns.sql.
+ALTER TABLE church.churches
+  ADD COLUMN IF NOT EXISTS passkey_hash       text,
+  ADD COLUMN IF NOT EXISTS passkey_version    integer NOT NULL DEFAULT 1,
+  ADD COLUMN IF NOT EXISTS passkey_updated_at timestamptz;
 
 -- Idempotent for databases created before these columns existed (migrations 005/006)
 ALTER TABLE church.churches
@@ -271,11 +283,15 @@ BEGIN
     p_name
   );
 
+  -- A readable passkey the pastor can see and hand to ushers. The previous
+  -- value was sha256(slug:random-uuid) — unknowable by anyone, and since a
+  -- present hash shadows the readable `passkey` column, it locked the new
+  -- church out of its own usher portal. The hash is derived on first login.
   INSERT INTO church.churches (
     id,
     name,
     slug,
-    passkey_hash,
+    passkey,
     passkey_version,
     app_type,
     ip_address
@@ -284,7 +300,9 @@ BEGIN
     v_tenant_uuid,
     p_name,
     v_canonical_slug,
-    encode(digest(concat(v_canonical_slug, ':', gen_random_uuid()::text), 'sha256'), 'hex'),
+    -- 10 uppercase hex characters: matches the portal validator
+    -- (^[A-Za-z0-9_-]{6,32}$) with no dependency on pgcrypto.
+    upper(substr(replace(gen_random_uuid()::text, '-', ''), 1, 10)),
     1,
     'church',
     p_ip

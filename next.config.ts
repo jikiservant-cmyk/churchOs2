@@ -30,6 +30,8 @@ const allowedOrigins = [
 const nextConfig: NextConfig = {
   output: 'standalone',
   reactStrictMode: true,
+  // Do not advertise the framework/version to unauthenticated clients.
+  poweredByHeader: false,
   typescript: {
     ignoreBuildErrors: false,
   },
@@ -46,6 +48,21 @@ const nextConfig: NextConfig = {
       { protocol: 'https', hostname: 'picsum.photos', port: '', pathname: '/**' },
       { protocol: 'https', hostname: 'images.unsplash.com', port: '', pathname: '/**' },
     ],
+  },
+  async headers() {
+    // Low-risk baseline headers. A Content-Security-Policy is deliberately not
+    // set here: Next.js injects inline bootstrap scripts, so a CSP must be
+    // introduced with nonces and tested against every page before deploying.
+    const baseline = [
+      { key: 'X-Content-Type-Options', value: 'nosniff' },
+      { key: 'Referrer-Policy', value: 'strict-origin-when-cross-origin' },
+      { key: 'Permissions-Policy', value: 'camera=(), microphone=(), geolocation=()' },
+    ];
+    // HSTS only over HTTPS; enabling it on a plain-HTTP host would poison it.
+    if (process.env.NODE_ENV === 'production') {
+      baseline.push({ key: 'Strict-Transport-Security', value: 'max-age=63072000; includeSubDomains' });
+    }
+    return [{ source: '/:path*', headers: baseline }];
   },
   async rewrites() {
     return [

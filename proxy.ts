@@ -1,11 +1,15 @@
 import { createServerClient } from '@supabase/ssr';
 import { NextResponse, type NextRequest } from 'next/server';
-import { isSameOriginRequest } from '@/lib/auth-security';
+import { isSameOriginRequestForHeaders, publicUrlFor } from '@/lib/auth-security';
 
 const SERVER_TO_SERVER_ENDPOINTS = new Set([
   '/api/sms/process-queue',
   '/api/najiki/webhook',
   '/api/webhooks/najiki',
+  // Usher sessions are JWTs in their own cookie, not Supabase sessions. This
+  // endpoint performs its own origin check, so it must not fail closed just
+  // because Supabase auth cannot be reached — otherwise ushers cannot log out.
+  '/api/auth/usher-logout',
 ]);
 const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
@@ -21,7 +25,7 @@ export async function proxy(request: NextRequest) {
   if (isApiMutation && !isTrustedServerEndpoint) {
     const origin = request.headers.get('origin');
     const fetchSite = request.headers.get('sec-fetch-site');
-    if (!isSameOriginRequest(request.url, origin) || fetchSite === 'cross-site') {
+    if (!isSameOriginRequestForHeaders(origin, request.headers, request.url) || fetchSite === 'cross-site') {
       return NextResponse.json({ error: 'Cross-origin request blocked' }, { status: 403 });
     }
   }
@@ -61,14 +65,14 @@ export async function proxy(request: NextRequest) {
     if (error) throw error;
 
     if (isAdminRoute && !user) {
-      return NextResponse.redirect(new URL('/?error=Session%20Expired', request.url));
+      return NextResponse.redirect(publicUrlFor('/?error=Session%20Expired', request.headers, request.url));
     }
   } catch (error) {
     console.error('Proxy auth verification failed:', error);
     // Fail closed for protected pages and cookie-authenticated mutations when
     // Supabase cannot validate the session. Public reads may still render.
     if (isAdminRoute) {
-      return NextResponse.redirect(new URL('/?error=Session%20Expired', request.url));
+      return NextResponse.redirect(publicUrlFor('/?error=Session%20Expired', request.headers, request.url));
     }
     if (isApiMutation) {
       return NextResponse.json({ error: 'Authentication service unavailable' }, { status: 503 });

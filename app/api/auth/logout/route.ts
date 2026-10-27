@@ -1,9 +1,9 @@
 import { createClient } from '@/lib/supabase/server';
 import { NextResponse } from 'next/server';
-import { isSameOriginRequest } from '@/lib/auth-security';
+import { isSameOriginRequestForHeaders, publicUrlFor } from '@/lib/auth-security';
 
 export async function POST(req: Request) {
-  if (!isSameOriginRequest(req.url, req.headers.get('origin'))) {
+  if (!isSameOriginRequestForHeaders(req.headers.get('origin'), req.headers, req.url)) {
     return NextResponse.json({ error: 'Cross-origin request denied.' }, { status: 403 });
   }
   try {
@@ -15,8 +15,7 @@ export async function POST(req: Request) {
     console.error('[Logout Route] Error signing out:', err);
   }
 
-  const url = new URL(req.url);
-  return NextResponse.redirect(new URL('/', url.origin), 303);
+  return NextResponse.redirect(publicUrlFor('/', req.headers, req.url), 303);
 }
 
 export async function GET() {
