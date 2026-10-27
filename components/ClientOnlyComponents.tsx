@@ -3,6 +3,7 @@
 import { useState, useEffect } from "react";
 import SplashScreen from "./SplashScreen";
 import SWRegistration from "./SWRegistration";
+import InstallPrompt from "./pwa/InstallPrompt";
 
 export function ClientOnlyComponents() {
   const [mounted, setMounted] = useState(false);
@@ -17,6 +18,7 @@ export function ClientOnlyComponents() {
     <>
       <SplashScreen />
       <SWRegistration />
+      <InstallPrompt />
     </>
   );
 }
