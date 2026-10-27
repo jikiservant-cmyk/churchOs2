@@ -32,6 +32,7 @@
 // comment — the definition may contain literal values.
 
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { basename } from 'node:path';
 
 // ── The contract each RPC must satisfy. Derived from the call sites in this
@@ -177,8 +178,17 @@ const review = findings.filter(f => f.severity === 'review');
 
 const contract = validateContract(RPC_NAME, parsed);
 const writesPasskey = /passkey/i.test(parsed.body);
+const fingerprint = fingerprintOf(parsed.statement);
 
-function report() {
+// 014 pins the reviewed definition by content, so this has to be the hash of
+// exactly what pg_get_functiondef returns — the statement as written, not the
+// migration file that wraps it in a header.
+function fingerprintOf(statement) {
+  return createHash('sha256').update(statement, 'utf8').digest('hex');
+}
+
+function report(fingerprint) {
+  if (fingerprint) console.log(`Fingerprint  sha256:${fingerprint}`);
   console.log(`\nRPC          public.${RPC_NAME}`);
   console.log(`Parameters   ${contract.params?.join(', ') ?? '?'}`);
   console.log(`Writes passkey  ${writesPasskey ? 'yes' : 'NO — passkey NOT NULL cannot be enforced until this is fixed'}`);
@@ -196,7 +206,7 @@ function report() {
 }
 
 if (checkMode) {
-  report();
+  report(fingerprintOf(raw.trim().endsWith(';') ? raw.trim() : parsed.statement));
   if (!contract.ok) fail('Committed definition does not match the call site.');
   if (blocking.length) fail('Committed definition contains credential material. Rotate it and remove it from history.');
   console.log('\n✔ definition is consistent with the call site\n');
@@ -204,7 +214,7 @@ if (checkMode) {
 }
 
 if (blocking.length && !force) {
-  report();
+  report(fingerprint);
   const redactedPath = `${outPath}.redacted.sql`;
   writeFileSync(redactedPath, redact(parsed.statement) + '\n');
   fail(
@@ -215,7 +225,7 @@ if (blocking.length && !force) {
   );
 }
 
-report();
+report(fingerprint);
 
 // A definition that does not match the call site must never land in the repo:
 // committing it would replace one silent drift with another.
@@ -240,7 +250,14 @@ const header = `-- 013 — public.${RPC_NAME}, captured from the deployed databa
 --   parameters   ${contract.params?.join(', ')}
 --   writes a readable passkey: ${writesPasskey ? 'yes' : 'NO'}
 --   embedded credentials:     ${blocking.length ? 'FOUND — DO NOT COMMIT' : 'none detected'}
+--   sha256 fingerprint:       ${fingerprint}
+--
+-- Paste this fingerprint into migrations/014_passkey_not_null.sql as
+-- v_expected_fingerprint once you have reviewed the body below.
 
 `;
 writeFileSync(outPath, header + parsed.statement + '\n');
-console.log(`\n✔ wrote ${outPath}\n`);
+console.log(`\n✔ wrote ${outPath}`);
+console.log(`\nNext: review the body, then pin it in migrations/014_passkey_not_null.sql:`);
+console.log(`   v_expected_fingerprint CONSTANT text := '${fingerprint}';`);
+console.log(`\nUntil that is filled in, 014 refuses to run.\n`);

@@ -56,7 +56,7 @@ Every church that ever rotated lost its readable code. Combined with the absent
 
 Both files were executed against a real PostgreSQL 16 (PGlite) on a table shaped
 like your deployment — `passkey` nullable, the other three columns absent, 18
-rows with 16 NULLs. `npm run test:migrations` → **19/19 checks pass.**
+rows with 16 NULLs. `npm run test:migrations` → **38/38 checks pass.**
 
 ### `011_usher_passkey_columns.sql` — structural only
 

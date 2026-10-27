@@ -34,9 +34,17 @@ ALTER TABLE church.churches
   ADD COLUMN IF NOT EXISTS passkey_version    integer NOT NULL DEFAULT 1,
   ADD COLUMN IF NOT EXISTS passkey_updated_at timestamptz;
 
--- Rows created before the column existed get the lowest version. Usher JWTs
--- issued before that claim existed also behave as version 1, so live sessions
--- are not invalidated by this migration.
+-- Rows created before the column existed get the lowest version.
+--
+-- Whether that preserves live sessions is an application fact, not one these
+-- statements can establish. lib/attendance-actions.ts treats a NULL column as 1
+-- and a missing JWT claim as 1, then compares them:
+--
+--   const currentVersion = church.passkey_version || 1;        // ~line 239
+--   const sessionVersion = (payload.passkey_version) || 1;     // ~line 240
+--
+-- Those defaults are what keep pre-existing usher JWTs valid. If they ever
+-- change, this migration's choice of 1 has to change with them.
 UPDATE church.churches
    SET passkey_version = 1
  WHERE passkey_version IS NULL;

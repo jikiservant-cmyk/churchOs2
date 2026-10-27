@@ -20,27 +20,40 @@
 --   * Does NOT bump `passkey_version`, so live usher sessions survive.
 --   * Safe to run more than once: rows it fills stop matching the WHERE clause.
 --
--- The generated codes are NOT printed to the log — that would copy 18 live
--- credentials into a transcript. Retrieve them afterwards with the SELECT that
--- follows, and hand each church its own code out of band.
+-- The generated codes are NOT printed to the log — that would copy live
+-- credentials into a transcript. Retrieve them afterwards through a private
+-- channel with the SELECT below, and hand each church its own code.
 
 BEGIN;
 
-UPDATE church.churches
-   SET passkey = upper(substr(replace(gen_random_uuid()::text, '-', ''), 1, 10)),
-       passkey_updated_at = now()
- WHERE coalesce(trim(passkey), '') = '';
+-- Generate and aggregate in one statement: RETURNING exposes exactly the rows
+-- this run wrote, so the format count actually measures the generated values.
+-- (An earlier revision counted rows that were still missing, which after the
+-- UPDATE is always zero — it could never have caught a bad code.)
+WITH backfilled AS (
+  UPDATE church.churches
+     SET passkey = upper(substr(replace(gen_random_uuid()::text, '-', ''), 1, 10)),
+         passkey_updated_at = now()
+   WHERE coalesce(trim(passkey), '') = ''
+  RETURNING passkey
+)
+SELECT count(*)                                              AS backfilled_this_run,
+       count(*) FILTER (WHERE passkey ~ '^[0-9A-F]{10}$')     AS valid_format,
+       count(*) FILTER (WHERE passkey !~ '^[0-9A-F]{10}$')    AS invalid_format
+  FROM backfilled;
 
 COMMIT;
 
--- Retrieve the codes. Run this yourself when you are ready to distribute them;
--- it is intentionally not part of the migration above.
+-- State of the whole table after the run. Counts only — no credential values.
+-- `valid_for_portal` checks the range the login validator actually accepts
+-- (^[A-Za-z0-9_-]{6,32}$), not just the format this migration generates, so
+-- pre-existing codes are covered too.
+SELECT count(*)                                                       AS total_churches,
+       count(*) FILTER (WHERE coalesce(trim(passkey), '') = '')       AS still_missing,
+       count(*) FILTER (WHERE passkey ~ '^[A-Za-z0-9_-]{6,32}$')      AS valid_for_portal
+  FROM church.churches;
+
+-- Retrieve the codes through a private channel when you are ready to
+-- distribute them. Deliberately not part of this file's output.
 --
 --   SELECT slug, passkey FROM church.churches ORDER BY slug;
---
--- Format check: every generated code must match ^[0-9A-F]{10}$ — the portal
--- validator accepts A-Z a-z 0-9 _ - and requires 6 to 32 characters.
-SELECT count(*) AS churches_without_readable_passkey,
-       count(*) FILTER (WHERE passkey ~ '^[0-9A-F]{10}$') AS generated_ok
-  FROM church.churches
- WHERE coalesce(trim(passkey), '') = '';

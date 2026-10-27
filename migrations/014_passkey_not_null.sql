@@ -1,7 +1,7 @@
 -- 014 — Enforce `passkey NOT NULL`, but only when the data and the write paths
 --       actually support it.
 --
--- Run order: 011 → 012 → verify → 014. Do not run this before 012.
+-- Run order: 011 → 012 → capture and review 013 → 014. Do not run before 013.
 --
 -- Why it is gated
 -- ---------------
@@ -10,22 +10,25 @@
 -- satisfy it with a placeholder code that every usher in that church shares
 -- with an attacker.
 --
--- So this migration refuses to proceed unless all three conditions hold, and it
--- says exactly which one failed:
+-- It also must not go in while the provisioning function is unreviewed: if
+-- provision_church_v3 inserts a church without a passkey, NOT NULL turns that
+-- into a hard failure at signup. So this migration refuses unless:
 --
---   1. 011 has been applied (the hash columns exist).
---   2. Every church has a non-empty passkey — i.e. 012 ran and was verified.
---   3. The deployed provisioning function writes a passkey. A new church
---      created without one would repeat the outage this whole exercise fixed.
---      This is checked against the *database*, not against the repo, because
---      the repo does not contain provision_church_v3 (see scripts/capture-rpc.mjs).
+--   1. 011 has been applied.
+--   2. Every church has a non-empty passkey (012 ran and was verified).
+--   3. Exactly one overload of public.provision_church_v3 matches the argument
+--      list the app sends, so the check cannot land on the wrong function.
+--   4. That overload's deployed text hashes to the fingerprint recorded below,
+--      i.e. it is byte-identical to the definition a human reviewed.
 --
--- Rotation is the other write path, and it is verified in code:
+-- Point 4 is deliberate. An earlier revision tested `prosrc ILIKE '%passkey%'`,
+-- which proves only that the word appears — in a comment, a variable name, or
+-- a dead branch — and would have passed for a function that never assigns one.
+-- A pinned hash is a statement about the exact text that was reviewed, which
+-- is what "reviewed" has to mean.
+--
+-- Rotation is the other write path, verified in code:
 -- lib/attendance-actions.ts updateChurchPasskey writes `passkey: trimmedKey`.
---
--- Once the constraint holds, the old `passkey: null` rotation bug and any
--- provisioning path that forgets a passkey fail loudly at the database instead
--- of silently locking a congregation out of check-in.
 --
 -- Safe to run more than once.
 
@@ -33,12 +36,27 @@ BEGIN;
 
 DO $$
 DECLARE
+  -- ── Fill this in before running ───────────────────────────────────────────
+  -- Produced by the capture step:
+  --   node scripts/capture-rpc.mjs provision_church_v3.def.sql \
+  --        --out migrations/013_provision_church_v3.sql
+  -- which prints the fingerprint of the definition it wrote. Until it holds a
+  -- real sha256, this migration refuses to run — by design.
+  v_expected_fingerprint CONSTANT text := 'UNREVIEWED';
+
+  -- The argument list lib/provision-actions.ts sends. Pins the overload.
+  v_expected_signature   CONSTANT text :=
+    'p_user_id uuid, p_name text, p_slug text, p_role text, p_invite_code text';
+
   v_missing_count  integer;
   v_missing_slugs  text;
   v_blank_count    integer;
   v_blank_slugs    text;
-  v_has_v3         boolean;
-  v_v3_body        text;
+  v_overloads      integer;
+  v_oid            oid;
+  v_signature      text;
+  v_fingerprint    text;
+  v_body           text;
 BEGIN
   -- 1. Columns from 011 must be present.
   IF NOT EXISTS (
@@ -62,7 +80,7 @@ BEGIN
       v_missing_count, v_missing_slugs;
   END IF;
 
-  -- 2b. …and it must be a usable one, not an empty string left by a bad write.
+  -- 2b. …and it must be usable, not an empty string.
   SELECT count(*), string_agg(slug, ', ' ORDER BY slug)
     INTO v_blank_count, v_blank_slugs
     FROM church.churches
@@ -74,27 +92,60 @@ BEGIN
       v_blank_count, v_blank_slugs;
   END IF;
 
-  -- 3. Provisioning must write a passkey, or new churches repeat the bug.
-  SELECT EXISTS (
-    SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-     WHERE n.nspname = 'public' AND p.proname = 'provision_church_v3'
-  ), (
-    SELECT p.prosrc FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-     WHERE n.nspname = 'public' AND p.proname = 'provision_church_v3'
-     LIMIT 1
-  ) INTO v_has_v3, v_v3_body;
+  -- 3. Exactly one overload with the signature the app calls.
+  SELECT count(*) INTO v_overloads
+    FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+   WHERE n.nspname = 'public' AND p.proname = 'provision_church_v3';
 
-  IF NOT v_has_v3 THEN
+  IF v_overloads = 0 THEN
     RAISE EXCEPTION
       'Refusing NOT NULL: public.provision_church_v3 does not exist, so provisioning is already broken. Capture it first (scripts/capture-rpc.mjs).';
   END IF;
 
-  IF v_v3_body IS NULL OR v_v3_body NOT ILIKE '%passkey%' THEN
+  SELECT count(*), min(p.oid)
+    INTO v_overloads, v_oid
+    FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+   WHERE n.nspname = 'public' AND p.proname = 'provision_church_v3'
+     AND pg_get_function_identity_arguments(p.oid) = v_expected_signature;
+
+  IF v_overloads = 0 THEN
     RAISE EXCEPTION
-      'Refusing NOT NULL: public.provision_church_v3 never sets a passkey, so every newly provisioned church would have none. Fix the function first (see migrations/013).';
+      'Refusing NOT NULL: no overload of provision_church_v3 accepts (%). The deployed function does not match the call site.',
+      v_expected_signature;
   END IF;
 
-  RAISE NOTICE 'Preconditions satisfied: 0 NULL, 0 blank, provision_church_v3 writes a passkey.';
+  IF v_overloads > 1 THEN
+    RAISE EXCEPTION
+      'Refusing NOT NULL: % overloads of provision_church_v3 accept the call-site signature. Resolve the ambiguity before trusting this gate.',
+      v_overloads;
+  END IF;
+
+  -- 4. The reviewed definition, identified by content rather than by name.
+  v_signature   := pg_get_function_identity_arguments(v_oid);
+  v_body        := (SELECT prosrc FROM pg_proc WHERE oid = v_oid);
+  v_fingerprint := encode(sha256(convert_to(pg_get_functiondef(v_oid), 'UTF8')), 'hex');
+
+  IF v_expected_fingerprint = 'UNREVIEWED' THEN
+    RAISE EXCEPTION
+      'Refusing NOT NULL: no reviewed definition pinned. Current deployed fingerprint is sha256:%. Set v_expected_fingerprint after capturing the definition with scripts/capture-rpc.mjs.',
+      v_fingerprint;
+  END IF;
+
+  IF v_fingerprint <> v_expected_fingerprint THEN
+    RAISE EXCEPTION
+      'Refusing NOT NULL: provision_church_v3 has changed since review. Pinned %, deployed %. Re-capture and re-review before enforcing.',
+      v_expected_fingerprint, v_fingerprint;
+  END IF;
+
+  -- Secondary, and only secondary: if the word appears nowhere in the body the
+  -- fingerprint review cannot have concluded that it assigns one.
+  IF v_body IS NULL OR v_body !~* 'passkey' THEN
+    RAISE EXCEPTION
+      'Refusing NOT NULL: the reviewed provision_church_v3 body never mentions passkey, so new churches would get none.';
+  END IF;
+
+  RAISE NOTICE 'Preconditions satisfied: 0 NULL, 0 blank, one overload (%), fingerprint %.',
+    v_signature, left(v_fingerprint, 16);
 END $$;
 
 ALTER TABLE church.churches ALTER COLUMN passkey SET NOT NULL;

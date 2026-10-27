@@ -131,31 +131,54 @@ unless all of these hold:
 | 011 applied | `passkey_hash` column exists | `…Apply migrations/011…` |
 | No NULL passkeys | `count(*) WHERE passkey IS NULL` | `…16 church(es) have a NULL passkey (church-0, …)` |
 | No blank passkeys | `trim(passkey) = ''` | `…have a blank passkey…` |
-| Provisioning writes one | the **deployed** `provision_church_v3` body mentions `passkey` | `…provision_church_v3 never sets a passkey…` |
+| Exactly one overload matches the call site | `pg_get_function_identity_arguments` equals `p_user_id uuid, p_name text, p_slug text, p_role text, p_invite_code text` | `…no overload of provision_church_v3 accepts (…)` |
+| The definition was reviewed | sha256 of `pg_get_functiondef` equals the pinned value | `…has changed since review. Pinned …, deployed …` |
+| Nothing pinned yet | the constant is still `'UNREVIEWED'` | `…no reviewed definition pinned. Current deployed fingerprint is sha256:…` |
 | Provisioning exists | `pg_proc` lookup | `…does not exist, so provisioning is already broken…` |
 
-The third row is the one that ties the two tracks together: nullability cannot
-be declared safe while the function that creates new rows is unknown. Once 013
-is committed and applied, that check passes on its own.
+**The fingerprint row is the one that matters.** An earlier revision tested
+`prosrc ILIKE '%passkey%'`, which proves only that the word appears somewhere —
+in a comment, a variable name, or a dead branch — and would have passed for a
+function that never assigns one. It also selected the function by name without
+pinning the overload, so with two `provision_church_v3` overloads present it
+could have checked the wrong one. PostgreSQL allows that: two overloads differing
+only in arguments share the name.
+
+Both are now closed. The gate resolves the overload by the exact argument list
+the app sends, refuses if zero or several match, and then compares a sha256 of
+`pg_get_functiondef` against a value you paste in after reading the body. A
+keyword can be gamed by accident; a hash of reviewed text cannot.
+
+This is also why nullability cannot precede the capture: if `provision_church_v3`
+inserts a church without a passkey, `NOT NULL` turns that into a hard failure at
+signup for every future church.
 
 Rotation is the other write path and is verified in code, not SQL —
 `updateChurchPasskey` writes `passkey: trimmedKey`.
 
 Inside the `BEGIN…COMMIT`, so a refusal rolls back cleanly and changes nothing.
 
-### Verified behaviour (`npm run test:sql`, 29 checks)
+### Verified behaviour (`npm run test:sql`, 38 checks)
 
 ```
-PASS  014 refuses before the backfill — Refusing NOT NULL: 16 church(es) have a NULL passkey
+PASS  014 refuses before the backfill — 16 church(es) have a NULL passkey
 PASS  014 refusal leaves passkey nullable
-PASS  014 applies after the backfill
+PASS  014 applies after backfill with a pinned definition
 PASS  014 makes passkey NOT NULL
 PASS  014 is re-runnable
+PASS  014 refuses while the definition is unpinned
+PASS  014 tells you the deployed fingerprint to pin
 PASS  014 refuses without provision_church_v3
-PASS  014 refuses when provisioning writes no passkey
+PASS  014 refuses when no overload matches the call site
+PASS  014 refuses when the reviewed body never mentions passkey
+PASS  014 detects a definition changed after review
 PASS  014 refuses on blank (non-NULL) passkeys
 PASS  014 refusal lists slugs, never passkeys
 ```
+
+Migration 012's own output is tested the same way: it must report the rows it
+actually generated, and the post-check must catch a deliberately corrupted code
+(`valid_for_portal` 3 → 2) rather than always reporting success.
 
 ### Deploy order
 
@@ -169,6 +192,17 @@ read them deliberately with:
 ```sql
 SELECT slug, passkey FROM church.churches ORDER BY slug;
 ```
+
+---
+
+## Current live state (as reported)
+
+* **011 applied.** All three columns present; no NULL `passkey_version`.
+* **012 applied.** 16 codes generated, 0 invalid formats; 18 churches total,
+  0 missing. The format check in 012 was rewritten as described above before it
+  ran — the version in this repo is the corrected one.
+* **014 not applied**, correctly: the definition is not pinned yet, so it would
+  refuse. That is the gate doing its job.
 
 ---
 

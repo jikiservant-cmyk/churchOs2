@@ -4,6 +4,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { writeFileSync, readFileSync, existsSync, rmSync, mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -69,6 +70,7 @@ function run(files) {
     dir, out, code, stdout, stderr,
     combined: `${stdout}\n${stderr}`,
     wrote: existsSync(out),
+    content: existsSync(out) ? readFileSync(out, 'utf8') : '',
     redacted: existsSync(`${out}.redacted.sql`),
   };
   rmSync(dir, { recursive: true, force: true });
@@ -126,6 +128,22 @@ describe('capture-rpc.mjs', () => {
     assert.ok(!redacted.includes(FAKE_SECRET), 'redacted copy still contains the secret');
     assert.match(redacted, /\[REDACTED:stripe-key:\d+ch\]/);
     rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('emits the fingerprint that migrations/014 pins', () => {
+    const r = run({ dump: GOOD });
+    assert.equal(r.code, 0, r.combined);
+    const printed = r.combined.match(/sha256:([0-9a-f]{64})/);
+    assert.ok(printed, 'no fingerprint printed');
+
+    // It must be the hash of the definition as pg_get_functiondef returns it,
+    // because that is what 014 recomputes inside the database.
+    const expected = createHash('sha256').update(GOOD.trim(), 'utf8').digest('hex');
+    assert.equal(printed[1], expected, 'fingerprint does not match the definition text');
+
+    // …and it must be recorded in the file, so the pin survives a lost terminal.
+    assert.ok(r.content.includes(printed[1]), 'written migration does not record the fingerprint');
+    assert.match(r.combined, /v_expected_fingerprint CONSTANT text := '[0-9a-f]{64}'/);
   });
 
   it('extracts only the target function from a multi-statement dump', () => {
