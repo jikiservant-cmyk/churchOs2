@@ -12,7 +12,9 @@
     "typecheck": "tsc --noEmit",
     "check": "npm run typecheck && npm run lint && npm test && npm run security:audit && npm run build",
     "security:audit": "npm audit --omit=dev --audit-level=moderate",
-    "test:migrations": "node tests/sql/passkey_migration.test.mjs"
+    "test:migrations": "node --test tests/sql/passkey_migration.test.mjs",
+    "test:sql": "node --test tests/sql/*.test.mjs",
+    "capture:rpc": "node scripts/capture-rpc.mjs"
   },
   "dependencies": {
     "@fontsource/outfit": "^5.3.0",

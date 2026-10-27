@@ -21,7 +21,8 @@ churchOs-fixes/
 ├── migrations/
 │   ├── 005…010                               → In the repo's migrations/ folder
 │   ├── 011_usher_passkey_columns.sql         → Run in Supabase SQL Editor
-│   └── 012_usher_passkey_backfill.sql        → Run in Supabase SQL Editor
+│   ├── 012_usher_passkey_backfill.sql        → Run in Supabase SQL Editor
+│   └── 014_passkey_not_null.sql              → Gated; run last (see PROVISIONING_DRIFT.md)
 └── supabase/
     └── functions/
         ├── church-najiki-dispatch/index.ts   → Single queue-row Na'jiki dispatcher
@@ -55,6 +56,7 @@ Open Supabase Dashboard → SQL Editor and run each file in order:
 005…010 (already in migrations/)  ← Apply in order
 011_usher_passkey_columns.sql     ← Adds the usher passkey columns (additive)
 012_usher_passkey_backfill.sql    ← Issues a passkey where none exists
+014_passkey_not_null.sql          ← Enforces NOT NULL; refuses until the data is ready
 ```
 
 **Before running 002:** Check no passkeys are already hashed:

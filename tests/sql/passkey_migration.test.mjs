@@ -130,6 +130,106 @@ check('011 report query projects counts only',
 check('011 text never interpolates a passkey value',
   !/passkey\s*=\s*%/.test(m011) && !/readable_passkey/.test(m011));
 
+// ── 014: passkey NOT NULL, gated ────────────────────────────────────────────
+const m014 = readFileSync('migrations/014_passkey_not_null.sql', 'utf8');
+const m011src = m011;
+const m012src = m012;
+
+// A fresh database shaped like production: passkey nullable, no hash columns,
+// `nulls` churches with no passkey, plus an optional provisioning function.
+async function scenario({ nulls = 16, total = 18, v3 = 'writes', blanks = 0 } = {}) {
+  const d = new PGlite();
+  await d.exec('CREATE SCHEMA church;');
+  await d.exec(`CREATE TABLE church.churches (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      name text NOT NULL, slug text NOT NULL UNIQUE, passkey text);`);
+  for (let i = 0; i < total; i++) {
+    const value = i < nulls ? null : (i < nulls + blanks ? '' : `CODE${i}XYZ`);
+    await d.query('INSERT INTO church.churches (name, slug, passkey) VALUES ($1,$2,$3)',
+      [`C${i}`, `church-${i}`, value]);
+  }
+  if (v3 === 'writes') {
+    await d.exec(`CREATE FUNCTION public.provision_church_v3(p_invite_code text)
+      RETURNS uuid LANGUAGE plpgsql SECURITY DEFINER AS $$
+      BEGIN RETURN gen_random_uuid(); -- inserts passkey
+      END $$;`);
+  } else if (v3 === 'nopasskey') {
+    await d.exec(`CREATE FUNCTION public.provision_church_v3(p_invite_code text)
+      RETURNS uuid LANGUAGE plpgsql SECURITY DEFINER AS $$
+      BEGIN RETURN gen_random_uuid(); END $$;`);
+  }
+  await d.exec(m011src);
+  return d;
+}
+// Runs a migration and returns the error message, if any. A refused migration
+// aborts the open transaction; roll back so follow-up assertions can run.
+async function tryExec(d, sql) {
+  try { await d.exec(sql); return null; }
+  catch (e) { try { await d.exec('ROLLBACK'); } catch { /* already closed */ } return e.message; }
+}
+
+const nullable = async (d) => (await d.query(
+  `SELECT is_nullable FROM information_schema.columns
+    WHERE table_schema='church' AND table_name='churches' AND column_name='passkey'`
+)).rows[0].is_nullable;
+
+// A. Before the backfill: must refuse and leave the column alone.
+{
+  const d = await scenario({ nulls: 16 });
+  const err = await tryExec(d, m014);
+  check('014 refuses before the backfill', err !== null, err?.slice(0, 70));
+  check('014 refusal names the NULL count', /16 church\(es\) have a NULL passkey/.test(err ?? ''));
+  check('014 refusal leaves passkey nullable', (await nullable(d)) === 'YES');
+}
+
+// B. After the backfill: succeeds.
+{
+  const d = await scenario({ nulls: 16 });
+  await d.exec(m012src);
+  const err = await tryExec(d, m014);
+  check('014 applies after the backfill', err === null, err?.slice(0, 90));
+  check('014 makes passkey NOT NULL', (await nullable(d)) === 'NO');
+}
+
+// C. Re-running is harmless.
+{
+  const d = await scenario({ nulls: 16 });
+  await d.exec(m012src);
+  await d.exec(m014);
+  const err = await tryExec(d, m014);
+  check('014 is re-runnable', err === null, err?.slice(0, 90));
+}
+
+// D. No provisioning function at all.
+{
+  const d = await scenario({ nulls: 0, v3: 'missing' });
+  const err = await tryExec(d, m014);
+  check('014 refuses without provision_church_v3', /provision_church_v3 does not exist/.test(err ?? ''));
+}
+
+// E. Provisioning function exists but never writes a passkey.
+{
+  const d = await scenario({ nulls: 0, v3: 'nopasskey' });
+  const err = await tryExec(d, m014);
+  check('014 refuses when provisioning writes no passkey',
+    /never sets a passkey/.test(err ?? ''), err?.slice(0, 80));
+}
+
+// F. Blank strings are not a usable passkey.
+{
+  const d = await scenario({ nulls: 0, blanks: 3 });
+  const err = await tryExec(d, m014);
+  check('014 refuses on blank (non-NULL) passkeys', /3 church\(es\) have a blank passkey/.test(err ?? ''));
+}
+
+// G. Refusal messages must not leak credential values.
+{
+  const d = await scenario({ nulls: 2, total: 4 });
+  const err = (await tryExec(d, m014)) ?? '';
+  check('014 refusal lists slugs, never passkeys',
+    /church-0/.test(err) && !/CODE\dXYZ/.test(err), err.slice(0, 60));
+}
+
 const failed = results.filter(r => !r.pass);
 console.log(`\n${results.length - failed.length}/${results.length} checks passed`);
 process.exit(failed.length ? 1 : 0);

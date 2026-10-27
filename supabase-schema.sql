@@ -74,7 +74,10 @@ CREATE TABLE IF NOT EXISTS church.churches (
   name text NOT NULL,
   code text UNIQUE,
   slug text NOT NULL UNIQUE CONSTRAINT slug_canonical CHECK (slug ~ '^[a-z0-9]+(-[a-z0-9]+)*$'),
-  passkey text NOT NULL DEFAULT lpad(floor(random() * 900000 + 100000)::text, 6, '0'),
+  -- 10 hex chars from gen_random_uuid(), matching migrations/012 and
+  -- provision_church_v2. The previous default used random(), which is a PRNG,
+  -- not a CSPRNG, despite the comment further down claiming otherwise.
+  passkey text NOT NULL DEFAULT upper(substr(replace(gen_random_uuid()::text, '-', ''), 1, 10)),
   app_type text DEFAULT 'church',
   theme_color text DEFAULT 'bg-blue-600',
   logo_url text,

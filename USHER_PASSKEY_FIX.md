@@ -121,24 +121,24 @@ cleanly if the `church` schema or table is missing.
 
 ## Still outstanding
 
-1. **`provision_church_v3` is only in the database.** Dump it into the repo so
-   the schema is reproducible:
-   ```sql
-   SELECT pg_get_functiondef(p.oid)
-   FROM   pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-   WHERE  n.nspname = 'public' AND p.proname = 'provision_church_v3';
-   ```
-   Its body also decides what a *new* church's passkey looks like, so the repo
-   is currently guessing.
-2. **The repo's `passkey` column is `NOT NULL`, but your live table holds NULLs.**
-   Another sign the deployed table does not match `supabase-schema.sql`. I left
-   the constraint alone — it will surface this class of bug loudly — but the
-   drift should be reconciled deliberately, not silently.
-3. **16 NULL passkeys mean nobody has been able to run check-in** for those
+These are tracked in **`PROVISIONING_DRIFT.md`**, which has the capture procedure
+and the gated nullability migration.
+
+1. **`provision_church_v3` is still only in the database.** The repo defines
+   `v2`, whose fifth parameter is `p_ip` rather than `p_invite_code` — so it is
+   not a substitute, and the invite-code check exists nowhere in the repo.
+   `scripts/capture-rpc.mjs` reviews and places the dump without the body
+   passing through chat. Not something I can do for you: I have no database
+   access.
+2. **Eleven more RPCs are also missing** from the repo, including
+   `my_login_context` on the sign-in path. `tests/sql/rpc-contract.test.mjs`
+   now pins the list so it cannot grow unnoticed.
+3. **Nullability is gated, not applied.** `migrations/014_passkey_not_null.sql`
+   refuses to run until there are zero NULL and zero blank passkeys *and* the
+   deployed provisioning function writes one. Tested against PostgreSQL 16.
+4. **16 NULL passkeys mean nobody has been able to run check-in** for those
    churches. Worth confirming none of them had an active service expecting
    attendance records during the outage.
-
----
 
 ## Verify after deploying
 
