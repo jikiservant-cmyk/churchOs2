@@ -68,7 +68,15 @@ export async function proxy(request: NextRequest) {
       return NextResponse.redirect(publicUrlFor('/?error=Session%20Expired', request.headers, request.url));
     }
   } catch (error) {
-    console.error('Proxy auth verification failed:', error);
+    // Only log as error for protected routes/mutations — public pages like
+    // /signup, /manifest, /sw.js naturally have no session and are expected
+    // to hit AuthSessionMissingError. Demoted to warn to keep Vercel logs clean.
+    const isPublicNoise = !isAdminRoute && !isApiMutation;
+    if (isPublicNoise) {
+      console.warn('Proxy auth skipped (public route, no session):', url.pathname);
+    } else {
+      console.error('Proxy auth verification failed:', error);
+    }
     // Fail closed for protected pages and cookie-authenticated mutations when
     // Supabase cannot validate the session. Public reads may still render.
     if (isAdminRoute) {

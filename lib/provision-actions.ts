@@ -147,6 +147,15 @@ export async function provisionTenant(prevState: ProvisionState, formData: FormD
 
     if (provisionError || !tenantId) {
       console.error('[Provisioning] Atomic church provisioning failed:', provisionError);
+      const msg = (provisionError as any)?.message || '';
+      // Surface safe known business errors so user knows what to fix
+      if (/slug.*already taken/i.test(msg)) {
+        return { error: `Workspace URL "${sanitizedSlug}" is already taken. Try ${sanitizedSlug}-1, ${sanitizedSlug}-2 or another name.` };
+      }
+      if (/invite/i.test(msg)) return { error: msg };
+      if (/already belong|already exists/i.test(msg)) return { error: msg };
+      if (/network\/location|per network/i.test(msg)) return { error: msg };
+      if (msg && msg.length < 120) return { error: msg };
       return { error: 'Church setup could not be completed. Check the invite code or try again.' };
     }
 
