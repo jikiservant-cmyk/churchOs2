@@ -123,6 +123,12 @@ async function handlePost(request: Request) {
     return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 });
   }
 
+  // Najiki sends a test ping on webhook registration: { event: "webhook.test" }
+  // with no paymentIntentId — ignore it, don't treat as malformed payment.
+  if (payload && typeof payload === 'object' && (payload as any).event === 'webhook.test') {
+    return NextResponse.json({ received: true });
+  }
+
   const kind = classifyNajikiWebhook(payload);
 
   if (kind === 'sms_delivery') {
