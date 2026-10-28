@@ -142,6 +142,12 @@ export default function TopUpModal({ churchId, isOpen, onClose }: TopUpModalProp
 
     setIsSubmitting(true);
 
+    // surface server error inline + toast with full Najiki detail
+    // keep previous inline error visible
+    const setInlineError = (m: string) => {
+      setPendingConfirmationMessage(m);
+      setPollState('idle');
+    };
     try {
       const formData = new FormData(e.currentTarget);
       formData.set('amount', finalAmount.toString());
@@ -158,10 +164,17 @@ export default function TopUpModal({ churchId, isOpen, onClose }: TopUpModalProp
         toast.success(result.message || 'Payment prompt sent! Check your phone.');
         // Don't close — show polling state
       } else {
-        toast.error(result?.error || 'Failed to initiate payment');
+        const errMsg = result?.error || 'Failed to initiate payment';
+        console.error('[TopUp] initiate failed:', errMsg);
+        // show inline so user sees it after modal stays open
+        setInlineError(errMsg);
+        toast.error(errMsg, { duration: 6000 });
       }
-    } catch (err) {
-      toast.error('An unexpected error occurred');
+    } catch (err: any) {
+      const errMsg = err?.message || 'An unexpected error occurred';
+      console.error('[TopUp] unexpected:', err);
+      setInlineError(errMsg);
+      toast.error(errMsg, { duration: 6000 });
     } finally {
       setIsSubmitting(false);
     }
@@ -381,6 +394,12 @@ export default function TopUpModal({ churchId, isOpen, onClose }: TopUpModalProp
                   />
                 </div>
                 <input type="hidden" name="amount" value={customAmount || amount} />
+                {pendingConfirmationMessage && pollState === 'idle' && (
+                  <div className="mt-3 p-3 bg-red-50 border border-red-200 rounded-xl flex gap-2">
+                    <AlertCircle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
+                    <p className="text-[12px] text-red-700 leading-snug break-words">{pendingConfirmationMessage}</p>
+                  </div>
+                )}
               </div>
             </div>
 
