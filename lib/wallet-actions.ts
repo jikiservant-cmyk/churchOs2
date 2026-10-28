@@ -75,12 +75,13 @@ export async function initiateNajikiPayment(formData: FormData) {
       return { error: deniedLimit.unavailable ? 'Payment protection is temporarily unavailable.' : 'Too many payment attempts. Please wait before trying again.' };
     }
 
-    // Fail fast with the exact variable names that are missing.
+    // Fail fast with the exact variable names that are missing — surface to UI
     try {
       getNajikiConfig();
     } catch (configError: any) {
-      console.error('[Najiki] Payment credentials missing from environment.');
-      return { error: configError?.message ?? 'Payment service not configured' };
+      const missingMsg = configError?.message ?? 'Payment service not configured';
+      console.error('[Najiki] Payment credentials missing from environment:', missingMsg);
+      return { error: `${missingMsg} — set NAJIKI_API_KEY (and NAJIKI_API_URL if custom) in Vercel env and redeploy.` };
     }
 
     // 0. Create admin client
