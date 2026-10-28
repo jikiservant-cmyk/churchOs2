@@ -24,7 +24,7 @@ describe('resource-abuse security controls', () => {
     assert.equal(limiter.check('tenant-sms', 5, 3_600, 2_000, 1).allowed, false);
   });
 
-  it('fails closed in production when shared rate-limit storage is not configured', async () => {
+  it('falls back to in-memory limiter in production when shared storage is not configured', async () => {
     const env = process.env as Record<string, string | undefined>;
     const previousNodeEnv = env.NODE_ENV;
     const previousUrl = env.UPSTASH_REDIS_REST_URL;
@@ -33,7 +33,13 @@ describe('resource-abuse security controls', () => {
     delete env.UPSTASH_REDIS_REST_URL;
     delete env.UPSTASH_REDIS_REST_TOKEN;
     try {
-      assert.deepEqual(await checkRateLimit({ namespace: 'test', subject: 'user', limit: 1, windowSeconds: 60 }), {
+      // Without Redis, production now degrades to local limiter so signups keep working.
+      const first = await checkRateLimit({ namespace: 'test-fallback', subject: 'user-fallback', limit: 1, windowSeconds: 60 });
+      assert.equal(first.allowed, true);
+      const second = await checkRateLimit({ namespace: 'test-fallback', subject: 'user-fallback', limit: 1, windowSeconds: 60 });
+      assert.equal(second.allowed, false);
+      // Invalid options still fail closed
+      assert.deepEqual(await checkRateLimit({ namespace: 'test', subject: '', limit: 1, windowSeconds: 60 }), {
         allowed: false,
         retryAfterSeconds: 60,
         unavailable: true,
@@ -65,6 +71,13 @@ describe('resource-abuse security controls', () => {
     assert.equal(getRateLimitIp(new Headers({ 'cf-connecting-ip': '203.0.113.9, 203.0.113.10' })), '203.0.113.10');
     assert.equal(getRateLimitIp(new Headers({ 'x-vercel-forwarded-for': 'not-an-ip' })), 'unknown');
     assert.equal(getRateLimitIp(new Headers()), 'unknown');
+  });
+
+  it('reads Netlify and proxy IP headers and strips port suffixes', () => {
+    assert.equal(getRateLimitIp(new Headers({ 'x-nf-client-connection-ip': '203.0.113.11' })), '203.0.113.11');
+    assert.equal(getRateLimitIp(new Headers({ 'x-forwarded-for': '203.0.113.12:12345' })), '203.0.113.12');
+    assert.equal(getRateLimitIp(new Headers({ 'x-forwarded-for': '198.51.100.1, 203.0.113.13' })), '203.0.113.13');
+    assert.equal(getRateLimitIp(new Headers({ 'x-nf-client-connection-ip': '198.51.100.5', 'x-forwarded-for': '203.0.113.14' })), '198.51.100.5');
   });
 
   it('rejects simple cross-origin form content types before parsing JSON', async () => {

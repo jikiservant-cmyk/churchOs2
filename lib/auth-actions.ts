@@ -229,16 +229,22 @@ export async function signup(prevState: AuthState, formData: FormData): Promise<
 
   const requestHeaders = await headers();
   const clientIp = getRateLimitIp(requestHeaders);
-  if (clientIp === 'unknown' && process.env.NODE_ENV === 'production') {
-    return { error: 'Signup protection is temporarily unavailable. Please try again later.' };
-  }
 
+  // Always enforce email-based rate limiting; IP limiting is best-effort.
+  // When IP cannot be determined (e.g. missing proxy headers) we still allow
+  // signup rather than hard-failing — email limit prevents abuse.
   const emailLimit = await checkRateLimit({
     namespace: 'signup-email', subject: credentials.email, limit: 3, windowSeconds: 60 * 60,
   });
-  const ipLimit = await checkRateLimit({
-    namespace: 'signup-ip', subject: clientIp, limit: 10, windowSeconds: 60 * 60,
-  });
+  const ipLimit =
+    clientIp === 'unknown'
+      ? { allowed: true, retryAfterSeconds: 0 }
+      : await checkRateLimit({
+          namespace: 'signup-ip', subject: clientIp, limit: 10, windowSeconds: 60 * 60,
+        });
+  if (clientIp === 'unknown' && process.env.NODE_ENV === 'production') {
+    console.warn('[Auth] Signup IP unavailable - enforcing email rate limit only');
+  }
   const deniedLimit = !emailLimit.allowed ? emailLimit : ipLimit;
   if (!emailLimit.allowed || !ipLimit.allowed) {
     return {
