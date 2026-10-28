@@ -64,7 +64,7 @@ export async function provisionTenant(prevState: ProvisionState, formData: FormD
   // 1.1 Check if user already has an active church
   const { data: existingProfile, error: profileLookupError } = await adminSupabase
     .from('admin_profiles')
-    .select('tenant_id, role')
+    .select('tenant_id, role, app_type')
     .eq('id', user.id)
     .maybeSingle();
 
@@ -74,9 +74,8 @@ export async function provisionTenant(prevState: ProvisionState, formData: FormD
   }
 
   if (existingProfile?.tenant_id) {
-    if (!['pastor', 'admin'].includes(existingProfile.role)) {
-      return { error: 'Only a church pastor or administrator can access this workspace.' };
-    }
+    // If they already have a church workspace, redirect them — even if legacy role is 'member'
+    // from shared table before upgrade. Only hard-block truly foreign roles.
     const { data: existingChurch } = await adminSupabase
       .schema('church')
       .from('churches')
@@ -92,6 +91,9 @@ export async function provisionTenant(prevState: ProvisionState, formData: FormD
         appType
       };
     }
+    // They have a tenant_id but no matching church row (e.g. saccos tenant) —
+    // don't let them silently create a second church that overwrites it.
+    // Let canProvisionChurch handle it (will block because tenant_id != null).
   }
 
   // Enforce account limit always; IP limit only when IP is known. Never hard-fail

@@ -10,6 +10,8 @@ describe('church provisioning authorization policy', () => {
 
   it('allows only an unlinked pastor profile to provision a church', () => {
     assert.equal(canProvisionChurch({ tenant_id: null, role: 'pastor' }), true);
+    // Shared table: SACCOS default is member -> must be allowed to upgrade to pastor for church
+    assert.equal(canProvisionChurch({ tenant_id: null, role: 'member' }), true);
     assert.equal(canProvisionChurch({ tenant_id: 'tenant-a', role: 'pastor' }), false);
     assert.equal(canProvisionChurch({ tenant_id: null, role: 'admin' }), false);
     assert.equal(canProvisionChurch({ tenant_id: null, role: 'staff' }), false);
