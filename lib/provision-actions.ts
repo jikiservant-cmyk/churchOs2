@@ -96,35 +96,6 @@ export async function provisionTenant(prevState: ProvisionState, formData: FormD
     // Let canProvisionChurch handle it (will block because tenant_id != null).
   }
 
-  // Enforce account limit always; IP limit only when IP is known. Never hard-fail
-  // provisioning just because headers were missing — that caused 100% outage.
-  const accountLimit = await checkRateLimit({ namespace: 'church-provision-account', subject: user.id, limit: 3, windowSeconds: 24 * 60 * 60 });
-  const ipLimit =
-    ip === 'unknown'
-      ? { allowed: true, retryAfterSeconds: 0 }
-      : await checkRateLimit({ namespace: 'church-provision-ip', subject: ip, limit: 3, windowSeconds: 24 * 60 * 60 });
-  if (ip === 'unknown' && process.env.NODE_ENV === 'production') {
-    console.warn('[Provisioning] Registration IP unavailable - enforcing account limit only');
-  }
-  const deniedLimit = !accountLimit.allowed ? accountLimit : ipLimit;
-  if (!accountLimit.allowed || !ipLimit.allowed) {
-    return { error: deniedLimit.unavailable ? 'Registration protection is temporarily unavailable.' : 'Too many registration attempts. Please try again later.' };
-  }
-
-  // 1.2 Additional database check: block repeat registrations from a saved IP
-  if (ip !== 'unknown' && ip !== '127.0.0.1' && ip !== '::1') {
-    const { data: ipChurch } = await adminSupabase
-      .schema('church')
-      .from('churches')
-      .select('id')
-      .eq('ip_address', ip)
-      .maybeSingle();
-
-    if (ipChurch) {
-      return { error: 'Only one church registration is allowed per network/location to prevent scams.' };
-    }
-  }
-
   let currentStep = 'initializing';
   try {
     const sanitizedName = name;
@@ -133,6 +104,35 @@ export async function provisionTenant(prevState: ProvisionState, formData: FormD
     currentStep = 'provisioning-church';
     if (!canProvisionChurch(existingProfile)) {
       return { error: 'This account already belongs to a church or is not eligible to create one.' };
+    }
+
+    // 1.2 Additional database check: block repeat registrations from a saved IP
+    // Moved before rate-limit so failed validations don't burn quota
+    if (ip !== 'unknown' && ip !== '127.0.0.1' && ip !== '::1') {
+      const { data: ipChurch } = await adminSupabase
+        .schema('church')
+        .from('churches')
+        .select('id')
+        .eq('ip_address', ip)
+        .maybeSingle();
+
+      if (ipChurch) {
+        return { error: 'Only one church registration is allowed per network/location to prevent scams.' };
+      }
+    }
+
+    // Rate-limit only valid RPC candidates — failed validations above don't count
+    const accountLimit = await checkRateLimit({ namespace: 'church-provision-account', subject: user.id, limit: 5, windowSeconds: 24 * 60 * 60 });
+    const ipLimit =
+      ip === 'unknown'
+        ? { allowed: true, retryAfterSeconds: 0 }
+        : await checkRateLimit({ namespace: 'church-provision-ip', subject: ip, limit: 5, windowSeconds: 24 * 60 * 60 });
+    if (ip === 'unknown' && process.env.NODE_ENV === 'production') {
+      console.warn('[Provisioning] Registration IP unavailable - enforcing account limit only');
+    }
+    const deniedLimit = !accountLimit.allowed ? accountLimit : ipLimit;
+    if (!accountLimit.allowed || !ipLimit.allowed) {
+      return { error: deniedLimit.unavailable ? 'Registration protection is temporarily unavailable.' : 'Too many registration attempts. Please try again later.' };
     }
 
     // Keep all identity, invite, and tenant writes inside the verified atomic
