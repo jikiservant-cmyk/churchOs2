@@ -7,7 +7,6 @@ export const ACTIVATION_FEE_UGX = 17000;
 export const ACTIVATION_CURRENCY = 'UGX';
 export const ACTIVATION_PLAN_PRICES = {
   standard: ACTIVATION_FEE_UGX,
-  bundle: 50_000,
 } as const;
 
 export interface ActivationStatusResult {
@@ -124,7 +123,7 @@ export async function startActivationPayment({
     return { success: false, error: 'Unauthorized: church context required' };
   }
 
-  const selectedPlan = plan === 'bundle' ? 'bundle' : 'standard';
+  const selectedPlan = 'standard' as const;
   const chosenAmount = ACTIVATION_PLAN_PRICES[selectedPlan];
   const supabase = getAdminClient();
 

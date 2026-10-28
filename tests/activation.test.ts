@@ -11,7 +11,7 @@ import {
 describe('Church Workspace Activation Flow Suite', () => {
   test('uses server-owned activation plan prices and UGX currency', () => {
     assert.equal(ACTIVATION_FEE_UGX, 17000);
-    assert.deepEqual(ACTIVATION_PLAN_PRICES, { standard: 17000, bundle: 50000 });
+    assert.deepEqual(ACTIVATION_PLAN_PRICES, { standard: 17000 });
     assert.equal(ACTIVATION_CURRENCY, 'UGX');
   });
 
