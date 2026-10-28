@@ -121,12 +121,12 @@ export async function provisionTenant(prevState: ProvisionState, formData: FormD
       }
     }
 
-    // Rate-limit only valid RPC candidates — failed validations above don't count
-    const accountLimit = await checkRateLimit({ namespace: 'church-provision-account', subject: user.id, limit: 5, windowSeconds: 60 * 60 });
+    // TEMP: 20/hr for launch — will tighten later (reminder set)
+    const accountLimit = await checkRateLimit({ namespace: 'church-provision-account', subject: user.id, limit: 20, windowSeconds: 60 * 60 });
     const ipLimit =
       ip === 'unknown'
         ? { allowed: true, retryAfterSeconds: 0 }
-        : await checkRateLimit({ namespace: 'church-provision-ip', subject: ip, limit: 5, windowSeconds: 60 * 60 });
+        : await checkRateLimit({ namespace: 'church-provision-ip', subject: ip, limit: 20, windowSeconds: 60 * 60 });
     if (ip === 'unknown' && process.env.NODE_ENV === 'production') {
       console.warn('[Provisioning] Registration IP unavailable - enforcing account limit only');
     }
