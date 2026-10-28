@@ -3,11 +3,6 @@ import { normalizeUgPhone } from '@/lib/utils';
 import { tenantScopedAdmin } from '@/lib/supabase/tenant-scoped';
 import { isSmsWithinSegmentLimit } from '@/supabase/functions/_shared/sms-length';
 import { hasSmsQueueStatus, SMS_QUEUE_STATUS } from '@/lib/sms-queue-status';
-import {
-  isUnknownColumnError,
-  SMS_QUEUE_MESSAGE_COLUMNS,
-  type SmsQueueMessageColumn,
-} from '@/lib/sms-queue-message';
 
 export interface EnqueueBroadcastParams {
   tenantId: string;
@@ -52,9 +47,10 @@ export async function enqueueBroadcast(params: EnqueueBroadcastParams): Promise<
   }
   const scopedDb = await tenantScopedAdmin(params.tenantId);
   const batchId = randomUUID();
-  // Keep the SMS text separate from the row so it can be written under either
-  // queue column name (`body` on the deployed table, `message` on older ones).
-  const rows: Array<{ values: Record<string, unknown>; text: string }> = [];
+  // Only columns that exist in the deployed church.sms_queue are written: the
+  // SMS text is `body` (there is no `message` column) and recipients are keyed
+  // by phone because the table has no `recipient_id` column either.
+  const rows: Array<Record<string, unknown>> = [];
   let skipped = 0;
 
   for (let i = 0; i < params.recipients.length; i++) {
@@ -74,16 +70,13 @@ export async function enqueueBroadcast(params: EnqueueBroadcastParams): Promise<
     }
 
     rows.push({
-      text: message,
-      values: {
-        tenant_id: params.tenantId,
-        recipient_id: recipient.id,
-        recipient_phone: phone,
-        sender_id: params.senderId?.trim() || null,
-        status: SMS_QUEUE_STATUS.pending,
-        scheduled_at: new Date().toISOString(),
-        idempotency_key: `bcast_${batchId}_${recipient.id}_${i}`,
-      },
+      tenant_id: params.tenantId,
+      recipient_phone: phone,
+      body: message,
+      sender_id: params.senderId?.trim() || null,
+      status: SMS_QUEUE_STATUS.pending,
+      scheduled_at: new Date().toISOString(),
+      idempotency_key: `bcast_${batchId}_${recipient.id}_${i}`,
     });
   }
 
@@ -91,20 +84,10 @@ export async function enqueueBroadcast(params: EnqueueBroadcastParams): Promise<
   // into multiple requests could leave a partially queued broadcast if a later
   // chunk failed; the queue worker might then send an incomplete batch while
   // the client sees an error and retries.
-  const insertWithColumn = (column: SmsQueueMessageColumn) => scopedDb
+  const { data, error } = await scopedDb
     .church('sms_queue')
-    .insert(rows.map(({ values, text }) => ({ ...values, [column]: text })))
+    .insert(rows)
     .select('id');
-
-  let column: SmsQueueMessageColumn = SMS_QUEUE_MESSAGE_COLUMNS[0];
-  let { data, error } = await insertWithColumn(column);
-  // The deployed schema and this repository's snapshots disagree on the SMS
-  // text column name. Retry once with the alternate name so a broadcast works
-  // against both without any schema change.
-  if (error && isUnknownColumnError(error, column)) {
-    column = SMS_QUEUE_MESSAGE_COLUMNS[1];
-    ({ data, error } = await insertWithColumn(column));
-  }
   if (error) throw new Error(`Queue insert failed: ${error.message}`);
   const queueIds = (data ?? []).map((row: { id: string }) => row.id);
 
@@ -119,7 +102,7 @@ export async function getBroadcastStatus(
   const scopedDb = await tenantScopedAdmin(tenantId);
   const { data: rows, error } = await scopedDb
     .church('sms_queue')
-    .select('status, created_at, processed_at')
+    .select('*')
     .like('idempotency_key', `bcast_${batchId}_%`);
 
   if (error) throw new Error(`Could not read queue batch status: ${error.message}`);
@@ -133,9 +116,18 @@ export async function getBroadcastStatus(
   const status: BroadcastStatus['status'] = pending > 0
     ? sent + failed === 0 ? 'QUEUED' : 'PROCESSING'
     : failed === 0 ? 'COMPLETED' : sent === 0 ? 'FAILED' : 'PARTIAL';
-  const createdAt = rows.map((row: { created_at: string }) => row.created_at).sort()[0];
+  // Read defensively: older deployments of this table lack some columns, and
+  // `select('*')` only returns the ones that exist.
+  const createdAt = rows
+    .map((row: { created_at?: string | null }) => row.created_at)
+    .filter((value: string | null | undefined): value is string => Boolean(value))
+    .sort()[0] ?? new Date().toISOString();
   const completedAt = pending === 0
-    ? rows.map((row: { processed_at: string | null }) => row.processed_at).filter(Boolean).sort().at(-1) ?? null
+    ? rows
+      .map((row: { processed_at?: string | null; updated_at?: string | null }) => row.processed_at ?? row.updated_at ?? null)
+      .filter((value: string | null | undefined): value is string => Boolean(value))
+      .sort()
+      .at(-1) ?? null
     : null;
 
   return {

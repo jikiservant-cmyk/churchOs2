@@ -3,18 +3,14 @@ import { normalizeUgPhone } from '@/lib/utils';
 import { checkRateLimit } from '@/lib/security/rate-limit';
 import { isSmsWithinSegmentLimit, smsSegmentCount } from '@/supabase/functions/_shared/sms-length';
 import { hasSmsQueueStatus, SMS_QUEUE_STATUS } from '@/lib/sms-queue-status';
-import {
-  isUnknownColumnError,
-  readQueueMessage,
-  SMS_QUEUE_MESSAGE_COLUMNS,
-  type SmsQueueMessageColumn,
-} from '@/lib/sms-queue-message';
+import { readQueueMessage } from '@/lib/sms-queue-message';
 
 export type EnqueueSmsInput = {
   tenantId: string;
   phoneNumber: string;
   message: string;
   senderId?: string | null;
+  /** Accepted for callers, but not persisted: church.sms_queue has no recipient_id column. */
   recipientId?: string | null;
   idempotencyKey: string;
 };
@@ -43,13 +39,13 @@ export async function enqueueSmsDispatch(input: EnqueueSmsInput): Promise<Enqueu
   }
 
   const admin = await createAdminClient();
-  // The SMS text column is named `body` on the deployed queue table and
-  // `message` in older schema snapshots, so resolve it on write and accept
-  // either name on read instead of naming a column PostgREST may not know.
+  // Write only columns the deployed church.sms_queue actually has: the SMS
+  // text is `body` (there is no `message` column) and there is no
+  // `recipient_id` column, so the recipient is identified by phone number.
   const row = {
     tenant_id: input.tenantId,
-    recipient_id: input.recipientId ?? null,
     recipient_phone: phone,
+    body: message,
     sender_id: input.senderId?.trim() || null,
     idempotency_key: idempotencyKey,
     status: SMS_QUEUE_STATUS.pending,
@@ -65,7 +61,7 @@ export async function enqueueSmsDispatch(input: EnqueueSmsInput): Promise<Enqueu
   if (priorError) throw new Error(`Could not check SMS idempotency: ${priorError.message}`);
   if (prior) {
     if (
-      prior.tenant_id !== row.tenant_id || prior.recipient_id !== row.recipient_id ||
+      prior.tenant_id !== row.tenant_id ||
       prior.recipient_phone !== row.recipient_phone || readQueueMessage(prior) !== message ||
       (prior.sender_id ?? '') !== (row.sender_id ?? '')
     ) {
@@ -87,19 +83,12 @@ export async function enqueueSmsDispatch(input: EnqueueSmsInput): Promise<Enqueu
       : 'The church hourly SMS volume limit has been reached.');
   }
 
-  const insertWithColumn = (column: SmsQueueMessageColumn) => admin
+  const { data: inserted, error: insertError } = await admin
     .schema('church')
     .from('sms_queue')
-    .insert({ ...row, [column]: message })
+    .insert(row)
     .select('id, idempotency_key, status')
     .single();
-
-  let column: SmsQueueMessageColumn = SMS_QUEUE_MESSAGE_COLUMNS[0];
-  let { data: inserted, error: insertError } = await insertWithColumn(column);
-  if (insertError && isUnknownColumnError(insertError, column)) {
-    column = SMS_QUEUE_MESSAGE_COLUMNS[1];
-    ({ data: inserted, error: insertError } = await insertWithColumn(column));
-  }
 
   if (inserted) {
     return { id: inserted.id, idempotencyKey: inserted.idempotency_key, status: inserted.status, alreadyExisted: false };
@@ -119,7 +108,6 @@ export async function enqueueSmsDispatch(input: EnqueueSmsInput): Promise<Enqueu
     }
     if (
       existing.tenant_id !== input.tenantId ||
-      existing.recipient_id !== row.recipient_id ||
       existing.recipient_phone !== phone ||
       readQueueMessage(existing) !== message ||
       (existing.sender_id ?? '') !== (row.sender_id ?? '')
@@ -228,6 +216,7 @@ export async function sendSingleSMS({
   churchId: string;
   idempotencyKey: string;
   senderId?: string;
+  /** Accepted for callers, but not persisted: church.sms_queue has no recipient_id column. */
   recipientId?: string;
   balance?: unknown;
 }) {

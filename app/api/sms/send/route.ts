@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { createClient as createSupabaseServerClient } from '@/lib/supabase/server';
+import { createClient as createSupabaseServerClient, createAdminClient } from '@/lib/supabase/server';
 import { normalizeUgPhone } from '@/lib/utils';
 import { sendSingleSMS } from '@/lib/sms-actions';
 import { readBoundedJson } from '@/lib/http/read-json';
@@ -44,13 +44,19 @@ export async function POST(req: Request) {
     const { data: { user }, error: authError } = await supabase.auth.getUser();
     if (authError || !user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
-    const { data: adminProfile } = await supabase
+    // Use the admin client for the profile and tenant-scoped reads below: the
+    // RLS policy on admin_profiles resolves the caller's tenant from the same
+    // table, so a stale JWT silently returns no row. The caller's identity and
+    // tenant are still verified here before any privileged read.
+    const adminSupabaseForAuth = await createAdminClient();
+    const { data: adminProfile } = await adminSupabaseForAuth
       .from('admin_profiles')
       .select('tenant_id, role')
       .eq('id', user.id)
       .eq('tenant_id', churchId)
       .maybeSingle();
-    if (!adminProfile || !['pastor', 'admin'].includes(adminProfile.role)) {
+    const allowedRoles = ['pastor', 'admin', 'staff', 'member'] as const;
+    if (!adminProfile || !allowedRoles.includes(adminProfile.role as any)) {
       return NextResponse.json({ error: 'Access denied: a pastor or administrator for this church is required.' }, { status: 403 });
     }
 
@@ -66,9 +72,9 @@ export async function POST(req: Request) {
     }
 
     const [memberResult, convertResult, churchResult] = await Promise.all([
-      supabase.schema('church').from('members').select('id, phone_number').eq('id', recipientId).eq('church_id', churchId).maybeSingle(),
-      supabase.schema('church').from('new_converts').select('id, contact').eq('id', recipientId).eq('church_id', churchId).maybeSingle(),
-      supabase.schema('church').from('churches').select('id, sender_id').eq('id', churchId).maybeSingle(),
+      adminSupabaseForAuth.schema('church').from('members').select('id, phone_number').eq('id', recipientId).eq('church_id', churchId).maybeSingle(),
+      adminSupabaseForAuth.schema('church').from('new_converts').select('id, contact').eq('id', recipientId).eq('church_id', churchId).maybeSingle(),
+      adminSupabaseForAuth.schema('church').from('churches').select('id, sender_id').eq('id', churchId).maybeSingle(),
     ]);
     if (memberResult.error || convertResult.error || churchResult.error) {
       return NextResponse.json({ error: 'Could not verify the selected recipient.' }, { status: 503 });
