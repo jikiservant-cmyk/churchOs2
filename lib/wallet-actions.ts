@@ -57,15 +57,39 @@ export async function initiateNajikiPayment(formData: FormData) {
       return { error: 'Unauthorized: authentication required' };
     }
 
-    const { data: profile, error: profileError } = await supabase
+    // Use admin client for profile to bypass RLS (anon RLS can return null even
+    // when row exists, especially with SameSite cookie edge on Vercel). Also
+    // normalize UUIDs lower-case and log exact mismatch for Vercel info logs.
+    const adminForProfile = await createAdminClient();
+    const { data: profile, error: profileError } = await adminForProfile
       .from('admin_profiles')
-      .select('tenant_id, role')
+      .select('tenant_id, role, app_type')
       .eq('id', user.id)
       .maybeSingle();
 
-    if (profileError || !profile || profile.tenant_id !== churchId ||
-        !['pastor', 'admin'].includes(profile.role)) {
-      return { error: 'Access denied: a pastor or administrator for this church is required' };
+    const profileTenantNorm = (profile?.tenant_id ?? '').toString().trim().toLowerCase();
+    const churchIdNorm = (churchId ?? '').toString().trim().toLowerCase();
+    console.info('[TopUp] profile check', {
+      userId: user.id,
+      churchId,
+      churchIdNorm,
+      profileTenantId: profile?.tenant_id ?? null,
+      profileTenantNorm,
+      role: profile?.role ?? null,
+      match: profileTenantNorm === churchIdNorm && !!profileTenantNorm,
+      profileError: profileError?.message ?? null,
+    });
+
+    if (profileError || !profile || profileTenantNorm !== churchIdNorm ||
+        !['pastor', 'admin'].includes((profile.role || '').toLowerCase())) {
+      console.warn('[TopUp] Access denied details', {
+        hasProfile: !!profile,
+        profileTenantId: profile?.tenant_id,
+        churchId,
+        role: profile?.role,
+        normalizedMatch: profileTenantNorm === churchIdNorm,
+      });
+      return { error: `Access denied: a pastor or administrator for this church is required (your profile tenant_id ${profile?.tenant_id ?? 'null'} ≠ requested church ${churchId}, role ${profile?.role ?? 'none'})` };
     }
 
     const accountLimit = await checkRateLimit({ namespace: 'sms-topup-account', subject: user.id, limit: 10, windowSeconds: 60 * 60 });
