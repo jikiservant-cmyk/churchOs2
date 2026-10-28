@@ -21,14 +21,17 @@ const localDevOrigins = process.env.NODE_ENV === 'development'
 const arenaPreviewHost = process.env.NODE_ENV === 'development' && process.env.E2B_SANDBOX_ID
   ? `3000-${process.env.E2B_SANDBOX_ID}.e2b.app`
   : null;
+// Vercel deployment host (production + previews like *.vercel.app)
+const vercelHost = process.env.VERCEL_URL ? new URL(`https://${process.env.VERCEL_URL}`).host : null;
 const allowedOrigins = [
   ...localDevOrigins,
   ...(configuredAppHost ? [configuredAppHost] : []),
   ...(arenaPreviewHost ? [arenaPreviewHost] : []),
+  ...(vercelHost ? [vercelHost] : []),
 ];
 
 const nextConfig: NextConfig = {
-  output: 'standalone',
+  // Vercel handles output automatically — don't set 'standalone' (breaks Netlify & Vercel edge)
   reactStrictMode: true,
   // Do not advertise the framework/version to unauthenticated clients.
   poweredByHeader: false,
