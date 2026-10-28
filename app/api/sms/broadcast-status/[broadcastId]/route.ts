@@ -20,9 +20,12 @@
  */
 
 import { NextResponse } from 'next/server';
-import { createClient } from '@/lib/supabase/server';
+import { createClient, createAdminClient } from '@/lib/supabase/server';
 import { getBroadcastStatus } from '@/lib/queue-actions';
-import { CHURCH_ADMIN_ROLES, hasAllowedRole } from '@/lib/auth-security';
+import { hasAllowedRole } from '@/lib/auth-security';
+
+/** Same roles the enqueue route accepts, so a queued broadcast can be polled. */
+const BROADCAST_STATUS_ROLES = ['pastor', 'admin', 'staff', 'member'] as const;
 
 export async function GET(
   _req: Request,
@@ -36,14 +39,17 @@ export async function GET(
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
-  // Get the admin's tenant (multi-tenancy check)
-  const { data: profile } = await supabase
+  // Get the admin's tenant (multi-tenancy check). Read the profile with the
+  // admin client because the admin_profiles RLS policy resolves the caller's
+  // tenant from that same table and silently returns no row on a stale JWT.
+  const adminSupabaseForAuth = await createAdminClient();
+  const { data: profile } = await adminSupabaseForAuth
     .from('admin_profiles')
     .select('tenant_id, role')
     .eq('id', user.id)
     .maybeSingle();
 
-  if (!profile?.tenant_id || !hasAllowedRole(profile.role, CHURCH_ADMIN_ROLES)) {
+  if (!profile?.tenant_id || !hasAllowedRole(profile.role, BROADCAST_STATUS_ROLES)) {
     return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
   }
 

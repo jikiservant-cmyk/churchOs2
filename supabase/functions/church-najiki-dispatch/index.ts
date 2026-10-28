@@ -11,7 +11,8 @@ import { isSmsWithinSegmentLimit } from '../_shared/sms-length.ts';
 type QueueItem = {
   id: string;
   tenant_id: string;
-  recipient_id: string | null;
+  /** Not present in the deployed queue table; never required. */
+  recipient_id?: string | null;
   recipient_phone: string;
   // Deployed church.sms_queue keeps the SMS text in `body`; older schema
   // snapshots name it `message`. Accept whichever column the claim returned.
