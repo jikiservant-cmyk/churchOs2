@@ -3,6 +3,11 @@ import { normalizeUgPhone } from '@/lib/utils';
 import { tenantScopedAdmin } from '@/lib/supabase/tenant-scoped';
 import { isSmsWithinSegmentLimit } from '@/supabase/functions/_shared/sms-length';
 import { hasSmsQueueStatus, SMS_QUEUE_STATUS } from '@/lib/sms-queue-status';
+import {
+  isUnknownColumnError,
+  SMS_QUEUE_MESSAGE_COLUMNS,
+  type SmsQueueMessageColumn,
+} from '@/lib/sms-queue-message';
 
 export interface EnqueueBroadcastParams {
   tenantId: string;
@@ -47,7 +52,9 @@ export async function enqueueBroadcast(params: EnqueueBroadcastParams): Promise<
   }
   const scopedDb = await tenantScopedAdmin(params.tenantId);
   const batchId = randomUUID();
-  const rows: Array<Record<string, unknown>> = [];
+  // Keep the SMS text separate from the row so it can be written under either
+  // queue column name (`body` on the deployed table, `message` on older ones).
+  const rows: Array<{ values: Record<string, unknown>; text: string }> = [];
   let skipped = 0;
 
   for (let i = 0; i < params.recipients.length; i++) {
@@ -67,14 +74,16 @@ export async function enqueueBroadcast(params: EnqueueBroadcastParams): Promise<
     }
 
     rows.push({
-      tenant_id: params.tenantId,
-      recipient_id: recipient.id,
-      recipient_phone: phone,
-      message,
-      sender_id: params.senderId?.trim() || null,
-      status: SMS_QUEUE_STATUS.pending,
-      scheduled_at: new Date().toISOString(),
-      idempotency_key: `bcast_${batchId}_${recipient.id}_${i}`,
+      text: message,
+      values: {
+        tenant_id: params.tenantId,
+        recipient_id: recipient.id,
+        recipient_phone: phone,
+        sender_id: params.senderId?.trim() || null,
+        status: SMS_QUEUE_STATUS.pending,
+        scheduled_at: new Date().toISOString(),
+        idempotency_key: `bcast_${batchId}_${recipient.id}_${i}`,
+      },
     });
   }
 
@@ -82,10 +91,20 @@ export async function enqueueBroadcast(params: EnqueueBroadcastParams): Promise<
   // into multiple requests could leave a partially queued broadcast if a later
   // chunk failed; the queue worker might then send an incomplete batch while
   // the client sees an error and retries.
-  const { data, error } = await scopedDb
+  const insertWithColumn = (column: SmsQueueMessageColumn) => scopedDb
     .church('sms_queue')
-    .insert(rows)
+    .insert(rows.map(({ values, text }) => ({ ...values, [column]: text })))
     .select('id');
+
+  let column: SmsQueueMessageColumn = SMS_QUEUE_MESSAGE_COLUMNS[0];
+  let { data, error } = await insertWithColumn(column);
+  // The deployed schema and this repository's snapshots disagree on the SMS
+  // text column name. Retry once with the alternate name so a broadcast works
+  // against both without any schema change.
+  if (error && isUnknownColumnError(error, column)) {
+    column = SMS_QUEUE_MESSAGE_COLUMNS[1];
+    ({ data, error } = await insertWithColumn(column));
+  }
   if (error) throw new Error(`Queue insert failed: ${error.message}`);
   const queueIds = (data ?? []).map((row: { id: string }) => row.id);
 

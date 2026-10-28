@@ -13,13 +13,23 @@ type QueueItem = {
   tenant_id: string;
   recipient_id: string | null;
   recipient_phone: string;
-  message: string;
+  // Deployed church.sms_queue keeps the SMS text in `body`; older schema
+  // snapshots name it `message`. Accept whichever column the claim returned.
+  body?: string;
+  message?: string;
   sender_id: string | null;
   idempotency_key: string;
   attempts: number;
   max_attempts: number;
   lock_token: string;
 };
+
+/** Return the SMS text from a claimed queue row regardless of column name. */
+function queueItemMessage(row: QueueItem): string {
+  if (typeof row.body === 'string') return row.body;
+  if (typeof row.message === 'string') return row.message;
+  return '';
+}
 
 function client() {
   const { url, secretKey } = requireSupabaseSecrets();
@@ -53,7 +63,7 @@ async function ensureSmsLog(db: ReturnType<typeof client>, row: QueueItem) {
   const { error: insertError } = await db.from('sms_logs').upsert({
     tenant_id: row.tenant_id,
     recipient_phone: row.recipient_phone,
-    body: row.message,
+    body: queueItemMessage(row),
     status: 'PENDING',
     idempotency_key: row.idempotency_key,
     sender_id: row.sender_id,
@@ -70,7 +80,7 @@ async function ensureSmsLog(db: ReturnType<typeof client>, row: QueueItem) {
   if (
     data.tenant_id !== row.tenant_id ||
     data.recipient_phone !== row.recipient_phone ||
-    data.body !== row.message ||
+    data.body !== queueItemMessage(row) ||
     (data.sender_id ?? '') !== (row.sender_id ?? '')
   ) {
     throw new Error('SMS idempotency key is already associated with a different log payload.');
@@ -140,7 +150,8 @@ Deno.serve(async (request: Request) => {
 
   try {
     const validPhone = typeof row.recipient_phone === 'string' && /^\+256\d{9}$/.test(row.recipient_phone);
-    const validMessage = typeof row.message === 'string' && row.message.trim().length > 0 && Array.from(row.message).length <= 500 && isSmsWithinSegmentLimit(row.message);
+    const messageText = queueItemMessage(row);
+    const validMessage = messageText.trim().length > 0 && Array.from(messageText).length <= 500 && isSmsWithinSegmentLimit(messageText);
     const validIdempotencyKey = typeof row.idempotency_key === 'string' && row.idempotency_key.length >= 8 && row.idempotency_key.length <= 255;
     if (!validPhone || !validMessage || !validIdempotencyKey) {
       const { data: failed, error: failError } = await db.rpc('fail_sms_queue_item', {
@@ -185,7 +196,7 @@ Deno.serve(async (request: Request) => {
     const applicationCode = Deno.env.get('NAJIKI_APPLICATION_CODE')?.trim() || 'church';
     const payload: Record<string, unknown> = {
       to: row.recipient_phone,
-      message: row.message,
+      message: messageText,
       applicationCode,
     };
     if (row.sender_id?.trim()) payload.from = row.sender_id.trim();

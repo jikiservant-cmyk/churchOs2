@@ -3,6 +3,12 @@ import { normalizeUgPhone } from '@/lib/utils';
 import { checkRateLimit } from '@/lib/security/rate-limit';
 import { isSmsWithinSegmentLimit, smsSegmentCount } from '@/supabase/functions/_shared/sms-length';
 import { hasSmsQueueStatus, SMS_QUEUE_STATUS } from '@/lib/sms-queue-status';
+import {
+  isUnknownColumnError,
+  readQueueMessage,
+  SMS_QUEUE_MESSAGE_COLUMNS,
+  type SmsQueueMessageColumn,
+} from '@/lib/sms-queue-message';
 
 export type EnqueueSmsInput = {
   tenantId: string;
@@ -37,11 +43,13 @@ export async function enqueueSmsDispatch(input: EnqueueSmsInput): Promise<Enqueu
   }
 
   const admin = await createAdminClient();
+  // The SMS text column is named `body` on the deployed queue table and
+  // `message` in older schema snapshots, so resolve it on write and accept
+  // either name on read instead of naming a column PostgREST may not know.
   const row = {
     tenant_id: input.tenantId,
     recipient_id: input.recipientId ?? null,
     recipient_phone: phone,
-    message,
     sender_id: input.senderId?.trim() || null,
     idempotency_key: idempotencyKey,
     status: SMS_QUEUE_STATUS.pending,
@@ -51,14 +59,14 @@ export async function enqueueSmsDispatch(input: EnqueueSmsInput): Promise<Enqueu
   const { data: prior, error: priorError } = await admin
     .schema('church')
     .from('sms_queue')
-    .select('id, tenant_id, recipient_id, recipient_phone, message, sender_id, idempotency_key, status')
+    .select('*')
     .eq('idempotency_key', idempotencyKey)
     .maybeSingle();
   if (priorError) throw new Error(`Could not check SMS idempotency: ${priorError.message}`);
   if (prior) {
     if (
       prior.tenant_id !== row.tenant_id || prior.recipient_id !== row.recipient_id ||
-      prior.recipient_phone !== row.recipient_phone || prior.message !== row.message ||
+      prior.recipient_phone !== row.recipient_phone || readQueueMessage(prior) !== message ||
       (prior.sender_id ?? '') !== (row.sender_id ?? '')
     ) {
       throw new Error('The SMS idempotency key is already bound to a different message.');
@@ -79,12 +87,19 @@ export async function enqueueSmsDispatch(input: EnqueueSmsInput): Promise<Enqueu
       : 'The church hourly SMS volume limit has been reached.');
   }
 
-  const { data: inserted, error: insertError } = await admin
+  const insertWithColumn = (column: SmsQueueMessageColumn) => admin
     .schema('church')
     .from('sms_queue')
-    .insert(row)
+    .insert({ ...row, [column]: message })
     .select('id, idempotency_key, status')
     .single();
+
+  let column: SmsQueueMessageColumn = SMS_QUEUE_MESSAGE_COLUMNS[0];
+  let { data: inserted, error: insertError } = await insertWithColumn(column);
+  if (insertError && isUnknownColumnError(insertError, column)) {
+    column = SMS_QUEUE_MESSAGE_COLUMNS[1];
+    ({ data: inserted, error: insertError } = await insertWithColumn(column));
+  }
 
   if (inserted) {
     return { id: inserted.id, idempotencyKey: inserted.idempotency_key, status: inserted.status, alreadyExisted: false };
@@ -95,7 +110,7 @@ export async function enqueueSmsDispatch(input: EnqueueSmsInput): Promise<Enqueu
     const { data: existing, error: lookupError } = await admin
       .schema('church')
       .from('sms_queue')
-      .select('id, tenant_id, recipient_id, recipient_phone, message, sender_id, idempotency_key, status')
+      .select('*')
       .eq('idempotency_key', idempotencyKey)
       .maybeSingle();
 
@@ -106,7 +121,7 @@ export async function enqueueSmsDispatch(input: EnqueueSmsInput): Promise<Enqueu
       existing.tenant_id !== input.tenantId ||
       existing.recipient_id !== row.recipient_id ||
       existing.recipient_phone !== phone ||
-      existing.message !== message ||
+      readQueueMessage(existing) !== message ||
       (existing.sender_id ?? '') !== (row.sender_id ?? '')
     ) {
       throw new Error('The SMS idempotency key is already bound to a different message.');
