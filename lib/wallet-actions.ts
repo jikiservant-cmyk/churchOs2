@@ -313,10 +313,14 @@ export async function initiateDonationPayment(params: {
 
   const requestHeaders = await headers();
   const clientIp = getRateLimitIp(requestHeaders);
+  // IP limiting is best-effort for public donations; always enforce phone limit
+  const ipLimit =
+    clientIp === 'unknown'
+      ? { allowed: true, retryAfterSeconds: 0 }
+      : await checkRateLimit({ namespace: 'public-donation-ip', subject: clientIp, limit: 10, windowSeconds: 60 * 60 });
   if (clientIp === 'unknown' && process.env.NODE_ENV === 'production') {
-    return { error: 'Payment protection is temporarily unavailable. Please try again later.' };
+    console.warn('[Donation] Payment IP unavailable - enforcing phone limit only');
   }
-  const ipLimit = await checkRateLimit({ namespace: 'public-donation-ip', subject: clientIp, limit: 10, windowSeconds: 60 * 60 });
   const phoneLimit = await checkRateLimit({ namespace: 'public-donation-phone', subject: `${churchId}:${cleanPhone}`, limit: 3, windowSeconds: 60 * 60 });
   const deniedLimit = !ipLimit.allowed ? ipLimit : phoneLimit;
   if (!ipLimit.allowed || !phoneLimit.allowed) {

@@ -94,11 +94,16 @@ export async function provisionTenant(prevState: ProvisionState, formData: FormD
     }
   }
 
-  if (ip === 'unknown' && process.env.NODE_ENV === 'production') {
-    return { error: 'Registration protection is temporarily unavailable. Please try again later.' };
-  }
+  // Enforce account limit always; IP limit only when IP is known. Never hard-fail
+  // provisioning just because headers were missing — that caused 100% outage.
   const accountLimit = await checkRateLimit({ namespace: 'church-provision-account', subject: user.id, limit: 3, windowSeconds: 24 * 60 * 60 });
-  const ipLimit = await checkRateLimit({ namespace: 'church-provision-ip', subject: ip, limit: 3, windowSeconds: 24 * 60 * 60 });
+  const ipLimit =
+    ip === 'unknown'
+      ? { allowed: true, retryAfterSeconds: 0 }
+      : await checkRateLimit({ namespace: 'church-provision-ip', subject: ip, limit: 3, windowSeconds: 24 * 60 * 60 });
+  if (ip === 'unknown' && process.env.NODE_ENV === 'production') {
+    console.warn('[Provisioning] Registration IP unavailable - enforcing account limit only');
+  }
   const deniedLimit = !accountLimit.allowed ? accountLimit : ipLimit;
   if (!accountLimit.allowed || !ipLimit.allowed) {
     return { error: deniedLimit.unavailable ? 'Registration protection is temporarily unavailable.' : 'Too many registration attempts. Please try again later.' };

@@ -33,12 +33,6 @@ const plans = {
     period: 'one-time', 
     tag: 'One-time parish activation' 
   },
-  bundle: { 
-    name: 'Setup + SMS Pack', 
-    price: 50000, 
-    period: 'bundle', 
-    tag: 'Includes 1,000 pastoral SMS' 
-  },
 };
 
 const features = [
@@ -74,7 +68,7 @@ export default function ActivationClient({
   userEmail
 }: ActivationClientProps) {
   const router = useRouter();
-  const [selected, setSelected] = useState<'standard' | 'bundle'>('standard');
+  const [selected] = useState<'standard'>('standard');
   const [showCheckoutModal, setShowCheckoutModal] = useState(false);
   const [phoneNumber, setPhoneNumber] = useState('');
   const [network, setNetwork] = useState<'mtn' | 'airtel'>('mtn');
@@ -342,52 +336,22 @@ export default function ActivationClient({
           ))}
         </div>
 
-        {/* Pricing options matching real activation tiers */}
-        <div className="grid grid-cols-2 gap-3 mt-8">
-          {(Object.entries(plans) as [('standard' | 'bundle'), typeof plans.standard][]).map(([key, item]) => {
-            const active = selected === key;
-
-            return (
-              <button
-                key={key}
-                type="button"
-                onClick={() => setSelected(key)}
-                aria-pressed={active}
-                className={`relative text-left rounded-[20px] border p-4 pt-5 min-w-0 transition-all duration-200 cursor-pointer backdrop-blur-md ${
-                  active
-                    ? 'bg-[#191919]/95 border-[#191919] text-white shadow-xl'
-                    : 'bg-white/60 border-[#d9dce2]/70 text-[#111827] hover:border-gray-500 hover:bg-white/80'
-                }`}
-              >
-                {key === 'bundle' && (
-                  <span className="absolute -top-[14px] left-1/2 -translate-x-1/2 whitespace-nowrap rounded-full border border-white/60 bg-white/95 px-2.5 py-0.5 text-[10px] font-semibold text-[#4b5563] shadow-xs">
-                    Recommended
-                  </span>
-                )}
-
-                <span className="flex items-center justify-between gap-1 text-[13px] font-medium">
-                  {item.name}
-                  <span className={`w-4 h-4 rounded-full border flex items-center justify-center shrink-0 ${
-                    active ? 'border-white' : 'border-[#b9c0cb]'
-                  }`}>
-                    {active && (
-                      <span className="w-2.5 h-2.5 rounded-full bg-white" />
-                    )}
-                  </span>
-                </span>
-
-                <span className="block mt-2 text-[20px] sm:text-[22px] tracking-[-0.7px] font-semibold whitespace-nowrap">
-                  {money(item.price)}
-                </span>
-
-                <span className={`block mt-1 text-[11px] font-medium ${
-                  active ? 'text-gray-300' : 'text-[#7b8798]'
-                }`}>
-                  {item.tag}
-                </span>
-              </button>
-            );
-          })}
+        {/* Pricing — single Lifetime tier */}
+        <div className="mt-8">
+          <div className="relative text-left rounded-[20px] border p-5 bg-[#191919]/95 border-[#191919] text-white shadow-xl">
+            <div className="flex items-center justify-between gap-2 text-[13px] font-medium">
+              <span>{plan.name}</span>
+              <span className="w-4 h-4 rounded-full border border-white flex items-center justify-center shrink-0">
+                <span className="w-2.5 h-2.5 rounded-full bg-white" />
+              </span>
+            </div>
+            <span className="block mt-2 text-[22px] tracking-[-0.7px] font-semibold whitespace-nowrap">
+              {money(plan.price)}
+            </span>
+            <span className="block mt-1 text-[11px] font-medium text-gray-300">
+              {plan.tag}
+            </span>
+          </div>
         </div>
 
         {/* Main action */}
