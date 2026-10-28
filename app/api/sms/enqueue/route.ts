@@ -85,7 +85,8 @@ export async function POST(req: Request) {
     }
 
     // ── Church config ───────────────────────────────────────────────────────
-    const { data: church, error: churchErr } = await supabase
+    // Use admin client — church.churches RLS would block with stale JWT even though tenant is verified above
+    const { data: church, error: churchErr } = await adminSupabaseForAuth
       .schema('church')
       .from('churches')
       .select('id, sender_id')
@@ -93,6 +94,7 @@ export async function POST(req: Request) {
       .maybeSingle();
 
     if (churchErr || !church) {
+      console.error('[Enqueue] Church lookup failed:', churchErr?.message);
       return NextResponse.json({ error: 'Church configuration not found.' }, { status: 404 });
     }
 
@@ -114,13 +116,13 @@ export async function POST(req: Request) {
     let verifiedRecipients: Array<{ id: string; full_name: string; phone_number: string }> = [];
 
     const [membersRes, convertsRes] = await Promise.all([
-      supabase
+      adminSupabaseForAuth
         .schema('church')
         .from('members')
         .select('id, full_name, phone_number')
         .eq('church_id', churchId)
         .in('id', requestedIds),
-      supabase
+      adminSupabaseForAuth
         .schema('church')
         .from('new_converts')
         .select('id, full_name, phone_number')
