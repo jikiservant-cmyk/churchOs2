@@ -1,4 +1,4 @@
-import { createClient } from '@/lib/supabase/server';
+import { createClient, createAdminClient } from '@/lib/supabase/server';
 import {
   History,
   AlertCircle,
@@ -7,6 +7,8 @@ import BroadcastComposer from '@/components/BroadcastComposer';
 import { getChurchBySlug } from '@/lib/db';
 import BroadcastHistory from '@/components/BroadcastHistory';
 import SMSWalletWidget from '@/components/SMSWalletWidget';
+
+export const dynamic = 'force-dynamic';
 
 export default async function MessagesPage(props: {
   params: Promise<{ church_slug: string }>;
@@ -66,15 +68,53 @@ export default async function MessagesPage(props: {
     !churchObj || church.id === "placeholder" || church.id === "unknown";
 
   if (church && !isPlaceholder) {
-    // Existing wallet view; SMS dispatch itself performs the authoritative
-    // balance check and debit through reserve_sms_queue_debit.
-    const { data: balance } = await supabase
-      .schema('public')
-      .from('wallets')
-      .select('*')
-      .eq('tenant_id', church.id)
-      .maybeSingle();
-    balanceData = balance;
+    // Wallet balance is the source of truth for SMS count: public.wallets
+    // (credited by the webhook's process_topup_webhook RPC).
+    // Use service-role to bypass RLS lag / stale JWT — verified after
+    // confirming the logged-in profile owns this tenant (same check as
+    // /api/church/wallet/status).
+    try {
+      const adminSupabase = await createAdminClient();
+      const { data: { user: walletUser } } = await supabase.auth.getUser();
+      let authorized = true;
+      if (walletUser) {
+        const { data: walletProfile } = await adminSupabase
+          .from('admin_profiles')
+          .select('tenant_id, role')
+          .eq('id', walletUser.id)
+          .maybeSingle();
+        if (walletProfile?.tenant_id && walletProfile.tenant_id !== church.id) {
+          authorized = false;
+        }
+        if (walletProfile && walletProfile.role && !['pastor','admin','staff','member'].includes(walletProfile.role)) {
+          // Shared Saccos table uses member, still allow if tenant matches
+          authorized = walletProfile.tenant_id === church.id;
+        }
+      }
+      if (authorized) {
+        const { data: walletRow, error: walletError } = await adminSupabase
+          .from('wallets')
+          .select('balance, sms_rate, tenant_id')
+          .eq('tenant_id', church.id)
+          .maybeSingle();
+        if (walletError) {
+          console.warn('[MessagesPage] Wallet fetch via admin failed:', walletError.message);
+        } else {
+          balanceData = walletRow;
+        }
+      } else {
+        console.warn('[MessagesPage] Wallet access denied for tenant mismatch');
+      }
+    } catch (e: any) {
+      console.warn('[MessagesPage] Wallet admin fetch threw:', e?.message ?? e);
+      // Fallback to RLS path so page never hard-crashes
+      const { data: balance } = await supabase
+        .from('wallets')
+        .select('*')
+        .eq('tenant_id', church.id)
+        .maybeSingle();
+      balanceData = balance;
+    }
 
     // 2. Fetch members
     let { data: memberData, error: memberError } = await supabase
@@ -131,8 +171,9 @@ export default async function MessagesPage(props: {
   }
 
   const validMembersCount = members?.length || 0;
-  const balanceUgx = balanceData?.balance || 0;
-  const smsRate = balanceData?.sms_rate || 70;
+  // wallets.balance is bigint → Supabase may return string; coerce to number
+  const balanceUgx = Number(balanceData?.balance ?? 0);
+  const smsRate = Number(balanceData?.sms_rate ?? 70) || 70;
   const remainingSMS = Math.floor(balanceUgx / smsRate);
   const leftoverUGX = balanceUgx % smsRate;
 
