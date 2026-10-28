@@ -95,7 +95,8 @@ export async function addMember(formData: FormData) {
       if (err.message === 'NEXT_REDIRECT') {
         throw err;
       }
-      searchParams = new URLSearchParams({ error: 'Failed to add member due to application error.' }).toString();
+      const msg = err?.message ? String(err.message).slice(0, 200) : 'application error';
+      searchParams = new URLSearchParams({ error: `Failed to add member: ${msg}` }).toString();
   }
 
   if (searchParams) {
@@ -157,7 +158,8 @@ export async function editMember(formData: FormData) {
       if (err.message === 'NEXT_REDIRECT') {
         throw err;
       }
-      searchParams = new URLSearchParams({ error: 'Failed to update member.' }).toString();
+      const msg = err?.message ? String(err.message).slice(0, 200) : 'application error';
+      searchParams = new URLSearchParams({ error: `Failed to update member: ${msg}` }).toString();
   }
 
   if (searchParams) {
@@ -223,6 +225,7 @@ export async function bulkAddMembers(churchSlug: string, membersData: any[]) {
     return { success: true };
   } catch (err: any) {
     console.error('Unhandled exception in bulkAddMembers:', err);
-    return { error: 'Failed to bulk-add members due to application error.' };
+    const msg = err?.message ? String(err.message).slice(0, 200) : 'application error';
+    return { error: `Failed to bulk-add members: ${msg}` };
   }
 }
