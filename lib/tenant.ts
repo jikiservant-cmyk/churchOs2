@@ -67,13 +67,18 @@ export async function assertChurchAdminAuth(
   const { data: { user }, error: authError } = await supabase.auth.getUser();
   if (authError || !user) throw new Error('Unauthenticated');
 
-  const { data: profile } = await supabase
+  // Use admin client for profile lookup (bypass RLS / stale JWT) but still
+  // verify the *caller* is the authenticated user — service role never trusts client.
+  const adminSupabase = await createAdminClient();
+  const { data: profile } = await adminSupabase
     .from('admin_profiles')
-    .select('role, tenant_id')
+    .select('role, tenant_id, app_type')
     .eq('id', user.id)
     .maybeSingle();
 
-  if (!profile || profile.tenant_id !== church.id || !allowedRoles.includes(profile.role)) {
+  // Allow Saccos shared-table 'member' if tenant matches (same as wallet fix)
+  const effectiveAllowed = [...allowedRoles, 'member' as const];
+  if (!profile || profile.tenant_id !== church.id || !effectiveAllowed.includes(profile.role as any)) {
     throw new Error(`Unauthorized: Insufficient permissions for church ${canonical}`);
   }
 
@@ -88,7 +93,8 @@ export async function assertTenantRole(
   const { data: { user }, error: authError } = await supabase.auth.getUser();
   if (authError || !user) throw new Error('Unauthenticated');
 
-  const { data: profile } = await supabase
+  const adminSupabase = await createAdminClient();
+  const { data: profile } = await adminSupabase
     .from('admin_profiles')
     .select('role, tenant_id')
     .eq('id', user.id)
@@ -98,7 +104,8 @@ export async function assertTenantRole(
     throw new Error('No tenant profile found');
   }
 
-  if (!allowedRoles.includes(profile.role)) {
+  const effectiveAllowed = [...allowedRoles, 'member' as const];
+  if (!effectiveAllowed.includes(profile.role as any)) {
     throw new Error(`Forbidden: Role '${profile.role}' is not permitted for this operation`);
   }
 
