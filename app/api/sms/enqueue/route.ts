@@ -6,7 +6,7 @@
  */
 
 import { after, NextResponse } from 'next/server';
-import { createClient as createServerClient } from '@/lib/supabase/server';
+import { createClient as createServerClient, createAdminClient } from '@/lib/supabase/server';
 import { enqueueBroadcast } from '@/lib/queue-actions';
 import { dispatchSmsQueueItems } from '@/lib/sms-dispatch';
 import { normalizeUgPhone } from '@/lib/utils';
@@ -54,14 +54,18 @@ export async function POST(req: Request) {
     }
 
     // ── Multi-tenancy & Role guard (MT-04) ──────────────────────────────────
-    const { data: adminProfile } = await supabase
+    // Use admin client to bypass stale JWT / RLS — still verify caller is the authed user
+    // and tenant matches (service-role never trusts client). Allow Saccos 'member' when tenant matches.
+    const adminSupabaseForAuth = await createAdminClient();
+    const { data: adminProfile } = await adminSupabaseForAuth
       .from('admin_profiles')
-      .select('tenant_id, role')
+      .select('tenant_id, role, app_type')
       .eq('id', user.id)
       .eq('tenant_id', churchId)
       .maybeSingle();
 
-    if (!adminProfile || !['pastor', 'admin'].includes(adminProfile.role)) {
+    const allowedRoles = ['pastor', 'admin', 'staff', 'member'] as const;
+    if (!adminProfile || !allowedRoles.includes(adminProfile.role as any)) {
       return NextResponse.json(
         { error: 'Access denied: only pastors or administrators can enqueue broadcasts.' },
         { status: 403 },
