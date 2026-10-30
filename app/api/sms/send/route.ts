@@ -1,10 +1,11 @@
 import { NextResponse } from 'next/server';
 import { createClient as createSupabaseServerClient, createAdminClient } from '@/lib/supabase/server';
+import { describeAccessFailure, verifyChurchAdminAccess } from '@/lib/supabase/church-access';
 import { normalizeUgPhone } from '@/lib/utils';
 import { sendSingleSMS } from '@/lib/sms-actions';
 import { readBoundedJson } from '@/lib/http/read-json';
 import { checkRateLimit } from '@/lib/security/rate-limit';
-import { isSameOriginRequestForHeaders } from '@/lib/auth-security';
+import { isSameOriginRequestForHeaders, SMS_BROADCAST_ROLES } from '@/lib/auth-security';
 import { isSmsWithinSegmentLimit } from '@/supabase/functions/_shared/sms-length';
 
 const MAX_REQUEST_BYTES = 16 * 1024;
@@ -49,15 +50,19 @@ export async function POST(req: Request) {
     // table, so a stale JWT silently returns no row. The caller's identity and
     // tenant are still verified here before any privileged read.
     const adminSupabaseForAuth = await createAdminClient();
-    const { data: adminProfile } = await adminSupabaseForAuth
-      .from('admin_profiles')
-      .select('tenant_id, role')
-      .eq('id', user.id)
-      .eq('tenant_id', churchId)
-      .maybeSingle();
-    const allowedRoles = ['pastor', 'admin', 'staff', 'member'] as const;
-    if (!adminProfile || !allowedRoles.includes(adminProfile.role as any)) {
-      return NextResponse.json({ error: 'Access denied: a pastor or administrator for this church is required.' }, { status: 403 });
+    const verified = await verifyChurchAdminAccess({
+      adminClient: adminSupabaseForAuth,
+      userClient: supabase,
+      userId: user.id,
+      churchId,
+      allowedRoles: SMS_BROADCAST_ROLES,
+    });
+    describeAccessFailure('SMS Send', user.id, churchId, verified);
+    if (verified.outcome.kind !== 'granted') {
+      return NextResponse.json(
+        { error: 'error' in verified.outcome ? verified.outcome.error : 'Access denied.' },
+        { status: verified.outcome.status },
+      );
     }
 
     const accountLimit = await checkRateLimit({ namespace: 'sms-single-account', subject: user.id, limit: 30, windowSeconds: 10 * 60 });

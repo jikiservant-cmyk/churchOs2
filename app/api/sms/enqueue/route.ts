@@ -7,12 +7,13 @@
 
 import { after, NextResponse } from 'next/server';
 import { createClient as createServerClient, createAdminClient } from '@/lib/supabase/server';
+import { describeAccessFailure, verifyChurchAdminAccess } from '@/lib/supabase/church-access';
 import { enqueueBroadcast } from '@/lib/queue-actions';
 import { dispatchSmsQueueItems } from '@/lib/sms-dispatch';
 import { normalizeUgPhone } from '@/lib/utils';
 import { readBoundedJson } from '@/lib/http/read-json';
 import { checkRateLimit } from '@/lib/security/rate-limit';
-import { isSameOriginRequestForHeaders } from '@/lib/auth-security';
+import { isSameOriginRequestForHeaders, SMS_BROADCAST_ROLES } from '@/lib/auth-security';
 import { isSmsWithinSegmentLimit, smsSegmentCount } from '@/supabase/functions/_shared/sms-length';
 
 const MAX_REQUEST_BYTES = 64 * 1024;
@@ -54,21 +55,27 @@ export async function POST(req: Request) {
     }
 
     // ── Multi-tenancy & Role guard (MT-04) ──────────────────────────────────
-    // Use admin client to bypass stale JWT / RLS — still verify caller is the authed user
-    // and tenant matches (service-role never trusts client). Allow Saccos 'member' when tenant matches.
+    // Allow Saccos 'member' when the tenant matches; the tenant check, not the
+    // role list, is what bounds a workspace. Only the columns the guard reads are
+    // selected: an unused column in the list turns schema drift on that column into
+    // an access-denied page.
+    // One verification path for every privileged read on this route: the
+    // service-role key first, the caller's own RLS policy as the discriminator
+    // when that comes back empty (RLS without a policy returns 0 rows and no
+    // error, which used to be reported to pastors as "you are not an admin").
     const adminSupabaseForAuth = await createAdminClient();
-    const { data: adminProfile } = await adminSupabaseForAuth
-      .from('admin_profiles')
-      .select('tenant_id, role, app_type')
-      .eq('id', user.id)
-      .eq('tenant_id', churchId)
-      .maybeSingle();
-
-    const allowedRoles = ['pastor', 'admin', 'staff', 'member'] as const;
-    if (!adminProfile || !allowedRoles.includes(adminProfile.role as any)) {
+    const verified = await verifyChurchAdminAccess({
+      adminClient: adminSupabaseForAuth,
+      userClient: supabase,
+      userId: user.id,
+      churchId: churchId as string,
+      allowedRoles: SMS_BROADCAST_ROLES,
+    });
+    describeAccessFailure('Enqueue', user.id, churchId as string, verified);
+    if (verified.outcome.kind !== 'granted') {
       return NextResponse.json(
-        { error: 'Access denied: only pastors or administrators can enqueue broadcasts.' },
-        { status: 403 },
+        { error: 'error' in verified.outcome ? verified.outcome.error : 'Access denied.' },
+        { status: verified.outcome.status },
       );
     }
 

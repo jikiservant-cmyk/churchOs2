@@ -1,10 +1,11 @@
-import { createClient, createAdminClient } from '@/lib/supabase/server';
+import { createClient, createAdminClient, isServiceRoleConfigured } from '@/lib/supabase/server';
 import {
   History,
   AlertCircle,
 } from 'lucide-react';
 import BroadcastComposer from '@/components/BroadcastComposer';
 import { getChurchBySlug } from '@/lib/db';
+import { readWalletWithColumnFallback, walletDerivedBalanceUgx, walletSmsRate } from '@/lib/wallet-read';
 import BroadcastHistory from '@/components/BroadcastHistory';
 import SMSWalletWidget from '@/components/SMSWalletWidget';
 
@@ -70,50 +71,90 @@ export default async function MessagesPage(props: {
   if (church && !isPlaceholder) {
     // Wallet balance is the source of truth for SMS count: public.wallets
     // (credited by the webhook's process_topup_webhook RPC).
-    // Use service-role to bypass RLS lag / stale JWT — verified after
-    // confirming the logged-in profile owns this tenant (same check as
-    // /api/church/wallet/status).
+    // Service-role read first so a stale JWT / RLS lag cannot zero it; an
+    // RLS-scoped read as fallback so a missing SUPABASE_SERVICE_ROLE_KEY
+    // degrades to "own tenant only" instead of silently rendering 0 — that
+    // silent 0 is what made a healthy wallet look empty.
     try {
+      const serviceRoleConfigured = isServiceRoleConfigured();
       const adminSupabase = await createAdminClient();
       const { data: { user: walletUser } } = await supabase.auth.getUser();
       let authorized = true;
-      if (walletUser) {
-        const { data: walletProfile } = await adminSupabase
+      if (serviceRoleConfigured && walletUser) {
+        const { data: walletProfile, error: walletProfileError } = await adminSupabase
           .from('admin_profiles')
           .select('tenant_id, role')
           .eq('id', walletUser.id)
           .maybeSingle();
-        if (walletProfile?.tenant_id && walletProfile.tenant_id !== church.id) {
+        if (walletProfileError) {
+          console.warn('[MessagesPage] Admin profile lookup failed; using the RLS-scoped wallet read instead:', walletProfileError.message);
+        } else if (walletProfile?.tenant_id && walletProfile.tenant_id !== church.id) {
           authorized = false;
         }
-        if (walletProfile && walletProfile.role && !['pastor','admin','staff','member'].includes(walletProfile.role)) {
-          // Shared Saccos table uses member, still allow if tenant matches
-          authorized = walletProfile.tenant_id === church.id;
-        }
       }
-      if (authorized) {
-        const { data: walletRow, error: walletError } = await adminSupabase
-          .from('wallets')
-          .select('balance, sms_rate, tenant_id')
-          .eq('tenant_id', church.id)
-          .maybeSingle();
-        if (walletError) {
-          console.warn('[MessagesPage] Wallet fetch via admin failed:', walletError.message);
-        } else {
-          balanceData = walletRow;
-        }
-      } else {
+      if (!authorized) {
         console.warn('[MessagesPage] Wallet access denied for tenant mismatch');
+      } else {
+        // Church policy is `tenant_id = church.my_tenant_id()`, so the RLS client
+        // can only ever return the signed-in user's own wallet — that makes it a
+        // safe fallback when the service-role read is unavailable.
+        const readers = [
+          { label: 'service-role', ready: serviceRoleConfigured, client: adminSupabase },
+          { label: 'RLS', ready: true, client: supabase },
+        ];
+        for (const reader of readers) {
+          if (!reader.ready) {
+            console.warn('[MessagesPage] SUPABASE_SERVICE_ROLE_KEY is not set; reading the wallet through RLS');
+            continue;
+          }
+          // A dynamic `select(columns)` string defeats supabase-js's projection
+          // typing, so the row is normalised here rather than in the helper.
+          const client = reader.client;
+          const result = await readWalletWithColumnFallback(async (columns) => {
+            const { data, error } = await client.from('wallets').select(columns).eq('tenant_id', church.id).maybeSingle();
+            return {
+              data: (data ?? null) as unknown as { balance?: number | string | null; sms_rate?: number | null; tenant_id?: string | null } | null,
+              error: (error ?? null) as unknown as { code?: string; message?: string } | null,
+            };
+          });
+          if (result.wallet) {
+            balanceData = result.wallet;
+            if (result.degraded) {
+              console.warn(`[MessagesPage] public.wallets has no sms_rate column (${reader.label}); using the default rate`);
+            }
+            break;
+          }
+          if (result.error) {
+            console.warn(`[MessagesPage] Wallet fetch via ${reader.label} failed:`, result.error.code ?? '', result.error.message ?? '');
+          } else {
+            console.warn(`[MessagesPage] No public.wallets row for tenant ${church.id} via ${reader.label}`);
+          }
+        }
+        if (!balanceData) {
+          // Both read paths came back empty without erroring. That is what RLS
+          // enabled with no policy looks like, and it is indistinguishable from an
+          // unprovisioned wallet at this layer — so name both, in the log the
+          // operator can actually search, rather than letting the UI guess zero.
+          console.error(
+            `[MessagesPage] public.wallets returned no row for tenant ${church.id} via BOTH service-role and RLS. `
+            + 'Either this church has no wallet row (provisioning gap) or RLS is enabled without a policy for '
+            + 'these roles (apply migrations/016_rls_policy_repair.sql). Balance is shown as unavailable, not 0.',
+          );
+        }
       }
     } catch (e: any) {
       console.warn('[MessagesPage] Wallet admin fetch threw:', e?.message ?? e);
       // Fallback to RLS path so page never hard-crashes
-      const { data: balance } = await supabase
-        .from('wallets')
-        .select('*')
-        .eq('tenant_id', church.id)
-        .maybeSingle();
-      balanceData = balance;
+      try {
+        const { data: balance } = await supabase
+          .from('wallets')
+          .select('balance, sms_rate, tenant_id')
+          .eq('tenant_id', church.id)
+          .maybeSingle();
+        balanceData = balance;
+      } catch (fallbackError: any) {
+        console.warn('[MessagesPage] Wallet RLS fallback threw:', fallbackError?.message ?? fallbackError);
+      }
     }
 
     // 2. Fetch members
@@ -171,9 +212,10 @@ export default async function MessagesPage(props: {
   }
 
   const validMembersCount = members?.length || 0;
-  // wallets.balance is bigint → Supabase may return string; coerce to number
-  const balanceUgx = Number(balanceData?.balance ?? 0);
-  const smsRate = Number(balanceData?.sms_rate ?? 70) || 70;
+  // wallets.balance is bigint → Supabase may return a string; a missing sms_rate
+  // column (older deployments) falls back to the default rate, never to a blank.
+  const balanceUgx = walletDerivedBalanceUgx(balanceData);
+  const smsRate = walletSmsRate(balanceData);
   const remainingSMS = Math.floor(balanceUgx / smsRate);
   const leftoverUGX = balanceUgx % smsRate;
 
@@ -262,6 +304,7 @@ export default async function MessagesPage(props: {
           balanceUgx={balanceUgx}
           leftoverUGX={leftoverUGX}
           churchId={church.id}
+          walletUnavailable={!balanceData}
         />
       </div>
 

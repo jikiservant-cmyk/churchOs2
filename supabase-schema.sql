@@ -174,13 +174,13 @@ BEGIN
   -- Add IP Address column to churches
   IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'church' AND table_name = 'churches' AND column_name = 'ip_address') THEN
     ALTER TABLE church.churches ADD COLUMN ip_address text;
-    CREATE INDEX idx_church_ip_address ON church.churches(ip_address);
+    CREATE INDEX IF NOT EXISTS idx_church_ip_address ON church.churches(ip_address);
   END IF;
 
   -- Add IP Address column to admin_profiles
   IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'admin_profiles' AND column_name = 'ip_address') THEN
     ALTER TABLE public.admin_profiles ADD COLUMN ip_address text;
-    CREATE INDEX idx_admin_ip_address ON public.admin_profiles(ip_address);
+    CREATE INDEX IF NOT EXISTS idx_admin_ip_address ON public.admin_profiles(ip_address);
   END IF;
 END $$;
 
@@ -351,6 +351,7 @@ GRANT SELECT ON auth.users TO postgres, service_role;
 -- Tenants Table RLS
 ALTER TABLE public.tenants ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "Users can view tenants they are admins of" ON public.tenants;
 CREATE POLICY "Users can view tenants they are admins of" 
 ON public.tenants FOR SELECT 
 TO authenticated 
@@ -361,6 +362,7 @@ USING (
   )
 );
 
+DROP POLICY IF EXISTS "Service role full access on tenants" ON public.tenants;
 CREATE POLICY "Service role full access on tenants" 
 ON public.tenants FOR ALL 
 TO service_role 
@@ -369,11 +371,13 @@ USING (true);
 -- Admin Profiles RLS
 ALTER TABLE public.admin_profiles ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "Users can view their own profile" ON public.admin_profiles;
 CREATE POLICY "Users can view their own profile" 
 ON public.admin_profiles FOR SELECT 
 TO authenticated 
 USING (id = auth.uid());
 
+DROP POLICY IF EXISTS "Service role full access on profiles" ON public.admin_profiles;
 CREATE POLICY "Service role full access on profiles" 
 ON public.admin_profiles FOR ALL 
 TO service_role 
@@ -383,12 +387,14 @@ USING (true);
 ALTER TABLE church.churches ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS "Admins can view their associated church" ON church.churches;
+DROP POLICY IF EXISTS "Admins can manage their associated church" ON church.churches;
 CREATE POLICY "Admins can manage their associated church" 
   ON church.churches FOR ALL 
   TO authenticated 
   USING (id = church.my_tenant_id())
   WITH CHECK (id = church.my_tenant_id());
 
+DROP POLICY IF EXISTS "Service role full access on churches" ON church.churches;
 CREATE POLICY "Service role full access on churches" 
 ON church.churches FOR ALL 
 TO service_role 
@@ -427,6 +433,27 @@ DO $$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='wallets' AND column_name='id') THEN
     ALTER TABLE public.wallets ADD COLUMN id uuid DEFAULT gen_random_uuid() UNIQUE;
+  END IF;
+END $$;
+
+-- Same guard for the columns that only ever existed in the CREATE TABLE above:
+-- `CREATE TABLE IF NOT EXISTS` is a no-op on a pre-existing table, so a database
+-- older than those columns never receives them, and every read that projects them
+-- fails with 42703 — which callers used to report as a 0 balance / an access
+-- denial. Idempotent; `app_type` keeps a default so a populated table accepts it.
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='wallets' AND column_name='sms_rate') THEN
+    ALTER TABLE public.wallets ADD COLUMN sms_rate int NOT NULL DEFAULT 70;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='wallets' AND column_name='app_type') THEN
+    ALTER TABLE public.wallets ADD COLUMN app_type text NOT NULL DEFAULT 'church';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='wallets' AND column_name='last_updated') THEN
+    ALTER TABLE public.wallets ADD COLUMN last_updated timestamptz DEFAULT now();
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='admin_profiles' AND column_name='app_type') THEN
+    ALTER TABLE public.admin_profiles ADD COLUMN app_type text DEFAULT 'church';
   END IF;
 END $$;
 
@@ -947,17 +974,29 @@ CREATE POLICY "donations_insert" ON church.donations FOR INSERT TO authenticated
 CREATE POLICY "donations_delete" ON church.donations FOR DELETE TO authenticated USING (church_id = church.my_tenant_id());
 
 -- Service Role Bypass for all
+DROP POLICY IF EXISTS "Service role bypass on sms_logs" ON church.sms_logs;
 CREATE POLICY "Service role bypass on sms_logs" ON church.sms_logs TO service_role USING (true);
+DROP POLICY IF EXISTS "Service role bypass on wallets" ON public.wallets;
 CREATE POLICY "Service role bypass on wallets" ON public.wallets TO service_role USING (true);
+DROP POLICY IF EXISTS "Service role bypass on wallet_transactions" ON public.wallet_transactions;
 CREATE POLICY "Service role bypass on wallet_transactions" ON public.wallet_transactions TO service_role USING (true);
+DROP POLICY IF EXISTS "Service role bypass on billing_events" ON public.billing_events;
 CREATE POLICY "Service role bypass on billing_events" ON public.billing_events TO service_role USING (true);
+DROP POLICY IF EXISTS "Service role bypass on members" ON church.members;
 CREATE POLICY "Service role bypass on members" ON church.members TO service_role USING (true);
+DROP POLICY IF EXISTS "Service role bypass on new_converts" ON church.new_converts;
 CREATE POLICY "Service role bypass on new_converts" ON church.new_converts TO service_role USING (true);
+DROP POLICY IF EXISTS "Service role bypass on events" ON church.events;
 CREATE POLICY "Service role bypass on events" ON church.events TO service_role USING (true);
+DROP POLICY IF EXISTS "Service role bypass on attendance_logs" ON church.attendance_logs;
 CREATE POLICY "Service role bypass on attendance_logs" ON church.attendance_logs TO service_role USING (true);
+DROP POLICY IF EXISTS "Service role bypass on attendance_flags" ON church.attendance_flags;
 CREATE POLICY "Service role bypass on attendance_flags" ON church.attendance_flags TO service_role USING (true);
+DROP POLICY IF EXISTS "Service role bypass on prayers" ON church.prayers;
 CREATE POLICY "Service role bypass on prayers" ON church.prayers TO service_role USING (true);
+DROP POLICY IF EXISTS "Service role bypass on small_groups" ON church.small_groups;
 CREATE POLICY "Service role bypass on small_groups" ON church.small_groups TO service_role USING (true);
+DROP POLICY IF EXISTS "Service role bypass on donations" ON church.donations;
 CREATE POLICY "Service role bypass on donations" ON church.donations TO service_role USING (true);
 
 -- Church Security: Restrict direct SELECT on church.churches to tenant owner / service_role
@@ -1733,10 +1772,15 @@ CREATE TABLE IF NOT EXISTS church.visitors (
 
 ALTER TABLE church.visitors ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "visitors_tenant_select" ON church.visitors;
 CREATE POLICY "visitors_tenant_select" ON church.visitors FOR SELECT TO authenticated USING (church_id = church.my_tenant_id());
+DROP POLICY IF EXISTS "visitors_tenant_insert" ON church.visitors;
 CREATE POLICY "visitors_tenant_insert" ON church.visitors FOR INSERT TO authenticated WITH CHECK (church_id = church.my_tenant_id());
+DROP POLICY IF EXISTS "visitors_tenant_update" ON church.visitors;
 CREATE POLICY "visitors_tenant_update" ON church.visitors FOR UPDATE TO authenticated USING (church_id = church.my_tenant_id()) WITH CHECK (church_id = church.my_tenant_id());
+DROP POLICY IF EXISTS "visitors_tenant_delete" ON church.visitors;
 CREATE POLICY "visitors_tenant_delete" ON church.visitors FOR DELETE TO authenticated USING (church_id = church.my_tenant_id());
+DROP POLICY IF EXISTS "visitors_service_role" ON church.visitors;
 CREATE POLICY "visitors_service_role" ON church.visitors FOR ALL TO service_role USING (true);
 
 -- 13. Broadcasts and SMS Queue (H3 remediation)
@@ -1769,10 +1813,15 @@ END $$;
 
 ALTER TABLE church.broadcasts ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "broadcasts_tenant_select" ON church.broadcasts;
 CREATE POLICY "broadcasts_tenant_select" ON church.broadcasts FOR SELECT TO authenticated USING (tenant_id = church.my_tenant_id());
+DROP POLICY IF EXISTS "broadcasts_tenant_insert" ON church.broadcasts;
 CREATE POLICY "broadcasts_tenant_insert" ON church.broadcasts FOR INSERT TO authenticated WITH CHECK (tenant_id = church.my_tenant_id());
+DROP POLICY IF EXISTS "broadcasts_tenant_update" ON church.broadcasts;
 CREATE POLICY "broadcasts_tenant_update" ON church.broadcasts FOR UPDATE TO authenticated USING (tenant_id = church.my_tenant_id()) WITH CHECK (tenant_id = church.my_tenant_id());
+DROP POLICY IF EXISTS "broadcasts_tenant_delete" ON church.broadcasts;
 CREATE POLICY "broadcasts_tenant_delete" ON church.broadcasts FOR DELETE TO authenticated USING (tenant_id = church.my_tenant_id());
+DROP POLICY IF EXISTS "broadcasts_service_role" ON church.broadcasts;
 CREATE POLICY "broadcasts_service_role" ON church.broadcasts FOR ALL TO service_role USING (true);
 
 CREATE TABLE IF NOT EXISTS church.sms_queue (
@@ -1797,10 +1846,15 @@ CREATE TABLE IF NOT EXISTS church.sms_queue (
 
 ALTER TABLE church.sms_queue ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "sms_queue_tenant_select" ON church.sms_queue;
 CREATE POLICY "sms_queue_tenant_select" ON church.sms_queue FOR SELECT TO authenticated USING (tenant_id = church.my_tenant_id());
+DROP POLICY IF EXISTS "sms_queue_tenant_insert" ON church.sms_queue;
 CREATE POLICY "sms_queue_tenant_insert" ON church.sms_queue FOR INSERT TO authenticated WITH CHECK (tenant_id = church.my_tenant_id());
+DROP POLICY IF EXISTS "sms_queue_tenant_update" ON church.sms_queue;
 CREATE POLICY "sms_queue_tenant_update" ON church.sms_queue FOR UPDATE TO authenticated USING (tenant_id = church.my_tenant_id()) WITH CHECK (tenant_id = church.my_tenant_id());
+DROP POLICY IF EXISTS "sms_queue_tenant_delete" ON church.sms_queue;
 CREATE POLICY "sms_queue_tenant_delete" ON church.sms_queue FOR DELETE TO authenticated USING (tenant_id = church.my_tenant_id());
+DROP POLICY IF EXISTS "sms_queue_service_role" ON church.sms_queue;
 CREATE POLICY "sms_queue_service_role" ON church.sms_queue FOR ALL TO service_role USING (true);
 
 -- Claim SMS Queue Batch (Skip Locked)

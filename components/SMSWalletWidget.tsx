@@ -9,13 +9,20 @@ interface SMSWalletWidgetProps {
   balanceUgx: number;
   leftoverUGX: number;
   churchId: string;
+  /**
+   * The wallet row could not be read (service-role gap, RLS, or a church with no
+   * `public.wallets` row). `0` and "unreadable" are different facts, and showing
+   * `0` for the second one is what sends a pastor to support chasing a phantom.
+   */
+  walletUnavailable?: boolean;
 }
 
-export default function SMSWalletWidget({ 
-  remainingSMS, 
-  balanceUgx, 
-  leftoverUGX, 
-  churchId 
+export default function SMSWalletWidget({
+  remainingSMS,
+  balanceUgx,
+  leftoverUGX,
+  churchId,
+  walletUnavailable = false,
 }: SMSWalletWidgetProps) {
   const [isModalOpen, setIsModalOpen] = useState(false);
 
@@ -23,7 +30,7 @@ export default function SMSWalletWidget({
     <>
       <div className="bg-[#F0E6D3] border border-[rgba(90,55,20,0.13)] rounded-2xl p-4 shadow-sm flex items-center gap-4 min-w-[280px]">
         <div
-          className={`w-12 h-12 rounded-xl flex items-center justify-center ${remainingSMS < 20 ? "bg-red-50 text-[#B5622A]" : "bg-[rgba(90,55,20,0.05)] text-[#B5622A]"}`}
+          className={`w-12 h-12 rounded-xl flex items-center justify-center ${!walletUnavailable && remainingSMS < 20 ? "bg-red-50 text-[#B5622A]" : "bg-[rgba(90,55,20,0.05)] text-[#B5622A]"}`}
         >
           <Wallet className="w-6 h-6" />
         </div>
@@ -34,18 +41,24 @@ export default function SMSWalletWidget({
                 SMS Balance
               </p>
               <h3 className="text-lg font-black text-[#1E1208] leading-tight">
-                {remainingSMS}{" "}
+                {walletUnavailable ? "—" : remainingSMS}{" "}
                 <span className="text-sm font-bold text-[#C8B89A]">
                   SMS remaining
                 </span>
               </h3>
-              <p className="text-[10px] font-medium text-[#9A7E65] mt-0.5">
-                UGX {balanceUgx.toLocaleString()} ({leftoverUGX} leftover)
-              </p>
+              {walletUnavailable ? (
+                <p className="text-[10px] font-medium text-[#B5622A] mt-0.5">
+                  Balance unavailable for this church &mdash; wallet not found or not readable
+                </p>
+              ) : (
+                <p className="text-[10px] font-medium text-[#9A7E65] mt-0.5">
+                  UGX {balanceUgx.toLocaleString()} ({leftoverUGX} leftover)
+                </p>
+              )}
 
             </div>
             <div className="flex flex-col items-end gap-2">
-              {remainingSMS < 50 && (
+              {!walletUnavailable && remainingSMS < 50 && (
                 <div className="flex items-center gap-1.5 px-2 py-0.5 bg-[#B5622A]/10 border border-[#B5622A]/20 rounded-full animate-pulse">
                   <AlertCircle className="w-3 h-3 text-[#B5622A]" />
                   <span className="text-[9px] font-black text-[#B5622A] uppercase tracking-tighter">
