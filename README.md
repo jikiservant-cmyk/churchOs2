@@ -60,7 +60,14 @@ Open Supabase Dashboard → SQL Editor and run each file in order:
 015_missing_schema_columns.sql    ← Adds the columns the app reads but no migration created
 016_rls_policy_repair.sql         ← Restores the RLS policies a re-run of the schema left behind
 017_activation_billing_columns.sql ← Declares the activation billing state + a default that gates new churches
+018_usher_passkey_default.sql       ← Gives churches.churches.passkey its DEFAULT (the usher portal needs a code)
 ```
+
+018 issues no credential of its own — it only stops an insert that omits `passkey`
+from creating a church with no usher code. Existing blank rows are filled by
+`012_usher_passkey_backfill.sql`, which is idempotent, never touches a row that
+already has a code, never bumps `passkey_version` (live usher sessions survive)
+and deliberately never prints the codes it writes.
 
 Before 017, read the gate audit (it writes nothing) to see which congregations any
 later tightening would affect:

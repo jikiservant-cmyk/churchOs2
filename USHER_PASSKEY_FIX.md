@@ -159,3 +159,31 @@ code. Error messages now distinguish every case:
 | `No usher passkey is configured…` | 012 not applied and the row is empty |
 | `Invalid passkey format.` | not 6–32 chars, or outside `A-Z a-z 0-9 _ -` |
 | `Invalid passkey. Please check…` | genuinely wrong code |
+
+## Follow-up (2026-10-30): new churches were arriving with no code at all
+
+Reported as "the usher portal code is not there for the new churches". The portal was
+not broken — nothing issued a credential. `church.churches.passkey` takes its value
+from a column DEFAULT that `supabase-schema.sql` declares, but on a live project that
+DEFAULT only arrives with migration 014 (which installs it solely when the column has
+none), and `provision_church_v3` does not name the column. Where 014 had not run, every
+new church was created with `passkey IS NULL`: the admin Attendance field rendered empty,
+"Copy portal link" copied nothing, and the portal answered
+*"No usher passkey is configured for this church yet…"*.
+
+Now the code is guaranteed by the application rather than by whichever migrations happen
+to have been applied:
+
+* `lib/usher-passkey.ts` holds the crypto and the issuance rule in one place (it is not a
+  `'use server'` module, so `ensureChurchUsherPasskey` cannot be called from a browser).
+  `lib/attendance-actions.ts` keeps its behaviour through aliases.
+* Provisioning issues the code the moment the workspace exists. A failure to write it is
+  logged, never fatal — the church is already created.
+* The admin Attendance screen issues it on first visit, which repairs every existing
+  church with a blank row without touching a single credential that already exists.
+* `migrations/018_usher_passkey_default.sql` adds the DB-side DEFAULT for rows created
+  outside the app. It writes no code and bumps no `passkey_version`; run
+  `012_usher_passkey_backfill.sql` for existing blank rows.
+
+A code is never re-issued where one exists: rotation is a deliberate act by a pastor, and
+silently replacing a church's credential would lock its ushers out mid-service.
