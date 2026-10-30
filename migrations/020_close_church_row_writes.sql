@@ -16,11 +16,13 @@
 --
 -- What it does, and why each part is shaped the way it is:
 --
---   1. Drops "Admins can manage their associated church" — a FOR ALL policy
---      scoped only by tenancy, which let any signed-in member UPDATE (and where
---      the GRANT allowed it, DELETE) their own church row: activation_status,
---      activation_paid_at, passkey, passkey_hash. Replaced by SELECT-only, which
---      every church page still needs.
+--   1. Drops every tenant-capable write policy on church.churches — the shipped
+--      "Admins can manage their associated church" FOR ALL and any repaired variant
+--      under another name. That policy was scoped only by tenancy, so any signed-in
+--      member could UPDATE (and where the GRANT allowed it, DELETE) their own church
+--      row: activation_status, activation_paid_at, passkey, passkey_hash. Replaced by
+--      SELECT-only, which every church page still needs. A policy that also names
+--      service_role is left alone and step 4 aborts if one is what remains.
 --
 --   2. Installs a BEFORE UPDATE guard on the billing and credential columns. The
 --      policy alone would be enough for PostgREST, but a trigger also covers any
@@ -34,6 +36,10 @@
 --      webhook and the dispatch Edge function, both service-role.
 --
 -- Safe to run twice: everything is IF EXISTS / OR REPLACE / DROP-then-CREATE.
+--
+-- If it stops with 'PHASE B FAILED', nothing was committed — and run ROLLBACK; in
+-- that same session before anything else, because the verification block raises
+-- inside the transaction this file opens, which leaves it aborted.
 -- ============================================================================
 
 BEGIN;
@@ -58,7 +64,40 @@ $$;
 -- ---------------------------------------------------------------------------
 -- 1. Tenants read their church row; they no longer write it.
 -- ---------------------------------------------------------------------------
-DROP POLICY IF EXISTS "Admins can manage their associated church" ON church.churches;
+-- 1a. The named policy first, then anything else with the same effect. Projects were
+--     patched by hand and by migrations/016 under different names over the months; the
+--     old paste here dropped only the shipped name, which left a repaired project still
+--     open while reporting success. A policy that also lists service_role is NOT touched:
+--     dropping one of those would take the application's own access with it, and the
+--     verification at step 4 refuses to commit while such a policy is what remains.
+DO $$
+DECLARE
+  r record;
+  v_dropped integer := 0;
+BEGIN
+  DROP POLICY IF EXISTS "Admins can manage their associated church" ON church.churches;
+
+  FOR r IN
+    SELECT policyname
+      FROM pg_policies
+     WHERE schemaname = 'church' AND tablename = 'churches'
+       AND cmd IN ('ALL', 'UPDATE', 'INSERT', 'DELETE')
+       AND (roles::text LIKE '%authenticated%' OR roles::text = '{public}')
+       AND roles::text NOT LIKE '%service_role%'
+     ORDER BY policyname
+  LOOP
+    EXECUTE format('DROP POLICY %I ON church.churches', r.policyname);
+    RAISE NOTICE 'PHASE B · dropped tenant write policy % on church.churches', r.policyname;
+    v_dropped := v_dropped + 1;
+  END LOOP;
+
+  IF v_dropped = 0 THEN
+    RAISE NOTICE 'PHASE B · no tenant-only write policy was present on church.churches (already narrowed, or it names service_role too - see step 4).';
+  END IF;
+END
+$$;
+
+-- 1b. Read stays: every church page renders the name, slug, theme and activation state.
 DROP POLICY IF EXISTS "Churches are readable by their own members" ON church.churches;
 
 CREATE POLICY "Churches are readable by their own members"
@@ -138,6 +177,19 @@ BEGIN
   CREATE POLICY "sms_logs_churchos_service_write"
     ON church.sms_logs FOR SELECT TO authenticated
     USING (church_id = church.my_tenant_id());
+
+  -- Anything else that still lets this role group write to the audit trail is reported,
+  -- not deleted: unlike church.churches, an SMS write path the operator relies on and
+  -- this file cannot see is a plausible thing to find here, and a delivery log that
+  -- stops writing is a worse outcome than a delete that is still possible.
+  IF EXISTS (
+    SELECT 1 FROM pg_policies
+     WHERE schemaname = 'church' AND tablename = 'sms_logs'
+       AND cmd IN ('ALL', 'UPDATE', 'DELETE')
+       AND roles::text LIKE '%authenticated%'
+  ) THEN
+    RAISE NOTICE 'PHASE B · church.sms_logs still has a tenant ALL/UPDATE/DELETE policy; review it by hand (P2-8).';
+  END IF;
 END
 $$;
 
@@ -167,7 +219,9 @@ BEGIN
      AND cmd IN ('ALL', 'UPDATE', 'INSERT', 'DELETE');
 
   IF NOT v_select_only THEN
-    RAISE EXCEPTION 'PHASE B FAILED: % authenticated write polic(y|ies) still exist on church.churches', v_all;
+    RAISE EXCEPTION
+      'PHASE B FAILED: % tenant-capable write polic(y|ies) still exist on church.churches. They name service_role as well, so this file will not drop them blindly: create a separate FOR ALL TO service_role policy, narrow the mixed one to SELECT, and re-run 020.',
+      v_all;
   END IF;
 
   SELECT count(*) INTO v_trigger

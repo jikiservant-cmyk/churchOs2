@@ -298,6 +298,58 @@ test('the guard trigger refuses protected columns even if a write policy comes b
   await db.close();
 });
 
+test('020 also drops a repaired write policy installed under a different name', async () => {
+  // The live project was patched by 016 and by hand under names other than the
+  // shipped one. A paste that drops only the name in this repository would report
+  // success on a database that is still open.
+  const db = await buildLegacyDb();
+  await db.exec(`
+    DROP POLICY "Admins can manage their associated church" ON church.churches;
+    CREATE POLICY "churchos_tenant_write_repair" ON church.churches
+      FOR ALL TO authenticated
+      USING (id = church.my_tenant_id()) WITH CHECK (id = church.my_tenant_id());
+  `);
+  await db.exec(MIGRATION_020);
+
+  const attack = await asUser(db, PASTOR_EKERO, `UPDATE church.churches SET activation_status = 'active' WHERE id = '${EKERO}'`);
+  assert.notEqual(attack.affected, 1, 'a hand-patched policy name must not survive the paste');
+  const state = await readStatus(db);
+  assert.equal(state.rows[0].activation_status, 'pending_payment');
+  await db.close();
+});
+
+test('020 refuses to commit rather than narrowing a policy that also names service_role', async () => {
+  // Dropping a mixed `TO authenticated, service_role` policy would take the
+  // application's own access with it. So the file stops instead, and stops cleanly.
+  const db = await buildLegacyDb();
+  await db.exec(`
+    DROP POLICY "Admins can manage their associated church" ON church.churches;
+    CREATE POLICY "mixed_write" ON church.churches FOR ALL TO authenticated, service_role
+      USING (id = church.my_tenant_id()) WITH CHECK (id = church.my_tenant_id());
+  `);
+
+  let error = null;
+  try { await db.exec(MIGRATION_020); } catch (e) { error = String(e?.message ?? e); }
+  assert.match(error ?? '', /PHASE B FAILED/);
+  // The file's own BEGIN is left aborted by the raise — exactly what an operator has to
+  // roll back in the dashboard before re-running anything in that session.
+  await db.exec('ROLLBACK');
+
+  const survived = await asService(db, `
+    SELECT count(*)::int AS n FROM pg_policies
+     WHERE schemaname = 'church' AND tablename = 'churches' AND policyname = 'mixed_write'
+  `);
+  assert.equal(survived.rows[0].n, 1, 'a refused migration must leave the database exactly as it was');
+  const trigger = await asService(db, `
+    SELECT count(*)::int AS n FROM pg_trigger t
+      JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+     WHERE n.nspname = 'church' AND c.relname = 'churches'
+       AND t.tgname = 'guard_church_privileged_columns' AND NOT t.tgisinternal
+  `);
+  assert.equal(trigger.rows[0].n, 0, 'and must not have installed half of the hardening');
+  await db.close();
+});
+
 test('020 is idempotent and self-verifying', async () => {
   const db = await buildLegacyDb();
   await db.exec(MIGRATION_020);
