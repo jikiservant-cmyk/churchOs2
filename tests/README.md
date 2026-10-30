@@ -15,7 +15,9 @@ live service credentials.
 
 | File | What it covers |
 | --- | --- |
-| `activation.test.ts` | Activation fee/currency, missing references, and the fail-closed ledger lookup path against a mocked Supabase HTTP API. |
+| `activation.test.ts` | Activation fee/currency, missing references, and the fail-closed ledger lookup path against a mocked Supabase HTTP API. Amounts derive from `ACTIVATION_FEE_UGX`, so a temporary test price cannot turn the suite red or hide a real drift. |
+| `activation-fee.test.ts` | `ACTIVATION_FEE_UGX` resolution: test overrides accepted, 0/fractional/out-of-range/garbage refused in favour of the standard price, and a single price shared by the payment screen, the ledger and the provider request. |
+| `activation-gate.test.ts` | The one "has this church paid?" rule, every status shape it must answer (including NULL and an unreadable row), the legacy-NULL policy switch, and source guards that stop the gate, `lib/db.ts` and the three login screens from disagreeing again. |
 | `attendance-streaks.test.ts` | Consecutive attendance-miss calculations and attendance flag lifecycle rules. |
 | `denomination.test.ts` | Invite code normalization, provisioning payload validation, login-context mapping, and denomination query helpers. |
 | `najiki-contract.test.ts` | Church → Na'jiki payloads validated by Na'jiki's own Zod schemas; error forwarding; idempotency; signed webhook verification and replay/tamper rejection. |

@@ -1,7 +1,8 @@
-import { createClient } from '@/lib/supabase/server';
+import { createClient, createAdminClient } from '@/lib/supabase/server';
 import LoginForm from '@/components/LoginForm';
 import { getChurchBySlug } from '@/lib/db';
 import { redirect } from 'next/navigation';
+import { resolveLoginDestination } from '@/lib/auth-destination';
 import { Suspense } from 'react';
 
 export const dynamic = 'force-dynamic';
@@ -19,61 +20,30 @@ export default async function AdminLoginPage({
 
   let redirectTo: string | null = null;
 
-  // 1. Check if user is already logged in
-  if (!loginError) {
-    try {
-      const { data: { user } } = await supabase.auth.getUser();
-      
-      if (user) {
-        try {
-          const { data: contextData } = await supabase.rpc('my_login_context');
-          if (Array.isArray(contextData) && contextData.length > 0) {
-            const ctx = contextData[0];
-            if (ctx?.account_type === 'overseer') {
-              redirectTo = ctx.denomination_slug ? `/d/${ctx.denomination_slug}/overseer` : '/overseer';
-            } else if (ctx?.account_type === 'pastor' && ctx.church_slug) {
-              redirectTo = `/${ctx.church_slug}/admin`;
-            }
-          }
-        } catch {
-          // Fallback to profile table
-        }
+  // Same resolver as `/` — see lib/auth-destination.ts. This page used to read
+  // admin_profiles through the caller's RLS-scoped client and accept only the
+  // `pastor` role, so an `admin` (or any account on a policy-gapped database)
+  // could not be routed at all and saw the form forever.
+  try {
+    const { data: { user } } = await supabase.auth.getUser();
 
-        if (!redirectTo) {
-          const { data: profile } = await supabase
-            .from('admin_profiles')
-            .select('role, tenant_id')
-            .eq('id', user.id)
-            .maybeSingle();
+    if (user) {
+      const adminSupabase = await createAdminClient();
+      const destination = await resolveLoginDestination({
+        userClient: supabase,
+        adminClient: adminSupabase,
+        userId: user.id,
+        surface: 'AdminLoginPage',
+      });
 
-          const { data: overseerLink } = await supabase
-            .schema('church')
-            .from('denomination_admins')
-            .select('user_id')
-            .eq('user_id', user.id)
-            .maybeSingle();
-
-          if (profile?.role === 'super_admin') {
-            redirectTo = '/super-admin/overseers';
-          } else if (overseerLink?.user_id === user.id) {
-            redirectTo = '/overseer';
-          } else if (profile?.role === 'pastor' && profile?.tenant_id) {
-             const { data: church } = await supabase
-               .schema('church')
-               .from('churches')
-               .select('slug')
-               .eq('id', profile.tenant_id)
-               .maybeSingle();
-               
-             if (church?.slug) {
-               redirectTo = `/${church.slug}/admin`;
-             }
-          }
-        }
+      if (destination.href) {
+        redirectTo = destination.href;
+      } else if (destination.accessDenied) {
+        loginError = 'Access Denied: You do not have admin permissions';
       }
-    } catch (err: any) {
-      console.error('[AdminLoginPage] Auth check error:', err);
     }
+  } catch (err: any) {
+    console.error('[AdminLoginPage] Auth check error:', err);
   }
 
   if (redirectTo) {

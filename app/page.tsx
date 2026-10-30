@@ -1,6 +1,7 @@
 import { createClient, createAdminClient } from '@/lib/supabase/server';
 import LoginForm from '@/components/LoginForm';
 import { getChurchBySlug } from '@/lib/db';
+import { resolveLoginDestination } from '@/lib/auth-destination';
 import { redirect } from 'next/navigation';
 import { Suspense } from 'react';
 
@@ -20,71 +21,34 @@ export default async function RootLoginPage({
 
   let redirectTo: string | null = null;
 
-  // 1. Check if user is already logged in
-  // ONLY redirect if there's no error in the URL (to avoid redirect loops)
-  if (!loginError) {
-    try {
-      const { data: { user } } = await supabase.auth.getUser();
-      
-      if (user) {
-        // Try my_login_context first
-        try {
-          const { data: contextData } = await supabase.rpc('my_login_context');
-          if (Array.isArray(contextData) && contextData.length > 0) {
-            const ctx = contextData[0];
-            if (ctx?.account_type === 'overseer') {
-              redirectTo = ctx.denomination_slug ? `/d/${ctx.denomination_slug}/overseer` : '/overseer';
-            } else if (ctx?.account_type === 'pastor' && ctx.church_slug) {
-              redirectTo = `/${ctx.church_slug}/admin`;
-            }
-          }
-        } catch {
-          // Fallback to profile table
-        }
+  // A logged-in visitor is routed by their session, never parked on this form
+  // because a `?error=` query string is present. That guard used to be
+  // `if (!loginError)`, so anyone the middleware or the admin layout bounced
+  // here with `?error=Session Expired` — including a pastor whose session was
+  // actually still valid, and any pastor of an unpaid church — had to sign in
+  // again before reaching the one screen they are allowed on. The error still
+  // shows whenever there is genuinely no session to route with.
+  try {
+    const { data: { user } } = await supabase.auth.getUser();
 
-        if (!redirectTo) {
-          // Attempt to find their church via their profile using createAdminClient to avoid RLS false negatives
-          const adminSupabase = await createAdminClient();
-          const { data: profile } = await adminSupabase
-            .from('admin_profiles')
-            .select('role, tenant_id')
-            .eq('id', user.id)
-            .maybeSingle();
+    if (user) {
+      const adminSupabase = await createAdminClient();
+      const destination = await resolveLoginDestination({
+        userClient: supabase,
+        adminClient: adminSupabase,
+        userId: user.id,
+        surface: 'RootPage',
+        allowProvisioningRedirect: true,
+      });
 
-          const { data: overseerLink } = await adminSupabase
-            .schema('church')
-            .from('denomination_admins')
-            .select('user_id')
-            .eq('user_id', user.id)
-            .maybeSingle();
-
-          if (profile?.role === 'super_admin') {
-            redirectTo = '/super-admin/overseers';
-          } else if (overseerLink?.user_id === user.id) {
-            redirectTo = '/overseer';
-          } else if (['pastor', 'admin'].includes(profile?.role || '') && profile?.tenant_id) {
-             const { data: church } = await adminSupabase
-               .schema('church')
-               .from('churches')
-               .select('slug')
-               .eq('id', profile.tenant_id)
-               .maybeSingle();
-               
-             if (church?.slug) {
-               redirectTo = `/${church.slug}/admin`;
-             } else {
-               redirectTo = '/signup/provision';
-             }
-          } else if (!profile || !profile.tenant_id) {
-             redirectTo = '/signup/provision';
-          } else if (profile && !['pastor', 'admin'].includes(profile.role)) {
-             loginError = 'Access Denied: You do not have admin permissions';
-          }
-        }
+      if (destination.href) {
+        redirectTo = destination.href;
+      } else if (destination.accessDenied) {
+        loginError = 'Access Denied: You do not have admin permissions';
       }
-    } catch (err: any) {
-      console.error('[RootPage] Auth check error:', err);
     }
+  } catch (err: any) {
+    console.error('[RootPage] Auth check error:', err);
   }
 
   // Perform redirect if needed, outside of try/catch

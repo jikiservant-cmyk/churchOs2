@@ -3,15 +3,24 @@ import assert from 'node:assert/strict';
 import {
   ACTIVATION_FEE_UGX,
   ACTIVATION_CURRENCY,
+  ACTIVATION_FEE_IS_TEST_PRICING,
   ACTIVATION_PLAN_PRICES,
+  ACTIVATION_PRICE_UGX,
   confirmActivationPayment,
   startActivationPayment,
 } from '../lib/activation/index.ts';
+import { resolveActivationFeeUgx } from '../lib/activation-fee.ts';
 
 describe('Church Workspace Activation Flow Suite', () => {
   test('uses server-owned activation plan prices and UGX currency', () => {
-    assert.equal(ACTIVATION_FEE_UGX, 17000);
-    assert.deepEqual(ACTIVATION_PLAN_PRICES, { standard: 17000 });
+    // Invariant, not a literal: the fee the module exposes must be the fee the
+    // configured environment resolves to, and the single plan must carry it.
+    // Pinning the literal here is what made a temporary test price a red CI run.
+    const configured = resolveActivationFeeUgx(process.env.ACTIVATION_FEE_UGX);
+    assert.equal(ACTIVATION_FEE_UGX, configured.amount);
+    assert.deepEqual(ACTIVATION_PLAN_PRICES, { standard: ACTIVATION_FEE_UGX });
+    assert.equal(ACTIVATION_PRICE_UGX, 17_000);
+    assert.equal(ACTIVATION_FEE_IS_TEST_PRICING, configured.override);
     assert.equal(ACTIVATION_CURRENCY, 'UGX');
   });
 
@@ -51,7 +60,7 @@ describe('Church Workspace Activation Flow Suite', () => {
         assert.equal(body.applicationCode, 'church');
         assert.equal(body.paymentTypeCode, 'ACCOUNT_ACTIVATION');
         assert.equal(body.externalEntityId, churchId);
-        assert.equal(body.amount, 17_000);
+        assert.equal(body.amount, ACTIVATION_FEE_UGX);
         assert.equal(body.currency, 'UGX');
         assert.equal(body.phoneNumber, '256772123456');
         assert.equal(body.tenantCode, tenantCode);
@@ -114,7 +123,7 @@ describe('Church Workspace Activation Flow Suite', () => {
       assert.equal(started.providerTransactionId, providerPaymentId);
       const insertedLedger = initiatedLedgerBody as unknown as Record<string, unknown>;
       assert.equal(insertedLedger.church_id, churchId);
-      assert.equal(insertedLedger.amount, 17_000);
+      assert.equal(insertedLedger.amount, ACTIVATION_FEE_UGX);
       assert.equal(insertedLedger.currency, 'UGX');
       assert.equal(insertedLedger.provider, 'najiki');
       assert.equal(insertedLedger.merchant_reference, merchantReference);
@@ -125,7 +134,7 @@ describe('Church Workspace Activation Flow Suite', () => {
       const settled = await confirmActivationPayment({
         merchantReference,
         providerTransactionId: providerPaymentId,
-        paidAmount: 17_000,
+        paidAmount: ACTIVATION_FEE_UGX,
         currency: 'UGX',
         status: 'SUCCESS',
       });
@@ -139,7 +148,7 @@ describe('Church Workspace Activation Flow Suite', () => {
         p_merchant_reference: merchantReference,
         p_provider: 'najiki',
         p_provider_transaction_id: providerPaymentId,
-        p_paid_amount: 17_000,
+        p_paid_amount: ACTIVATION_FEE_UGX,
         p_currency: 'UGX',
         p_provider_status: 'SUCCESS',
       });
@@ -176,7 +185,7 @@ describe('Church Workspace Activation Flow Suite', () => {
     try {
       const result = await confirmActivationPayment({
         merchantReference: 'ACT-failed-payment-test',
-        paidAmount: 17_000,
+        paidAmount: ACTIVATION_FEE_UGX,
         currency: 'UGX',
         status: 'FAILED',
       });
@@ -190,7 +199,7 @@ describe('Church Workspace Activation Flow Suite', () => {
           p_merchant_reference: 'ACT-failed-payment-test',
           p_provider: 'najiki',
           p_provider_transaction_id: null,
-          p_paid_amount: 17_000,
+          p_paid_amount: ACTIVATION_FEE_UGX,
           p_currency: 'UGX',
           p_provider_status: 'FAILED',
         },
@@ -222,7 +231,7 @@ describe('Church Workspace Activation Flow Suite', () => {
       const result = await confirmActivationPayment({
         merchantReference: 'ACT-service-role-required',
         providerTransactionId: 'provider-txn-1',
-        paidAmount: 17_000,
+        paidAmount: ACTIVATION_FEE_UGX,
         currency: 'UGX',
         status: 'SUCCESS',
       });
@@ -244,7 +253,7 @@ describe('Church Workspace Activation Flow Suite', () => {
   test('rejects confirmation when merchant reference is missing', async () => {
     const res = await confirmActivationPayment({
       merchantReference: '',
-      paidAmount: 17000,
+      paidAmount: ACTIVATION_FEE_UGX,
       currency: 'UGX',
       status: 'SUCCESS'
     });
@@ -278,7 +287,7 @@ describe('Church Workspace Activation Flow Suite', () => {
     try {
       const res = await confirmActivationPayment({
         merchantReference: 'NON-EXISTENT-MERCHANT-REF',
-        paidAmount: 17000,
+        paidAmount: ACTIVATION_FEE_UGX,
         currency: 'UGX',
         status: 'SUCCESS'
       });

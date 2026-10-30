@@ -4,7 +4,13 @@ import { redirect, notFound } from 'next/navigation';
 import Link from 'next/link';
 import AdminSidebar from '@/components/AdminSidebar';
 import { describeAccessFailure, verifyChurchAdminAccess } from '@/lib/supabase/church-access';
+import { activationPathFor, resolveActivationGate } from '@/lib/activation-gate';
 import { CHURCH_ADMIN_ROLES, hasAllowedRole } from '@/lib/auth-security';
+
+/** A church that should be paying but reached the portal is worth a log line. */
+function describeActivationBypass(surface: string, slug: string, reason: string) {
+  console.warn(`[${surface}] church="${slug}" activation gate=${reason}; routing to the activation screen.`);
+}
 
 /** Roles this layout recognises while routing; privilege is checked below it. */
 const LAYOUT_IDENTIFIABLE_ROLES = ['pastor', 'admin', 'staff', 'member', 'overseer'] as const;
@@ -134,10 +140,16 @@ export default async function AdminLayout({
     }
   }
 
-  // App Gate: Check activation status
-  if (church.activation_status === 'pending_payment') {
-    redirect(`/${church_slug}/admin/activation`);
-  } else if (church.activation_status === 'suspended') {
+  // App Gate: activation status, decided by lib/activation-gate so this layout,
+  // the root login page, the activation page and the payment initiator cannot
+  // disagree. Anything that is not settled — including a status column this
+  // repository never declared — routes to the payment screen instead of leaking
+  // the dashboard; 'suspended' keeps its own notice below.
+  const activationGate = resolveActivationGate(church);
+  if (activationGate.decision === 'pay') {
+    describeActivationBypass('AdminLayout', church_slug, activationGate.reason);
+    redirect(activationPathFor(church_slug));
+  } else if (activationGate.decision === 'suspended') {
     return (
       <div 
         style={{ fontFamily: "'Outfit', sans-serif" }}

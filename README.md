@@ -57,7 +57,21 @@ Open Supabase Dashboard → SQL Editor and run each file in order:
 011_usher_passkey_columns.sql     ← Adds the usher passkey columns (additive)
 012_usher_passkey_backfill.sql    ← Issues a passkey where none exists
 014_passkey_not_null.sql          ← Enforces NOT NULL; refuses until the data is ready
+015_missing_schema_columns.sql    ← Adds the columns the app reads but no migration created
+016_rls_policy_repair.sql         ← Restores the RLS policies a re-run of the schema left behind
+017_activation_billing_columns.sql ← Declares the activation billing state + a default that gates new churches
 ```
+
+Before 017, read the gate audit (it writes nothing) to see which congregations any
+later tightening would affect:
+
+```
+psql "$DATABASE_URL" -f scripts/activation-gate-audit.sql   # or paste it in the SQL editor
+```
+
+`activation_status` was read in four places and declared nowhere — `supabase-schema.sql`
+has no such column, so a church could be reported as paid because the value was
+missing. `lib/activation-gate.ts` is now the only place that answers the question.
 
 **Before running 002:** Check no passkeys are already hashed:
 ```sql

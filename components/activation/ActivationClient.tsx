@@ -24,16 +24,23 @@ interface ActivationClientProps {
   churchSlug: string;
   churchId: string;
   userEmail: string;
+  /**
+   * The amount the server will actually charge. Passed down from the server
+   * component because a client bundle cannot read `ACTIVATION_FEE_UGX`: a
+   * non-`NEXT_PUBLIC_` variable is not inlined, and a second hardcoded copy of
+   * the price here is what used to let the screen quote one number while the
+   * ledger recorded another.
+   */
+  activationFeeUgx: number;
+  /** The undiscounted price. Only used to label a test override honestly. */
+  standardFeeUgx?: number;
+  /** True while a deployment is charging a non-standard (test) fee. */
+  isTestPricing?: boolean;
 }
 
-const plans = {
-  standard: { 
-    name: 'Lifetime Setup', 
-    price: 17000, 
-    period: 'one-time', 
-    tag: 'One-time parish activation' 
-  },
-};
+const PLAN_NAME = 'Lifetime Setup';
+const PLAN_PERIOD = 'one-time';
+const PLAN_TAG = 'One-time parish activation';
 
 const features = [
   {
@@ -65,7 +72,10 @@ export default function ActivationClient({
   churchName,
   churchSlug,
   churchId,
-  userEmail
+  userEmail,
+  activationFeeUgx,
+  standardFeeUgx,
+  isTestPricing = false
 }: ActivationClientProps) {
   const router = useRouter();
   const [selected] = useState<'standard'>('standard');
@@ -82,7 +92,13 @@ export default function ActivationClient({
   const [isCheckingStatus, setIsCheckingStatus] = useState(false);
 
   const pollIntervalRef = useRef<NodeJS.Timeout | null>(null);
-  const plan = plans[selected];
+  // One price everywhere on this screen, and it is the price the server charges.
+  const plan = {
+    name: PLAN_NAME,
+    price: activationFeeUgx,
+    period: PLAN_PERIOD,
+    tag: PLAN_TAG,
+  };
 
   // Poll status endpoint while waiting for mobile money push confirmation
   useEffect(() => {
@@ -352,6 +368,18 @@ export default function ActivationClient({
               {plan.tag}
             </span>
           </div>
+          {isTestPricing && (
+            <p
+              role="status"
+              className="mt-3 flex items-start gap-2 rounded-[14px] border border-amber-300/70 bg-amber-50 px-3 py-2 text-[11px] leading-relaxed text-amber-900"
+            >
+              <AlertCircle size={14} className="mt-0.5 shrink-0" />
+              <span>
+                Test pricing is active on this deployment: you will be charged{' '}
+                {money(activationFeeUgx)} instead of the standard {money(standardFeeUgx ?? activationFeeUgx)}.
+              </span>
+            </p>
+          )}
         </div>
 
         {/* Main action */}

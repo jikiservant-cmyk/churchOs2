@@ -6,7 +6,13 @@ export interface Church {
   slug: string;
   themeColor: string;
   logoUrl: string;
-  activation_status?: 'active' | 'pending_payment' | 'suspended';
+  /**
+   * Passed through as stored. Deliberately no invented default: `null` means
+   * "this database never set it", which `lib/activation-gate.ts` decides on.
+   * A raw string (not a narrow union) because the column is not declared in
+   * supabase-schema.sql and its live values may include legacy spellings.
+   */
+  activation_status?: string | null;
   activation_paid_at?: string | null;
 }
 
@@ -69,7 +75,14 @@ export const getChurchBySlug = async (slug: string): Promise<Church | null> => {
           slug: data.slug,
           themeColor: (data as any).theme_color || 'bg-blue-600',
           logoUrl: (data as any).logo_url || `https://picsum.photos/seed/${data.slug}/200/200`,
-          activation_status: (data as any).activation_status || 'active',
+          // Used to be `(data as any).activation_status || 'active'`, which reported
+          // every church with a NULL status as paid. That single coercion is why
+          // unpaid workspaces reached the dashboard and were bounced away from the
+          // activation screen — the gate lives in lib/activation-gate.ts now.
+          activation_status:
+            typeof (data as any).activation_status === 'string' && (data as any).activation_status.trim()
+              ? (data as any).activation_status
+              : null,
           activation_paid_at: (data as any).activation_paid_at || null,
         };
       } else {
