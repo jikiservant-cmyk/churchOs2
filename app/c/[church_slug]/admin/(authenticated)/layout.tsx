@@ -3,6 +3,11 @@ import { createClient, createAdminClient } from '@/lib/supabase/server';
 import { redirect, notFound } from 'next/navigation';
 import Link from 'next/link';
 import AdminSidebar from '@/components/AdminSidebar';
+import { describeAccessFailure, verifyChurchAdminAccess } from '@/lib/supabase/church-access';
+import { CHURCH_ADMIN_ROLES, hasAllowedRole } from '@/lib/auth-security';
+
+/** Roles this layout recognises while routing; privilege is checked below it. */
+const LAYOUT_IDENTIFIABLE_ROLES = ['pastor', 'admin', 'staff', 'member', 'overseer'] as const;
 
 export default async function AdminLayout({ 
   children, 
@@ -21,16 +26,50 @@ export default async function AdminLayout({
     redirect(`/?error=Session Expired`);
   }
 
-  // Role Check using admin client to reliably bypass RLS restrictions
+  // Role Check using admin client to reliably bypass RLS restrictions.
+  //
+  // The profile read goes through verifyChurchAdminAccess because an empty
+  // service-role result is ambiguous: it means either "this account has no
+  // profile" or "public.admin_profiles has RLS enabled with no policy for
+  // service_role", which Postgres reports as zero rows and NO error. Reading the
+  // same row through the caller's own policy (`USING (id = auth.uid())`)
+  // separates them. Without that, the second case redirects a working pastor to
+  // /signup/provision, where the honest-looking next click creates a duplicate
+  // church.
   const adminSupabase = await createAdminClient();
-  const { data: profile } = await adminSupabase
-    .from('admin_profiles')
-    .select('role, tenant_id')
-    .eq('id', user.id)
-    .maybeSingle();
+  const verified = await verifyChurchAdminAccess({
+    adminClient: adminSupabase,
+    userClient: supabase,
+    userId: user.id,
+    // This pass establishes identity and tenant only; the role routing (overseer
+    // vs pastor/admin) is this layout's own business further down.
+    allowedRoles: LAYOUT_IDENTIFIABLE_ROLES,
+  });
+  const profile = verified.profile;
 
-  // If authenticated user has no profile or no tenant_id yet, route to workspace provisioning
-  if (!profile || !profile.tenant_id) {
+  if (verified.outcome.kind !== 'granted') {
+    const genuineMemberGap = verified.outcome.kind === 'denied' && verified.outcome.reason === 'no-profile';
+    if (genuineMemberGap) {
+      redirect('/signup/provision');
+    }
+    describeAccessFailure('AdminLayout', user.id, null, verified);
+    return (
+      <div className="min-h-screen bg-[#E4D5BC] flex items-center justify-center p-12 text-center">
+        <div className="bg-[#F0E6D3] p-8 rounded-3xl border border-[#B5622A]/20 shadow-xl max-w-md">
+          <h2 style={{ fontFamily: "'Playfair Display', serif" }} className="text-2xl font-bold text-[#1E1208] mb-4">
+            Workspace check unavailable
+          </h2>
+          <p className="text-[#9A7E65] text-sm leading-relaxed">
+            {'error' in verified.outcome ? verified.outcome.error : 'The server could not verify your workspace membership.'}
+          </p>
+          <Link href="/" className="inline-block mt-6 px-6 py-2 bg-[#2B1A0E] text-[#F5E6CE] rounded-xl font-bold uppercase tracking-widest text-xs">Return Home</Link>
+        </div>
+      </div>
+    );
+  }
+
+  // An authenticated grant without a tenant is still the "not provisioned yet" case.
+  if (!profile?.tenant_id) {
     redirect('/signup/provision');
   }
 
@@ -50,7 +89,7 @@ export default async function AdminLayout({
   }
 
   // Only church administrators and pastors may enter the church admin portal.
-  if (!['pastor', 'admin'].includes(profile.role)) {
+  if (!hasAllowedRole(profile.role, CHURCH_ADMIN_ROLES)) {
     redirect(`/?error=Access Denied`);
   }
 

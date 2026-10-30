@@ -130,6 +130,17 @@ export default async function MessagesPage(props: {
             console.warn(`[MessagesPage] No public.wallets row for tenant ${church.id} via ${reader.label}`);
           }
         }
+        if (!balanceData) {
+          // Both read paths came back empty without erroring. That is what RLS
+          // enabled with no policy looks like, and it is indistinguishable from an
+          // unprovisioned wallet at this layer — so name both, in the log the
+          // operator can actually search, rather than letting the UI guess zero.
+          console.error(
+            `[MessagesPage] public.wallets returned no row for tenant ${church.id} via BOTH service-role and RLS. `
+            + 'Either this church has no wallet row (provisioning gap) or RLS is enabled without a policy for '
+            + 'these roles (apply migrations/016_rls_policy_repair.sql). Balance is shown as unavailable, not 0.',
+          );
+        }
       }
     } catch (e: any) {
       console.warn('[MessagesPage] Wallet admin fetch threw:', e?.message ?? e);

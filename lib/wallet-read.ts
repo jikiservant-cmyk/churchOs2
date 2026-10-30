@@ -49,10 +49,23 @@ export type WalletQueryRunner = (
  *   and awaits it. Kept as a callback so the caller decides which client —
  *   service-role or RLS-scoped — is being used.
  */
+/** A client aimed at an unreachable project rejects rather than returning an
+ *  error object; that is a failed read, not an empty wallet. */
+async function safely(
+  run: WalletQueryRunner,
+  columns: string,
+): Promise<{ data: WalletRecord | null; error: WalletReadError }> {
+  try {
+    return await run(columns);
+  } catch (error) {
+    return { data: null, error: { message: error instanceof Error ? error.message : String(error) } };
+  }
+}
+
 export async function readWalletWithColumnFallback(
   run: WalletQueryRunner,
 ): Promise<WalletReadResult> {
-  const full = await run('balance, sms_rate, tenant_id');
+  const full = await safely(run, 'balance, sms_rate, tenant_id');
   if (!full.error) {
     return { wallet: full.data ?? null, error: null, missingColumns: [], degraded: false };
   }
@@ -60,7 +73,7 @@ export async function readWalletWithColumnFallback(
     return { wallet: null, error: full.error, missingColumns: [], degraded: false };
   }
 
-  const reduced = await run('balance, tenant_id');
+  const reduced = await safely(run, 'balance, tenant_id');
   if (reduced.error) {
     // `balance` itself is missing, or the table is unreadable — never report 0.
     return { wallet: null, error: reduced.error, missingColumns: ['sms_rate'], degraded: false };
