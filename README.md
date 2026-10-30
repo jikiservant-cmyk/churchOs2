@@ -48,6 +48,11 @@ Add the new variables from `.env.example` to your `.env.local`:
 - `SUPABASE_JWT_SECRET`   — from Supabase Dashboard → Settings → API
 - `DATABASE_URL`          — Transaction Pooler URL (port 6543) from Supabase Dashboard
 - `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN` — from upstash.com
+- `EMBED_HOSTS`           — optional, production only. Space- or comma-separated origins
+  allowed to embed churchOs in an iframe (e.g. `https://partner.example`). With it unset,
+  `Content-Security-Policy: frame-ancestors 'self'` plus the app's own hosts is sent, which
+  refuses every third-party frame. Set it *before* deploying if a partner embeds a
+  workspace, or their users will see a blank frame. `*` means "any site may embed us".
 
 ### 4 — Run SQL migrations (in order)
 Open Supabase Dashboard → SQL Editor and run each file in order:
@@ -61,7 +66,19 @@ Open Supabase Dashboard → SQL Editor and run each file in order:
 016_rls_policy_repair.sql         ← Restores the RLS policies a re-run of the schema left behind
 017_activation_billing_columns.sql ← Declares the activation billing state + a default that gates new churches
 018_usher_passkey_default.sql       ← Gives churches.churches.passkey its DEFAULT (the usher portal needs a code)
+019_activation_ledger_rls.sql       ← Puts RLS on the activation payment ledger (additive; safe any time)
+020_close_church_row_writes.sql     ← Takes write access to church.churches away from tenant accounts
 ```
+
+**020 is not like the others: run it only after this code is deployed.** It removes the
+policy that the application itself was relying on for passkey rotation, settings saves
+and provisioning, because `createAdminClient()` used to send the caller's JWT instead of
+the service key. Deploy first, check the runtime logs do not contain
+`createAdminClient() is falling back`, then run 020, then verify: a `PATCH` to
+`/rest/v1/churches` from a signed-in church account must be refused, while rotating a
+passkey in Settings still works. Both files are idempotent and print their own
+verification; 020 aborts if the hardening did not land. `SECURITY_REVIEW-2026-10-30.md`
+has the findings this closes and the reasoning for the order.
 
 018 issues no credential of its own — it only stops an insert that omits `passkey`
 from creating a church with no usher code. Existing blank rows are filled by

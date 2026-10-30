@@ -2,11 +2,14 @@
 // (PGlite / PG16) with Row Level Security ENFORCED and the request JWT claims
 // that Supabase's PostgREST sets for a browser session.
 //
-// The policies and the helper function below are copied from supabase-schema.sql
-// (church.my_tenant_id at :843, the FOR ALL policy at :391, the SELECT policy at
-// :1005, the service_role policy at :398) and the drift guards at the bottom fail
-// if the shipped schema ever stops containing them — so this file cannot quietly
-// describe a database that no longer exists.
+// This file reproduces the LEGACY policy shape: the fixture builds the FOR ALL
+// policy that supabase-schema.sql shipped until migration 020, so the exploit lines
+// below keep printing OPEN as documentation of what was wrong. It is deliberately NOT
+// a test of the current schema — tests/sql/rls_church_row_guard.test.mjs applies the
+// real hardened schema plus migrations 019 and 020 and asserts every one of these
+// vectors is refused. The drift guards at the bottom pin both halves: they fail if
+// the shipped schema ever grows the FOR ALL policy back, and they fail if the
+// hardening is removed from either file.
 //
 // Nothing here is a mock of Postgres authorisation: the same `UPDATE` statement is
 // what PostgREST issues for
@@ -292,15 +295,32 @@ check(
   anonProbe.ok ? `anon read ${anonProbe.rows[0]?.n} rows` : anonProbe.error.split('\n')[0].slice(0, 80),
 );
 
-// ── 6. drift guards: this harness must describe the shipped schema ─────────
+// ── 6. drift guards: the shipped schema must NOT look like this fixture ─────
 check(
-  'the shipped schema still contains the FOR ALL policy this harness reproduces',
-  /CREATE POLICY "Admins can manage their associated church"\s*\n\s*ON church\.churches FOR ALL\s*\n\s*TO authenticated/.test(schema),
-  'if this fails, the policy was fixed — re-run the whole file to confirm the exploit is gone',
+  'the shipped schema no longer gives authenticated any write policy on church.churches',
+  !/ON church\.churches\s+FOR (ALL|UPDATE|INSERT|DELETE)\s+TO (authenticated|public)/i.test(schema)
+    && !/ON church\.churches FOR (ALL|UPDATE|INSERT|DELETE) TO (authenticated|public)/i.test(schema),
+  'the FOR ALL policy is the bug; if this fails, someone re-added it',
 );
 check(
-  'church.churches still has no UPDATE policy restricted to non-sensitive columns',
-  !/ON church\.churches FOR UPDATE[^;]*SET[^;]*/i.test(schema),
+  'the shipped schema keeps churches readable for their own members',
+  /ON church\.churches\s+FOR SELECT\s+TO authenticated/.test(schema),
+);
+check(
+  'the shipped schema installs the column guard function and trigger',
+  /CREATE OR REPLACE FUNCTION church\.guard_church_privileged_columns\(\)/.test(schema)
+    && /CREATE TRIGGER guard_church_privileged_columns\s+BEFORE UPDATE ON church\.churches/.test(schema),
+);
+check(
+  'the guard compares via jsonb so it cannot break on a database missing 011 or 017',
+  (schema.match(/IF v_new \? v_column AND \(v_new -> v_column\) IS DISTINCT FROM \(v_old -> v_column\)/g) || []).length >= 1
+    && !/IF\s+NEW\.(activation_status|passkey_hash|is_active)\s+IS DISTINCT FROM/i.test(schema),
+  'a trigger naming an absent column fails every UPDATE at run time, not at CREATE time',
+);
+check(
+  'both hardening migrations are shipped',
+  readFileSync(new URL('../../migrations/019_activation_ledger_rls.sql', import.meta.url), 'utf8').includes('ENABLE ROW LEVEL SECURITY')
+    && readFileSync(new URL('../../migrations/020_close_church_row_writes.sql', import.meta.url), 'utf8').includes('guard_church_privileged_columns'),
 );
 
 const failures = results.filter((r) => !r.pass);
@@ -309,9 +329,10 @@ console.log(
     + ` · open findings reported: ${openFindings.length ? openFindings.join(', ') : 'none'}`,
 );
 console.log(
-  'Findings do not fail this file on purpose: a security fix must never cost more than\n'
-  + 'the bug. They are listed in SECURITY_REVIEW-2026-10-30.md, and this prints CLOSED as\n'
-  + 'soon as the policy that allows them is narrowed — see migrations/019 proposed there.',
+  'The OPEN lines above describe the LEGACY fixture this harness builds, not your\n'
+  + 'production database. They do not fail this file on purpose: a security fix must never\n'
+  + 'cost more than the bug. The closed state is asserted by\n'
+  + 'tests/sql/rls_church_row_guard.test.mjs, which runs migrations/019 and 020 for real.',
 );
 if (failures.length) {
   console.error(`UNEXPECTED — a control that must hold has broken: ${failures.map((f) => f.name).join('; ')}`);

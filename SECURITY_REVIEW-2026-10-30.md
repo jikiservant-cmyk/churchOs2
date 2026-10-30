@@ -30,6 +30,28 @@ requires a schema redesign. Do them before onboarding congregations that pay.
 
 ---
 
+## Fix status (same day, this branch)
+
+Every finding below is implemented. The two database findings ship as
+`migrations/019_activation_ledger_rls.sql` (safe to run at any time) and
+`migrations/020_close_church_row_writes.sql` (**run only after this code is
+deployed** — the ordering is the finding, not a footnote). `tests/sql/rls_church_row_guard.test.mjs`
+applies both files to a real PostgreSQL and asserts the attacks are refused and that
+the service role keeps every write the app needs.
+
+| Finding | State | Where |
+| --- | --- | --- |
+| P0-1 tenant can write its own billing/passkey columns | **Closed** — `FOR ALL` replaced by SELECT-only, plus a BEFORE UPDATE column guard that holds even if a wide policy returns | `supabase-schema.sql`, `migrations/020` |
+| P0-2 `createAdminClient()` was not the service role | **Fixed** — sessionless service-role client, loud-once fallback when the key is absent | `lib/supabase/service-client.ts`, `lib/supabase/server.ts` |
+| P1-3 ledger has no security posture | **Closed** — RLS + service-role policy + guaranteed grants; refuses to finish if the app would lose access | `migrations/019` |
+| P1-4 private HTML cached by the service worker | **Fixed** — default-deny allowlist, cache version bumped so the polluted cache is deleted | `public/sw.js` |
+| P1-5 `SameSite=None` with no `frame-ancestors` | **Fixed** — production-only `frame-ancestors` with an `EMBED_HOSTS` allowlist; cookies left alone so live embeds keep working | `lib/security/frame-ancestors.ts`, `next.config.ts` |
+| P2-7 webhook signs with the API key | **Reported, not refused** — see the note under P2-7 for why a hard failure was the worse option | `app/api/najiki/webhook/route.ts` |
+| P2-8 tenant can delete its own SMS audit trail | **Closed** — `church.sms_logs` narrowed to SELECT for tenants | `migrations/020` |
+| P2-6 `my_tenant_id()` nondeterminism | **Retracted** — see the correction under that heading | — |
+
+---
+
 ## P0-1 · The activation gate is a column any tenant member can write
 
 `supabase-schema.sql:391`
@@ -165,7 +187,18 @@ follow:
   `Content-Security-Policy: frame-ancestors 'self' <the exact embedder hosts>`, or
   switch to `sameSite: 'lax'` if nothing actually embeds the app.
 
-## P2-6 · `church.my_tenant_id()` is nondeterministic and role-blind
+## P2-6 · ~~`church.my_tenant_id()` is nondeterministic and role-blind~~ — RETRACTED
+
+**Correction, same day.** This finding is not reachable and no fix was made for it.
+`public.admin_profiles.id` is the table's PRIMARY KEY (supabase-schema.sql), so a user
+has exactly one profile row and an unordered `LIMIT 1` over `WHERE id = auth.uid()`
+cannot resolve two tenants. The only live risk in that area was P0-1's `FOR ALL`, which
+is closed. The rest of this section is kept as written, because the reasoning that
+produced it — "an unordered `LIMIT 1` on a set the author assumed was one row" is worth
+checking, and in this schema `admin_profiles` is exactly such a table — and because a
+review that silently deletes its own mistakes is not a review.
+
+*Originally written as:*
 
 ```sql
 SELECT tenant_id::uuid FROM public.admin_profiles WHERE id = auth.uid() LIMIT 1
@@ -225,85 +258,68 @@ each screen uses once P0-2 is fixed.
 
 ---
 
-## Fix in this order (skipping step 1 is how the tightening breaks production)
+## What shipped, and the order to run it in
 
-1. **Make the admin client actually be the service role.** Build it with
-   `createClient` from `@supabase/supabase-js` (or `createServerClient` with
-   `global.headers.Authorization = 'Bearer ' + SERVICE_KEY` and **no** cookie storage),
-   and assert it in a test that the bearer used for an admin read is the service key.
-   Nothing else can move safely until this is true.
-2. **Confirm every legit write to `church.churches` is server-side.** Known writers:
-   `updateChurchPasskey` (pastor-only, role-checked), `updateChurchMeetingDays`
-   (`assertChurchAdminAuth` → pastor), provisioning + `ensureChurchUsherPasskey`, the
-   008 settlement RPC. Anything in the browser that PATCHes `churches` is a feature
-   that must move to an action first, or it breaks in step 3.
-3. **Replace the policy** — `SELECT` for tenancy, and an explicit
-   `FOR UPDATE … (pastor role) WITH CHECK (only benign columns)`. Draft, to ship as
-   `migrations/019_tighten_church_row_rls.sql`, for review rather than blind apply:
+The order is the substance of this section. The policy tightening in P0-1 and the
+client fix in P0-2 are the same bug seen from two sides: the reason the `FOR ALL`
+policy was ever needed is that the application's own "admin" writes were running as
+`authenticated`. Reversing the two steps locks live churches out of saving their
+settings.
 
-   ```sql
-   DROP POLICY "Admins can manage their associated church" ON church.churches;
+**Code (deploy first).**
 
-   CREATE POLICY "Members can read their own church"
-     ON church.churches FOR SELECT TO authenticated
-     USING (id = church.my_tenant_id());
+* `lib/supabase/service-client.ts` — the privileged client: sessionless, `Authorization`
+  pinned to the service key, with pure helpers so the failure modes are testable.
+  `createServiceClient()` returns `null` rather than a lying client.
+* `lib/supabase/server.ts` — `createAdminClient()` uses it. If
+  `SUPABASE_SERVICE_ROLE_KEY` is absent it degrades to the caller's own RLS (the
+  historical behaviour, which keeps a misconfigured preview readable) and logs
+  `serviceClientFallbackNotice` once per process, naming SQLSTATE 42501 as the symptom
+  to expect. It does not throw: a hard failure there 500s every page that reads it,
+  which is a worse outage than the one being fixed.
+* `supabase-schema.sql` — the churches policy is now SELECT-only and the guard trigger
+  ships with it, so a new project is born with the closed shape.
+* `public/sw.js` — `isPublicPage()` is a default-deny allowlist; a private navigation is
+  never written to the shell cache *and* is deleted from it, and `VERSION` moved to `v3`
+  so a cache that already holds someone's roster is dropped on activate.
+* `lib/security/frame-ancestors.ts` + `next.config.ts` — `Content-Security-Policy:
+  frame-ancestors 'self' <app hosts> <EMBED_HOSTS>`, production only. A malformed entry
+  is dropped rather than passed through, because one invalid source invalidates the whole
+  header. `sameSite: 'none'` was deliberately left alone: it is what keeps a real
+  embedded workspace logged in, and with `frame-ancestors` in place it is no longer
+  unguarded.
+* `app/api/najiki/webhook/route.ts` — reports once per process when
+  `NAJIKI_WEBHOOK_SECRET` is unset, or identical to `NAJIKI_API_KEY`, or shorter than 32
+  characters. The fallback stays: deployments signing live callbacks with the API key
+  would stop activating churches, and a 500 on every callback is not a security win.
 
-   -- The columns the settings screen legitimately edits. activation_*, passkey*,
-   -- is_active and the identity columns are NOT in this list, so a policy-compliant
-   -- PATCH cannot reach them. WITH CHECK alone is not enough — pair it with the
-   -- guard trigger below so "I did not change it" cannot be bypassed by writing the
-   -- same value another way.
-   CREATE POLICY "Pastors can edit their church presentation"
-     ON church.churches FOR UPDATE TO authenticated
-     USING (id = church.my_tenant_id() AND church.is_church_admin())
-     WITH CHECK (id = church.my_tenant_id());
+**SQL (in this order, one paste each).**
 
-   CREATE OR REPLACE FUNCTION church.guard_church_privileged_columns()
-   RETURNS trigger AS $$
-   DECLARE v_role text;
-   BEGIN
-     -- No JWT means a trusted server/edge connection (or a human in the SQL editor).
-     v_role := coalesce(
-       nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'role',
-       'service_role');
-     IF v_role <> 'service_role' THEN
-       IF NEW.activation_status   IS DISTINCT FROM OLD.activation_status
-         OR NEW.activation_paid_at IS DISTINCT FROM OLD.activation_paid_at
-         OR NEW.passkey           IS DISTINCT FROM OLD.passkey
-         OR NEW.passkey_hash      IS DISTINCT FROM OLD.passkey_hash
-         OR NEW.passkey_version   IS DISTINCT FROM OLD.passkey_version
-         OR NEW.is_active         IS DISTINCT FROM OLD.is_active THEN
-         RAISE EXCEPTION
-           'church.churches: billing and credential columns are written only by the application service role'
-           USING ERRCODE = '42501';
-       END IF;
-     END IF;
-     RETURN NEW;
-   END;
-   $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, church;
+1. **Phase A — `migrations/019_activation_ledger_rls.sql`.** Additive only: enables RLS
+   on `church.activation_payments`, installs the service-role policy, and guarantees the
+   service role's own grants before it does. Safe before or after the deploy. It refuses
+   to commit if the app would lose access to its own ledger.
+2. **Phase B — `migrations/020_close_church_row_writes.sql`.** Drops the `FOR ALL`
+   policy, installs the SELECT-only one and the column guard, narrows `sms_logs`, then
+   verifies its own work and aborts if the hardening did not land. Both the policy
+   deletion and the trigger install use `IF EXISTS` / `OR REPLACE`, so re-running it is
+   a no-op.
+3. Verify on a live church (the probes at the end of this file are the read-only half of
+   this): a `PATCH /rest/v1/churches` from a signed-in member console must go from `204,
+   1 row` to refused; then rotate a passkey and save meeting days, which are the
+   service-role paths — if *those* fail, the deployed code is not this code.
 
-   DROP TRIGGER IF EXISTS guard_church_privileged_columns ON church.churches;
-   CREATE TRIGGER guard_church_privileged_columns
-     BEFORE UPDATE ON church.churches
-     FOR EACH ROW EXECUTE FUNCTION church.guard_church_privileged_columns();
-   ```
+**Deliberately not done.**
 
-   (`church.is_church_admin()` does not exist yet — it is the same shape as
-   `my_tenant_id()`: `SECURITY DEFINER`, pinned `search_path`, returns the caller's
-   role. Add it in the same migration or drop it from the policy and rely on the
-   application's own role check plus the trigger.)
-4. **Give the ledger a declared posture.** `migrations/020_activation_ledger_rls.sql`:
-   `ENABLE ROW LEVEL SECURITY`, `FOR ALL TO service_role USING (true)` and **no**
-   authenticated policy — reads for the pastor's own billing history go through an RPC
-   that binds `tenant_id = church.my_tenant_id()`. Also fold `GRANT`/`REVOKE` in, since
-   privileges are a separate gate (that distinction is what produced two past
-   incidents in this repo).
-5. **Then consider deriving the gate** from `exists (select 1 from
-   church.activation_payments where church_id = … and status = 'paid')` instead of a
-   stored column. At that point the bypass stops being a column and becomes a row that
-   only a signed provider settlement can create.
-6. Small, independent, ship any time: SW cache scoping + clear-on-logout (P1-4),
-   `frame-ancestors` (P1-5), `my_tenant_id()` determinism (P2-6).
+* No policy was narrowed anywhere the app has a legitimate `authenticated` writer:
+  `members`, `new_converts`, `visitors`, `events`, `attendance_flags`, `sms_queue` keep
+  their write policies. The audit that produced this list is what makes step 2 safe, and
+  it should be re-run before any further tightening.
+* `my_tenant_id()` was not changed (P2-6 retracted above).
+* The gate is still read from `churches.activation_status`. Deriving it from the ledger is
+  the right end state — it makes the display and the money record the same fact — but it
+  is a behaviour change on a paid path and belongs after 019 and 020 have settled, not in
+  the same window as them.
 
 ## Run these against the live project (read-only)
 
