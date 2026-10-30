@@ -1,8 +1,86 @@
 export const CHURCH_ADMIN_ROLES = ['pastor', 'admin'] as const;
 export type ChurchAdminRole = (typeof CHURCH_ADMIN_ROLES)[number];
 
+/** Roles allowed to spend a church's SMS wallet. Saccos shares the table and
+ *  uses `member`, so the tenant check (not the role) is what bounds it. */
+export const SMS_BROADCAST_ROLES = ['pastor', 'admin', 'staff', 'member'] as const;
+
 export function hasAllowedRole(role: unknown, allowedRoles: readonly string[]): boolean {
   return typeof role === 'string' && allowedRoles.includes(role);
+}
+
+export type ChurchAccessInput = {
+  /** Whether the service-role client is real, or a placeholder that cannot query. */
+  serviceRoleConfigured: boolean;
+  /** The `admin_profiles` row for the caller, if one was returned. */
+  profile: { tenant_id?: string | null; role?: string | null } | null;
+  /** The lookup itself errored (network, permissions, schema drift). */
+  profileLookupFailed: boolean;
+  /** Tenant the caller is acting on; compared against the profile's tenant. */
+  expectedTenantId?: string | null;
+  allowedRoles?: readonly string[];
+};
+
+export type ChurchAccessOutcome =
+  /** Verified: correct tenant, allowed role. */
+  | { kind: 'granted' }
+  /** Cannot verify anything — configuration gap, never an authorization verdict. */
+  | { kind: 'unconfigured'; status: 503; error: string }
+  /** Verified attempt failed on the database side — retryable, not a denial. */
+  | { kind: 'lookup-failed'; status: 503; error: string }
+  /** Verified denial. `reason` is for logs, never returned to the client. */
+  | { kind: 'denied'; status: 403; error: string; reason: 'no-profile' | 'tenant-mismatch' | 'role' };
+
+/**
+ * Classify a service-role admin-profile check into a decision the client can act on.
+ *
+ * Exists because collapsing "the query never ran" and "you are not allowed" into one
+ * 403 turns a missing environment variable into a message that tells the pastor their
+ * own account is not a pastor — which is false, unreproducible in the dashboard, and
+ * sends everyone hunting through role tables. Fail-closed is preserved: only `granted`
+ * authorises.
+ */
+export function resolveChurchAdminAccess(input: ChurchAccessInput): ChurchAccessOutcome {
+  if (!input.serviceRoleConfigured) {
+    return {
+      kind: 'unconfigured',
+      status: 503,
+      error: 'Access verification is unavailable on this deployment: SUPABASE_SERVICE_ROLE_KEY is not set. Add it in the host’s environment variables and redeploy.',
+    };
+  }
+  if (input.profileLookupFailed) {
+    return {
+      kind: 'lookup-failed',
+      status: 503,
+      error: 'Access verification is temporarily unavailable. Please retry — if it persists, check that public.admin_profiles is readable and its columns match the app.',
+    };
+  }
+  if (!input.profile) {
+    return {
+      kind: 'denied',
+      status: 403,
+      error: 'Access denied: this account has no admin profile for that church workspace.',
+      reason: 'no-profile',
+    };
+  }
+  if (input.expectedTenantId && input.profile.tenant_id !== input.expectedTenantId) {
+    return {
+      kind: 'denied',
+      status: 403,
+      error: 'Access denied: your account is linked to a different church workspace.',
+      reason: 'tenant-mismatch',
+    };
+  }
+  const allowedRoles = input.allowedRoles ?? CHURCH_ADMIN_ROLES;
+  if (!hasAllowedRole(input.profile.role, allowedRoles)) {
+    return {
+      kind: 'denied',
+      status: 403,
+      error: `Access denied: requires one of ${allowedRoles.join(', ')}.`,
+      reason: 'role',
+    };
+  }
+  return { kind: 'granted' };
 }
 
 /** Exact origin comparison for cookie-authenticated browser mutations. */

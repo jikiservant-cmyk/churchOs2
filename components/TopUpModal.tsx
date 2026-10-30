@@ -72,13 +72,29 @@ export default function TopUpModal({ churchId, isOpen, onClose }: TopUpModalProp
   useEffect(() => {
     if (pollState !== 'polling' || !reference) return;
 
+    // A 503 from the status endpoint means the server could not verify access or
+    // read the wallet at all — a configuration fault, not a slow webhook. Repeating
+    // it quietly while the modal says "Waiting for PIN approval" is how a healthy
+    // payment looks like a stuck one.
+    let verificationErrors = 0;
+
     const checkWallet = async () => {
       attemptRef.current += 1;
       try {
         const params = new URLSearchParams({ church_id: churchId, reference });
         if (najikiReference) params.set('najikiReference', najikiReference);
         const res = await fetch(`/api/church/wallet/status?${params.toString()}`, { cache: 'no-store' });
-        if (!res.ok) return;
+        if (!res.ok) {
+          if (res.status === 503 && ++verificationErrors === 2) {
+            const detail = await res.json().catch(() => ({} as Record<string, unknown>));
+            if (typeof detail?.error === 'string') setPendingConfirmationMessage(detail.error);
+          }
+          return;
+        }
+        if (verificationErrors > 0) {
+          verificationErrors = 0;
+          setPendingConfirmationMessage(null);
+        }
         const data = await res.json();
         const tx = data.transaction;
         if (!tx) return;

@@ -6,13 +6,13 @@
  */
 
 import { after, NextResponse } from 'next/server';
-import { createClient as createServerClient, createAdminClient } from '@/lib/supabase/server';
+import { createClient as createServerClient, createAdminClient, isServiceRoleConfigured } from '@/lib/supabase/server';
 import { enqueueBroadcast } from '@/lib/queue-actions';
 import { dispatchSmsQueueItems } from '@/lib/sms-dispatch';
 import { normalizeUgPhone } from '@/lib/utils';
 import { readBoundedJson } from '@/lib/http/read-json';
 import { checkRateLimit } from '@/lib/security/rate-limit';
-import { isSameOriginRequestForHeaders } from '@/lib/auth-security';
+import { isSameOriginRequestForHeaders, resolveChurchAdminAccess, SMS_BROADCAST_ROLES } from '@/lib/auth-security';
 import { isSmsWithinSegmentLimit, smsSegmentCount } from '@/supabase/functions/_shared/sms-length';
 
 const MAX_REQUEST_BYTES = 64 * 1024;
@@ -56,20 +56,39 @@ export async function POST(req: Request) {
     // ── Multi-tenancy & Role guard (MT-04) ──────────────────────────────────
     // Use admin client to bypass stale JWT / RLS — still verify caller is the authed user
     // and tenant matches (service-role never trusts client). Allow Saccos 'member' when tenant matches.
+    // Only the columns the guard reads are selected: an unused column in the list
+    // turns schema drift on that column into an access-denied page.
+    // `id` is the primary key of admin_profiles, so at most one row can exist;
+    // the tenant is compared below rather than in the WHERE clause so that a
+    // cross-tenant attempt is reported as a denial instead of "profile missing".
+    const serviceRoleConfigured = isServiceRoleConfigured();
     const adminSupabaseForAuth = await createAdminClient();
-    const { data: adminProfile } = await adminSupabaseForAuth
-      .from('admin_profiles')
-      .select('tenant_id, role, app_type')
-      .eq('id', user.id)
-      .eq('tenant_id', churchId)
-      .maybeSingle();
+    const { data: adminProfile, error: profileError } = serviceRoleConfigured
+      ? await adminSupabaseForAuth
+          .from('admin_profiles')
+          .select('tenant_id, role')
+          .eq('id', user.id)
+          .maybeSingle()
+      : { data: null, error: null };
 
-    const allowedRoles = ['pastor', 'admin', 'staff', 'member'] as const;
-    if (!adminProfile || !allowedRoles.includes(adminProfile.role as any)) {
-      return NextResponse.json(
-        { error: 'Access denied: only pastors or administrators can enqueue broadcasts.' },
-        { status: 403 },
-      );
+    const access = resolveChurchAdminAccess({
+      serviceRoleConfigured,
+      profile: adminProfile ?? null,
+      profileLookupFailed: Boolean(profileError),
+      expectedTenantId: churchId as string,
+      allowedRoles: SMS_BROADCAST_ROLES,
+    });
+
+    if (access.kind !== 'granted') {
+      if (profileError) {
+        console.error('[Enqueue] admin_profiles lookup failed:', profileError.code ?? '', profileError.message);
+      }
+      if (access.kind === 'denied') {
+        console.warn(`[Enqueue] access denied (${access.reason}) user=${user.id} church=${churchId}`);
+      } else {
+        console.error(`[Enqueue] access verification unavailable user=${user.id} serviceRoleConfigured=${serviceRoleConfigured}`);
+      }
+      return NextResponse.json({ error: access.error }, { status: access.status });
     }
 
     // Rate-limit by both account and tenant using shared storage in production.

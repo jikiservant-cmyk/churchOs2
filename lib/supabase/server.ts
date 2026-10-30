@@ -65,3 +65,14 @@ export async function createAdminClient() {
     }
   );
 }
+
+/**
+ * True when `createAdminClient()` returns a client that can actually reach the
+ * project. Without this the dummy client above makes every service-role read
+ * come back as "no rows", which callers historically render as a `0` balance or
+ * as an access denial — a silent lie about the real failure. Guard the
+ * fail-closed paths with it so the distinction survives to the log and the UI.
+ */
+export function isServiceRoleConfigured(): boolean {
+  return Boolean(process.env.NEXT_PUBLIC_SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY);
+}

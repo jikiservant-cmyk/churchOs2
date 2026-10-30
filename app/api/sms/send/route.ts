@@ -1,10 +1,10 @@
 import { NextResponse } from 'next/server';
-import { createClient as createSupabaseServerClient, createAdminClient } from '@/lib/supabase/server';
+import { createClient as createSupabaseServerClient, createAdminClient, isServiceRoleConfigured } from '@/lib/supabase/server';
 import { normalizeUgPhone } from '@/lib/utils';
 import { sendSingleSMS } from '@/lib/sms-actions';
 import { readBoundedJson } from '@/lib/http/read-json';
 import { checkRateLimit } from '@/lib/security/rate-limit';
-import { isSameOriginRequestForHeaders } from '@/lib/auth-security';
+import { isSameOriginRequestForHeaders, resolveChurchAdminAccess, SMS_BROADCAST_ROLES } from '@/lib/auth-security';
 import { isSmsWithinSegmentLimit } from '@/supabase/functions/_shared/sms-length';
 
 const MAX_REQUEST_BYTES = 16 * 1024;
@@ -48,16 +48,31 @@ export async function POST(req: Request) {
     // RLS policy on admin_profiles resolves the caller's tenant from the same
     // table, so a stale JWT silently returns no row. The caller's identity and
     // tenant are still verified here before any privileged read.
+    const serviceRoleConfigured = isServiceRoleConfigured();
     const adminSupabaseForAuth = await createAdminClient();
-    const { data: adminProfile } = await adminSupabaseForAuth
-      .from('admin_profiles')
-      .select('tenant_id, role')
-      .eq('id', user.id)
-      .eq('tenant_id', churchId)
-      .maybeSingle();
-    const allowedRoles = ['pastor', 'admin', 'staff', 'member'] as const;
-    if (!adminProfile || !allowedRoles.includes(adminProfile.role as any)) {
-      return NextResponse.json({ error: 'Access denied: a pastor or administrator for this church is required.' }, { status: 403 });
+    const { data: adminProfile, error: profileError } = serviceRoleConfigured
+      ? await adminSupabaseForAuth
+          .from('admin_profiles')
+          .select('tenant_id, role')
+          .eq('id', user.id)
+          .maybeSingle()
+      : { data: null, error: null };
+
+    const access = resolveChurchAdminAccess({
+      serviceRoleConfigured,
+      profile: adminProfile ?? null,
+      profileLookupFailed: Boolean(profileError),
+      expectedTenantId: churchId,
+      allowedRoles: SMS_BROADCAST_ROLES,
+    });
+    if (access.kind !== 'granted') {
+      if (profileError) {
+        console.error('[SMS Send] admin_profiles lookup failed:', profileError.code ?? '', profileError.message);
+      }
+      if (access.kind === 'denied') {
+        console.warn(`[SMS Send] access denied (${access.reason}) user=${user.id} church=${churchId}`);
+      }
+      return NextResponse.json({ error: access.error }, { status: access.status });
     }
 
     const accountLimit = await checkRateLimit({ namespace: 'sms-single-account', subject: user.id, limit: 30, windowSeconds: 10 * 60 });
