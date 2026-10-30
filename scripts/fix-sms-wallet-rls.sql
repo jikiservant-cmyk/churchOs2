@@ -5,6 +5,9 @@
 -- Paste this whole file into the Supabase SQL editor and run it once. It is
 -- idempotent: running it twice is harmless and reports the same result.
 --
+-- To SEE the damage before fixing it, run PART 3 by itself first — it is entirely
+-- read-only. Then run the whole file, and run PART 3 again to compare.
+--
 -- It is the verbatim concatenation of the two committed migrations, in order,
 -- followed by read-only verification queries so you can SEE the state:
 --
@@ -425,8 +428,8 @@ group by c.oid, c.relname, n.nspname, c.relrowsecurity
 order by c.oid::regclass::text;
 
 -- 3.3 The verdict, in one row. EXPECT: everything_ok = t.
--- If needs_attention lists table names, part 2 did not reach them (usually the
--- schema/church objects live under a different name in that project).
+-- silent_empty_tables lists any table that is RLS-on but policy-less, i.e. still
+-- reading as permanently empty; it must come back as an empty string.
 with checked as (
   select c.oid::regclass::text as table_name, c.relrowsecurity as rls_on,
          count(pol.polname) as policies
