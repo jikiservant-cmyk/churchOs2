@@ -430,6 +430,27 @@ BEGIN
   END IF;
 END $$;
 
+-- Same guard for the columns that only ever existed in the CREATE TABLE above:
+-- `CREATE TABLE IF NOT EXISTS` is a no-op on a pre-existing table, so a database
+-- older than those columns never receives them, and every read that projects them
+-- fails with 42703 — which callers used to report as a 0 balance / an access
+-- denial. Idempotent; `app_type` keeps a default so a populated table accepts it.
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='wallets' AND column_name='sms_rate') THEN
+    ALTER TABLE public.wallets ADD COLUMN sms_rate int NOT NULL DEFAULT 70;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='wallets' AND column_name='app_type') THEN
+    ALTER TABLE public.wallets ADD COLUMN app_type text NOT NULL DEFAULT 'church';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='wallets' AND column_name='last_updated') THEN
+    ALTER TABLE public.wallets ADD COLUMN last_updated timestamptz DEFAULT now();
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='admin_profiles' AND column_name='app_type') THEN
+    ALTER TABLE public.admin_profiles ADD COLUMN app_type text DEFAULT 'church';
+  END IF;
+END $$;
+
 -- Trigger: Auto-initialize wallet for new tenants
 CREATE OR REPLACE FUNCTION public.initialize_tenant_wallet()
 RETURNS TRIGGER AS $$
