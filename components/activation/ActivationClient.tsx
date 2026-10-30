@@ -3,6 +3,12 @@
 import { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import {
+  activationPromptDeadlineAt,
+  describeActivationPromptCountdown,
+  describeActivationPromptWindow,
+  type PromptCountdown,
+} from '@/lib/activation-prompt-window';
+import {
   X,
   Users,
   CalendarDays,
@@ -36,6 +42,16 @@ interface ActivationClientProps {
   standardFeeUgx?: number;
   /** True while a deployment is charging a non-standard (test) fee. */
   isTestPricing?: boolean;
+  /**
+   * How long the handset prompt is presented as still live, in milliseconds.
+   * Resolved on the server from ACTIVATION_PROMPT_WINDOW_MS — the same reason the
+   * fee is a prop: a client bundle cannot read a non-`NEXT_PUBLIC_` variable, and
+   * a second hardcoded copy is how a screen ends up promising something the
+   * configuration no longer says.
+   */
+  promptWindowMs: number;
+  /** The window as a sentence ("5 minutes"), so the copy cannot drift. */
+  promptWindowLabel: string;
 }
 
 const PLAN_NAME = 'Lifetime Setup';
@@ -75,7 +91,9 @@ export default function ActivationClient({
   userEmail,
   activationFeeUgx,
   standardFeeUgx,
-  isTestPricing = false
+  isTestPricing = false,
+  promptWindowMs,
+  promptWindowLabel,
 }: ActivationClientProps) {
   const router = useRouter();
   const [selected] = useState<'standard'>('standard');
@@ -90,6 +108,36 @@ export default function ActivationClient({
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isSuccess, setIsSuccess] = useState(false);
   const [isCheckingStatus, setIsCheckingStatus] = useState(false);
+
+  // The moment the announced window closes, or null while no prompt is out. It
+  // drives only what the pastor reads: the countdown, then the honest "no
+  // confirmation yet" panel with a retry. It does not stop the poll, does not
+  // cancel anything, and does not touch the ledger — a prompt approved after the
+  // window still activates the church, because money that arrived is money that
+  // counted. Cleared whenever the wait ends for any reason.
+  const [promptDeadlineAt, setPromptDeadlineAt] = useState<number | null>(null);
+  const [promptCountdown, setPromptCountdown] = useState<PromptCountdown | null>(null);
+
+  // The clock ticks in an effect, not in render: a component must stay pure, and
+  // a Date.now() read during render is exactly the kind of value that changes
+  // between the server pass and the client pass. So the countdown is state, and
+  // this effect is the only thing that reads the time.
+  useEffect(() => {
+    if (promptDeadlineAt === null) {
+      setPromptCountdown(null);
+      return;
+    }
+    const tick = () => setPromptCountdown(describeActivationPromptCountdown(Date.now(), promptDeadlineAt));
+    tick();
+    const ticker = setInterval(tick, 1000);
+    return () => clearInterval(ticker);
+  }, [promptDeadlineAt]);
+
+  // The label travels with the number for the same reason the fee does: the server
+  // resolves both from one value, and this derives the sentence from the number if
+  // a caller ever forgets to pass it. Either way the screen cannot promise a window
+  // that is not the one being enforced.
+  const windowLabel = promptWindowLabel || describeActivationPromptWindow(promptWindowMs);
 
   const pollIntervalRef = useRef<NodeJS.Timeout | null>(null);
   // One price everywhere on this screen, and it is the price the server charges.
@@ -111,6 +159,7 @@ export default function ActivationClient({
           const data = await res.json();
           if (data.isActive || data.activationStatus === 'active') {
             setIsPolling(false);
+            setPromptDeadlineAt(null);
             setIsSuccess(true);
             if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
             setTimeout(() => {
@@ -122,6 +171,7 @@ export default function ActivationClient({
             ['failed', 'cancelled'].includes(String(data.latestPayment.status).toLowerCase())
           ) {
             setIsPolling(false);
+            setPromptDeadlineAt(null);
             setInitiationAmbiguous(false);
             setErrorMessage('The payment was not completed. No activation was recorded; you may start a new payment.');
             if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
@@ -138,8 +188,10 @@ export default function ActivationClient({
     };
   }, [isPolling, churchSlug, churchId, merchantRef, router]);
 
-  const handleStartPayment = async (e: React.FormEvent) => {
-    e.preventDefault();
+  // Sends the prompt. The form's submit handler and the "send it again" button in
+  // the expired state both call this, so there is one path to the start endpoint
+  // and no second copy of its error handling.
+  const startPrompt = async () => {
     setErrorMessage(null);
     setIsLoading(true);
 
@@ -177,11 +229,17 @@ export default function ActivationClient({
       setInitiationAmbiguous(data.status === 'pending_confirmation');
       setInstructions(data.instructions || 'Please enter your Mobile Money PIN on your handset to approve the transaction.');
       setIsPolling(true);
+      setPromptDeadlineAt(activationPromptDeadlineAt(Date.now(), promptWindowMs));
     } catch (err: any) {
       setErrorMessage(err.message || 'Network connection failed. Please try again.');
     } finally {
       setIsLoading(false);
     }
+  };
+
+  const handleStartPayment = (e: React.FormEvent) => {
+    e.preventDefault();
+    void startPrompt();
   };
 
   // Check existing payment status
@@ -485,6 +543,59 @@ export default function ActivationClient({
                   <Loader2 size={14} className="animate-spin text-[#191919]" />
                   <span>{initiationAmbiguous ? 'Waiting for provider confirmation; please do not submit another payment.' : 'Waiting for PIN confirmation...'}</span>
                 </div>
+
+                {promptCountdown !== null && (
+                  promptCountdown.expired ? (
+                    <div className="text-left space-y-3 pt-1">
+                      <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl text-xs text-amber-900 leading-relaxed">
+                        <span className="font-semibold">No confirmation after {windowLabel}.</span>{' '}
+                        Nothing has been charged and the church is not active yet. This page is still checking, so if
+                        you approve the prompt on your handset now, the workspace opens as soon as the network reports
+                        it &mdash; you do not have to pay twice.
+                      </div>
+                      <div className="flex flex-col sm:flex-row gap-2">
+                        {/* Offered only when we know the request never reached the
+                            network. When the outcome is ambiguous the request may
+                            already be live on the handset, and a second prompt
+                            would be a second charge — so there the only action is
+                            to look, not to send. */}
+                        {!initiationAmbiguous && (
+                          <button
+                            type="button"
+                            onClick={() => void startPrompt()}
+                            disabled={isLoading}
+                            className="flex-1 inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-[#191919] text-white text-sm font-semibold hover:bg-[#2a2a2a] transition-colors disabled:opacity-60"
+                          >
+                            <RefreshCw size={14} />
+                            {isLoading ? 'Sending...' : 'Send the prompt again'}
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={handleCheckStatus}
+                          disabled={isCheckingStatus}
+                          className="px-4 py-2.5 rounded-xl border border-[#e2e8f0] bg-white text-[#111827] text-sm font-semibold hover:bg-slate-50 transition-colors disabled:opacity-60"
+                        >
+                          {isCheckingStatus ? 'Checking...' : 'Check now'}
+                        </button>
+                      </div>
+                      {errorMessage && (
+                        <p className="p-3 bg-red-50 border border-red-100 text-red-600 rounded-xl text-xs leading-relaxed">
+                          {errorMessage}
+                        </p>
+                      )}
+                      <p className="text-[11px] text-[#788598] leading-relaxed">
+                        {initiationAmbiguous
+                          ? 'The request may already be live on your handset. Check there first: if you have entered your PIN, the workspace opens as soon as the network confirms it. Start a new payment only if no prompt ever appeared.'
+                          : 'The network allows three prompts an hour on one number and five on your account, so if the number was wrong, close this box and start again with the right one rather than sending twice.'}
+                      </p>
+                    </div>
+                  ) : (
+                    <p className="text-[11px] text-[#788598] font-mono" aria-live="polite">
+                      {promptCountdown.label} left to approve on {phoneNumber || 'your handset'}
+                    </p>
+                  )
+                )}
 
               </div>
             ) : (

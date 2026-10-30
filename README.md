@@ -69,6 +69,13 @@ from creating a church with no usher code. Existing blank rows are filled by
 already has a code, never bumps `passkey_version` (live usher sessions survive)
 and deliberately never prints the codes it writes.
 
+One file, if you would rather paste once: `scripts/apply-activation-and-passkey.sql`
+runs 017 + 018 + 012 in order and then prints its own verification. It embeds those
+files verbatim — `npm run test:sql` fails if the copy in the paste ever drifts from
+the file in `migrations/`, so edit the migration and re-generate, never hand-edit the
+paste. Read-only after the last write, so it doubles as a health check you can re-run
+while the app is live.
+
 Before 017, read the gate audit (it writes nothing) to see which congregations any
 later tightening would affect:
 
@@ -79,6 +86,14 @@ psql "$DATABASE_URL" -f scripts/activation-gate-audit.sql   # or paste it in the
 `activation_status` was read in four places and declared nowhere — `supabase-schema.sql`
 has no such column, so a church could be reported as paid because the value was
 missing. `lib/activation-gate.ts` is now the only place that answers the question.
+
+The activation screen also announces how long the wait is: it gives the pastor
+`ACTIVATION_PROMPT_WINDOW_MS` (5 minutes by default) to approve the prompt on the
+handset, then says so plainly and offers to send it again. That is a promise about
+the wait, not a switch on the money — the status poll keeps running, a payment that
+arrives late still activates the church, and while the first request is still
+ambiguous with the provider the retry button is not offered at all, because a second
+prompt then would be a second charge.
 
 **Before running 002:** Check no passkeys are already hashed:
 ```sql

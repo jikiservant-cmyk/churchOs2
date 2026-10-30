@@ -5,7 +5,13 @@ import ActivationClient from '@/components/activation/ActivationClient';
 import { describeAccessFailure, verifyChurchAdminAccess } from '@/lib/supabase/church-access';
 import { CHURCH_ADMIN_ROLES, hasAllowedRole } from '@/lib/auth-security';
 import { churchAdminPathFor, resolveActivationGate } from '@/lib/activation-gate';
-import { ACTIVATION_FEE_IS_TEST_PRICING, ACTIVATION_FEE_UGX, ACTIVATION_PRICE_UGX } from '@/lib/activation';
+import {
+  ACTIVATION_FEE_IS_TEST_PRICING,
+  ACTIVATION_FEE_UGX,
+  ACTIVATION_PRICE_UGX,
+  ACTIVATION_PROMPT_WINDOW_LABEL,
+  ACTIVATION_PROMPT_WINDOW_MS,
+} from '@/lib/activation';
 
 export const dynamic = 'force-dynamic';
 
@@ -174,6 +180,8 @@ export default async function ChurchActivationPage({
       activationFeeUgx={ACTIVATION_FEE_UGX}
       standardFeeUgx={ACTIVATION_PRICE_UGX}
       isTestPricing={ACTIVATION_FEE_IS_TEST_PRICING}
+      promptWindowMs={ACTIVATION_PROMPT_WINDOW_MS}
+      promptWindowLabel={ACTIVATION_PROMPT_WINDOW_LABEL}
     />
   );
 }

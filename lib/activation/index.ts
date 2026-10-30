@@ -3,6 +3,10 @@ import { randomUUID } from 'crypto';
 import { normalizeUgPhone } from '../utils.ts';
 import { createNajikiPayment, najikiApplicationCode, najikiPaymentTypeCode, NajikiApiError } from '../najiki/client.ts';
 import { ACTIVATION_STANDARD_FEE_UGX, resolveActivationFeeUgx } from '../activation-fee.ts';
+import {
+  describeActivationPromptWindow,
+  resolveActivationPromptWindowMs,
+} from '../activation-prompt-window.ts';
 import { resolveActivationGate } from '../activation-gate.ts';
 
 const resolvedActivationFee = resolveActivationFeeUgx(process.env.ACTIVATION_FEE_UGX);
@@ -26,6 +30,23 @@ export const ACTIVATION_FEE_UGX = resolvedActivationFee.amount;
 export const ACTIVATION_PRICE_UGX = ACTIVATION_STANDARD_FEE_UGX;
 /** True while a non-standard (test) fee is in effect. */
 export const ACTIVATION_FEE_IS_TEST_PRICING = resolvedActivationFee.override;
+// How long the activation screen tells a pastor they have to approve the prompt on
+// the handset. Resolved here, next to the fee, for the same reason: it is a Vercel
+// setting rather than a number baked into a client bundle, and it must not be read
+// from process.env inside the component.
+const resolvedPromptWindow = resolveActivationPromptWindowMs(process.env.ACTIVATION_PROMPT_WINDOW_MS);
+if (resolvedPromptWindow.rejected !== null) {
+  console.error(
+    `[Activation] ACTIVATION_PROMPT_WINDOW_MS="${process.env.ACTIVATION_PROMPT_WINDOW_MS}" is not usable `
+    + `(${resolvedPromptWindow.rejected}). The screen is announcing the default `
+    + `${describeActivationPromptWindow(resolvedPromptWindow.windowMs)} window instead.`,
+  );
+}
+/** Milliseconds the handset prompt is presented as still being live. */
+export const ACTIVATION_PROMPT_WINDOW_MS = resolvedPromptWindow.windowMs;
+/** The same number as a sentence ("5 minutes"), so no copy can drift from the setting. */
+export const ACTIVATION_PROMPT_WINDOW_LABEL = describeActivationPromptWindow(resolvedPromptWindow.windowMs);
+
 export const ACTIVATION_CURRENCY = 'UGX';
 export const ACTIVATION_PLAN_PRICES = {
   standard: ACTIVATION_FEE_UGX,
