@@ -386,19 +386,82 @@ USING (true);
 -- Churches Table RLS (church schema)
 ALTER TABLE church.churches ENABLE ROW LEVEL SECURITY;
 
+-- SECURITY (see SECURITY_REVIEW-2026-10-30.md, P0-1): this was
+--   CREATE POLICY "Admins can manage their associated church" ON church.churches
+--   FOR ALL TO authenticated USING (id = church.my_tenant_id()) WITH CHECK (...)
+-- `FOR ALL` means UPDATE and DELETE, and the predicate checks only *which* church —
+-- never the role, never the column. activation_status, activation_paid_at and
+-- passkey live on this row, so any signed-in account in a church (pastor, staff or
+-- member) could clear its own activation gate, or swap the usher portal code, with a
+-- single PATCH to /rest/v1/churches using the public anon key.
+--
+-- Reads stay, writes do not. Every legitimate write to this row runs server-side
+-- under the service role (lib/supabase/server.ts createAdminClient, the activation
+-- module's own client, and the two Edge functions), so narrowing this policy costs
+-- no feature — it removes a door the application never uses. The guard trigger below
+-- is the second lock: it holds even if a wide policy is ever re-created by hand.
 DROP POLICY IF EXISTS "Admins can view their associated church" ON church.churches;
 DROP POLICY IF EXISTS "Admins can manage their associated church" ON church.churches;
-CREATE POLICY "Admins can manage their associated church" 
-  ON church.churches FOR ALL 
-  TO authenticated 
-  USING (id = church.my_tenant_id())
-  WITH CHECK (id = church.my_tenant_id());
+CREATE POLICY "Churches are readable by their own members"
+  ON church.churches FOR SELECT
+  TO authenticated
+  USING (id = church.my_tenant_id());
 
 DROP POLICY IF EXISTS "Service role full access on churches" ON church.churches;
 CREATE POLICY "Service role full access on churches" 
 ON church.churches FOR ALL 
 TO service_role 
 USING (true);
+
+-- Billing and credential columns: writable only by the application's service-role
+-- connection, whatever any policy says. current_setting('request.jwt.claims') is
+-- set by PostgREST from the verified JWT, so a client cannot forge the role; an
+-- absent claim string means a trusted server connection (service role, an Edge
+-- function, or a human in the SQL editor), which is allowed.
+CREATE OR REPLACE FUNCTION church.guard_church_privileged_columns()
+RETURNS TRIGGER AS $$
+DECLARE
+  v_claims jsonb := nullif(current_setting('request.jwt.claims', true), '')::jsonb;
+  v_role text := coalesce(v_claims ->> 'role', 'service_role');
+  v_new jsonb;
+  v_old jsonb;
+  v_column text;
+  v_protected text[] := ARRAY[
+    'activation_status', 'activation_paid_at',
+    'passkey', 'passkey_hash', 'passkey_version', 'passkey_updated_at',
+    'is_active'
+  ];
+BEGIN
+  -- An absent claim string means a trusted server connection (service role, an Edge
+  -- function, or a human in the SQL editor). Only a JWT-bearing, non-service role is
+  -- challenged. The claims GUC is written by PostgREST from the verified token, so a
+  -- client cannot set it.
+  IF v_role = 'service_role' THEN
+    RETURN NEW;
+  END IF;
+
+  -- Compared through jsonb rather than `NEW.col IS DISTINCT FROM OLD.col` on
+  -- purpose: activation_status arrives with 017 and the passkey columns with 011, and
+  -- a trigger body that names a column the database does not have does not fail to
+  -- install — it fails EVERY UPDATE to the table at run time. The ? test skips a
+  -- column that is not there yet instead of taking the workspace down with it.
+  v_new := to_jsonb(NEW);
+  v_old := to_jsonb(OLD);
+  FOREACH v_column IN ARRAY v_protected LOOP
+    IF v_new ? v_column AND (v_new -> v_column) IS DISTINCT FROM (v_old -> v_column) THEN
+      RAISE EXCEPTION
+        'church.churches: the billing and credential column % is written only by the application service role', v_column
+        USING ERRCODE = '42501';
+    END IF;
+  END LOOP;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, church;
+
+DROP TRIGGER IF EXISTS guard_church_privileged_columns ON church.churches;
+CREATE TRIGGER guard_church_privileged_columns
+  BEFORE UPDATE ON church.churches
+  FOR EACH ROW EXECUTE FUNCTION church.guard_church_privileged_columns();
 
 -- 5.1 Removed: Schools feature disabled to focus on churches
 

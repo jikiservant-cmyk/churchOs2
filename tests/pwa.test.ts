@@ -13,7 +13,7 @@
 // stale API JSON forever.
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import sharp from 'sharp';
@@ -167,8 +167,21 @@ describe('PWA icons', () => {
   });
 });
 
+// Evaluate the real matcher out of the shipped worker, rather than restating it:
+// a copy of the rules in a test file is how a security control ends up asserted
+// against a fiction. The block is self-contained apart from OFFLINE_URL.
+function loadPublicPageMatcher(): (request: { url: string }) => boolean {
+  const sw = read('public/sw.js');
+  const start = sw.indexOf('const PUBLIC_OFFLINE_PATHS');
+  const end = sw.indexOf('async function networkFirstNavigation');
+  assert.ok(start > 0 && end > start, 'sw.js no longer contains the public-path block');
+  const body = `const OFFLINE_URL = '/offline';\n${sw.slice(start, end)}\nreturn isPublicPage;`;
+  return new Function(body)() as (request: { url: string }) => boolean;
+}
+
 describe('service worker safety', () => {
   const sw = read('public/sw.js');
+  const isPublicPage = loadPublicPageMatcher();
 
   it('never caches or intercepts API traffic', () => {
     assert.match(sw, /function isApi/);
@@ -200,6 +213,66 @@ describe('service worker safety', () => {
   it('precaches an offline page it can fall back to', () => {
     assert.match(sw, /OFFLINE_URL = '\/offline'/);
     assert.ok(existsSync(join(ROOT, 'app/offline/page.tsx')), 'app/offline/page.tsx is missing');
+  });
+
+  describe('private pages are never written to the shell cache', () => {
+    // P1-4 in SECURITY_REVIEW-2026-10-30.md: a navigated page used to be cached
+    // unconditionally, so a member roster opened on a shared church tablet stayed
+    // readable from devtools — and stayed readable after sign-out, because logging
+    // out clears a cookie and not Cache Storage.
+    it('refuses every private top-level route in app/', () => {
+      const appDir = join(ROOT, 'app');
+      const routes = readdirSync(appDir, { withFileTypes: true })
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => entry.name);
+      // Anything that is not on the worker's public list must be refused, with no
+      // exception list in the test: that is what default-deny means.
+      const publicRoutes = new Set(['offline', 'login', 'signup', 'denominations', 'd']);
+      for (const route of routes) {
+        const isPublic = isPublicPage({ url: `https://app.example/${route}` });
+        if (publicRoutes.has(route)) {
+          assert.ok(isPublic, `/${route} is a public page and should stay cachable`);
+        } else {
+          assert.ok(!isPublic, `/${route} is not on the public allowlist and must not be cached`);
+        }
+      }
+      assert.ok(routes.includes('c'), 'fixture sanity: app/c must exist for this to mean anything');
+    });
+
+    it('refuses deep private paths and unknown routes', () => {
+      for (const path of [
+        '/c/ekero', '/c/ekero/admin/members', '/c/ekero/admin/settings',
+        '/admin/anything', '/api/sms/send', '/auth/callback', '/overseer/churches',
+        '/super-admin/tenants', '/messages/someone', '/applet/app/admin/dashboard',
+        '/some-brand-new-page', '/c',
+      ]) {
+        assert.ok(
+          !isPublicPage({ url: `https://app.example${path}` }),
+          `${path} must not be cached offline`,
+        );
+      }
+    });
+
+    it('still keeps the pages a first-time offline visitor should see', () => {
+      for (const path of ['/', '/offline', '/login', '/login/', '/signup']) {
+        assert.ok(isPublicPage({ url: `https://app.example${path}` }), `${path} should stay cachable`);
+      }
+    });
+
+    it('survives a garbage url instead of throwing inside the fetch handler', () => {
+      assert.equal(isPublicPage({ url: 'not a url' }), false);
+      assert.equal(isPublicPage({ url: '' }), false);
+    });
+
+    it('gates the cache.put on the matcher, and the cache version was bumped', () => {
+      // The version bump is what deletes the pre-fix cache — the one that may
+      // already contain a private page.
+      assert.match(sw, /if \(response\.ok && response\.type === 'basic' && isPublicPage\(request\)\)/);
+      assert.match(sw, /const VERSION = 'v3'/);
+      assert.match(sw, /cache\.delete\(request\)/);
+      // The old unconditional write, in either shape, must not come back.
+      assert.doesNotMatch(sw, /if \(response\.ok && response\.type === 'basic'\)\s*\{\s*cache\.put/);
+    });
   });
 });
 

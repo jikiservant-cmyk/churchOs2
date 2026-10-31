@@ -20,7 +20,9 @@
 // Declared policies being modelled (line numbers from supabase-schema.sql):
 //   public.tenants        383-367  SELECT for authenticated, FOR ALL for service_role
 //   public.admin_profiles 370-382  SELECT for authenticated, FOR ALL for service_role
-//   church.churches       383-395  FOR ALL for authenticated WITH CHECK (id = church.my_tenant_id())
+//   church.churches       383-395  SELECT for authenticated (was FOR ALL until migration 020);
+//                        this fixture still installs FOR ALL because it is testing search_path
+//                        resolution in SECURITY DEFINER bodies, not the tenant surface.
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { PGlite } from '@electric-sql/pglite';

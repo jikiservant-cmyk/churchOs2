@@ -18,6 +18,7 @@ export const metadata: Metadata = {
 };
 
 import { CreateEventForm } from '@/components/attendance/CreateEventForm';
+import { ensureChurchUsherPasskey } from '@/lib/usher-passkey';
 
 export default async function AttendancePage(props: {
   params: Promise<{ church_slug: string }>;
@@ -35,6 +36,24 @@ export default async function AttendancePage(props: {
     .select('passkey')
     .eq('id', church.id)
     .maybeSingle();
+
+  // A church whose row has no `passkey` is not a church with a blank code — it
+  // is a church whose ushers cannot check anyone in. The column is filled by a
+  // DEFAULT that only migration 014 installs and by a rotation that a new
+  // pastor has no reason to perform, so provisioning alone can leave it empty.
+  // Issue the code the first time the pastor comes looking for it, and show it.
+  let usherPasskey = (churchDetails?.passkey ?? '').trim();
+  if (!usherPasskey) {
+    const ensured = await ensureChurchUsherPasskey(supabase, church.id);
+    if (ensured.status === 'generated' || ensured.status === 'present') {
+      usherPasskey = ensured.passkey;
+    } else {
+      console.warn(
+        `[AttendancePage] could not issue an usher passkey for church=${church.id}: ${ensured.reason}. `
+        + 'The portal will report that no code is configured.',
+      );
+    }
+  }
 
   const { data: events } = await supabase
     .schema('church')
@@ -77,13 +96,13 @@ export default async function AttendancePage(props: {
       </div>
 
       <div className="flex items-center justify-end gap-3 pt-2">
-        <CopyPortalLink churchSlug={church_slug} passkey={churchDetails?.passkey || ''} />
+        <CopyPortalLink churchSlug={church_slug} passkey={usherPasskey} />
       </div>
 
-      <PasskeyManager 
-        churchId={church.id} 
-        initialPasskey={churchDetails?.passkey || ''} 
-        churchSlug={church_slug} 
+      <PasskeyManager
+        churchId={church.id}
+        initialPasskey={usherPasskey}
+        churchSlug={church_slug}
       />
 
       {/* Action Bar */}

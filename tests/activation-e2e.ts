@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import { createRequire } from 'node:module';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { buildNotificationHeaders } from './fixtures/najiki/notification-signature.ts';
+import { ACTIVATION_FEE_UGX } from '../lib/activation/index.ts';
 
 // Reuse Next's request stores so the real API handlers can be invoked directly
 // while Supabase and Na'jiki remain deterministic HTTP mocks.
@@ -122,7 +123,7 @@ test('activation start API → signed Na\'jiki webhook → status API', async ()
         id: paymentIntentId,
         reference: 'CHURCH-ACT-123',
         status: 'success',
-        amount: 17_000,
+        amount: ACTIVATION_FEE_UGX,
         currency: 'UGX',
         externalEntityId: churchId,
         providerPaymentId,
@@ -174,7 +175,7 @@ test('activation start API → signed Na\'jiki webhook → status API', async ()
     assert.ok(createdLedger, 'activation ledger row was inserted');
     assert.ok(sentProviderRequest, 'Na’jiki initiation request was sent');
     assert.equal(createdLedger.church_id, churchId);
-    assert.equal(createdLedger.amount, 17_000);
+    assert.equal(createdLedger.amount, ACTIVATION_FEE_UGX);
     assert.equal(createdLedger.currency, 'UGX');
     assert.equal(createdLedger.status, 'pending');
     assert.equal(createdLedger.provider_transaction_id, providerPaymentId);
@@ -182,7 +183,7 @@ test('activation start API → signed Na\'jiki webhook → status API', async ()
     assert.equal(sentProviderRequest.tenantCode, tenantCode);
     assert.equal(sentProviderRequest.paymentTypeCode, 'ACCOUNT_ACTIVATION');
     assert.equal(sentProviderRequest.externalEntityId, churchId);
-    assert.equal(sentProviderRequest.amount, 17_000);
+    assert.equal(sentProviderRequest.amount, ACTIVATION_FEE_UGX);
     assert.equal(sentProviderRequest.currency, 'UGX');
     assert.equal(sentProviderRequest.phoneNumber, '256772123456');
     assert.equal(sentProviderRequest.description, 'STANDARD plan activation for Grace Community Church');
@@ -195,7 +196,7 @@ test('activation start API → signed Na\'jiki webhook → status API', async ()
       paymentIntentId,
       reference: 'CHURCH-ACT-123',
       status: 'success',
-      amount: 17_000,
+      amount: ACTIVATION_FEE_UGX,
       currency: 'UGX',
       providerPaymentId,
       failureReason: null,
@@ -229,7 +230,7 @@ test('activation start API → signed Na\'jiki webhook → status API', async ()
       p_merchant_reference: merchantReference,
       p_provider: 'najiki',
       p_provider_transaction_id: providerPaymentId,
-      p_paid_amount: 17_000,
+      p_paid_amount: ACTIVATION_FEE_UGX,
       p_currency: 'UGX',
       p_provider_status: 'SUCCESS',
     });

@@ -48,6 +48,11 @@ Add the new variables from `.env.example` to your `.env.local`:
 - `SUPABASE_JWT_SECRET`   — from Supabase Dashboard → Settings → API
 - `DATABASE_URL`          — Transaction Pooler URL (port 6543) from Supabase Dashboard
 - `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN` — from upstash.com
+- `EMBED_HOSTS`           — optional, production only. Space- or comma-separated origins
+  allowed to embed churchOs in an iframe (e.g. `https://partner.example`). With it unset,
+  `Content-Security-Policy: frame-ancestors 'self'` plus the app's own hosts is sent, which
+  refuses every third-party frame. Set it *before* deploying if a partner embeds a
+  workspace, or their users will see a blank frame. `*` means "any site may embed us".
 
 ### 4 — Run SQL migrations (in order)
 Open Supabase Dashboard → SQL Editor and run each file in order:
@@ -57,7 +62,55 @@ Open Supabase Dashboard → SQL Editor and run each file in order:
 011_usher_passkey_columns.sql     ← Adds the usher passkey columns (additive)
 012_usher_passkey_backfill.sql    ← Issues a passkey where none exists
 014_passkey_not_null.sql          ← Enforces NOT NULL; refuses until the data is ready
+015_missing_schema_columns.sql    ← Adds the columns the app reads but no migration created
+016_rls_policy_repair.sql         ← Restores the RLS policies a re-run of the schema left behind
+017_activation_billing_columns.sql ← Declares the activation billing state + a default that gates new churches
+018_usher_passkey_default.sql       ← Gives churches.churches.passkey its DEFAULT (the usher portal needs a code)
+019_activation_ledger_rls.sql       ← Puts RLS on the activation payment ledger (additive; safe any time)
+020_close_church_row_writes.sql     ← Takes write access to church.churches away from tenant accounts
 ```
+
+**020 is not like the others: run it only after this code is deployed.** It removes the
+policy that the application itself was relying on for passkey rotation, settings saves
+and provisioning, because `createAdminClient()` used to send the caller's JWT instead of
+the service key. Deploy first, check the runtime logs do not contain
+`createAdminClient() is falling back`, then run 020, then verify: a `PATCH` to
+`/rest/v1/churches` from a signed-in church account must be refused, while rotating a
+passkey in Settings still works. Both files are idempotent and print their own
+verification; 020 aborts if the hardening did not land. `SECURITY_REVIEW-2026-10-30.md`
+has the findings this closes and the reasoning for the order.
+
+018 issues no credential of its own — it only stops an insert that omits `passkey`
+from creating a church with no usher code. Existing blank rows are filled by
+`012_usher_passkey_backfill.sql`, which is idempotent, never touches a row that
+already has a code, never bumps `passkey_version` (live usher sessions survive)
+and deliberately never prints the codes it writes.
+
+One file, if you would rather paste once: `scripts/apply-activation-and-passkey.sql`
+runs 017 + 018 + 012 in order and then prints its own verification. It embeds those
+files verbatim — `npm run test:sql` fails if the copy in the paste ever drifts from
+the file in `migrations/`, so edit the migration and re-generate, never hand-edit the
+paste. Read-only after the last write, so it doubles as a health check you can re-run
+while the app is live.
+
+Before 017, read the gate audit (it writes nothing) to see which congregations any
+later tightening would affect:
+
+```
+psql "$DATABASE_URL" -f scripts/activation-gate-audit.sql   # or paste it in the SQL editor
+```
+
+`activation_status` was read in four places and declared nowhere — `supabase-schema.sql`
+has no such column, so a church could be reported as paid because the value was
+missing. `lib/activation-gate.ts` is now the only place that answers the question.
+
+The activation screen also announces how long the wait is: it gives the pastor
+`ACTIVATION_PROMPT_WINDOW_MS` (5 minutes by default) to approve the prompt on the
+handset, then says so plainly and offers to send it again. That is a promise about
+the wait, not a switch on the money — the status poll keeps running, a payment that
+arrives late still activates the church, and while the first request is still
+ambiguous with the provider the retry button is not offered at all, because a second
+prompt then would be a second charge.
 
 **Before running 002:** Check no passkeys are already hashed:
 ```sql
