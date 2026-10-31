@@ -288,8 +288,14 @@ COMMIT;
 
 -- ---------------------------------------------------------------------------
 -- 5. After you run this, prove it on a live church (see the handover notes):
---    a) in a signed-in browser, one PATCH to /rest/v1/churches?id=eq.<uuid> with
---       {"activation_status":"active"} must now fail (it used to return 204);
+--    a) in a signed-in browser, one PATCH to /rest/v1/churches?id=eq.<uuid> with the
+--       headers apikey + Authorization: Bearer <that user's token> and
+--       Prefer: return=representation, body {"activation_status":"active"}.
+--       PASS looks like HTTP 204 with an empty body, or 200 with [] — zero rows
+--       changed, and a re-read still shows the old status. It is NOT a 403: with no
+--       UPDATE policy RLS filters the row away silently rather than raising, so
+--       "0 rows affected" is the success signal and a 204 alone tells you nothing.
+--       Before the fix this returned 204 with one row changed to active.
 --    b) rotating a passkey in Settings and saving meeting days must still work —
 --       those are the service-role paths, and if they fail, the code from this
 --       PR is not the version that is deployed;

@@ -362,11 +362,18 @@ from pg_class c join pg_namespace n on n.oid = c.relnamespace
 where n.nspname = 'church' and c.relname = 'activation_payments';
 -- 0 policies + relrowsecurity = false is the bad row.
 
--- 4. Does anyone have two tenants? ( P2-6 is live if this returns rows )
+-- 4. Sanity only, expected to return NOTHING by construction: admin_profiles.id is the
+-- PRIMARY KEY, which is why P2-6 was retracted. Rows here would mean the PK was dropped
+-- by hand at some point, and then the live schema has drifted from this repository.
 select id, count(*) as tenants, array_agg(tenant_id) from public.admin_profiles
 group by id having count(*) > 1;
 ```
 
 Then the definitive client-side test, from a **staff or member** account's browser
-console on staging: the `PATCH` in P0-1 should come back `204` with `0` rows changed
-after the fix, and `403`/`401` from the RLS layer rather than a silent success today.
+console: replay the `PATCH` in P0-1 with `Prefer: return=representation`. After 020 the
+correct outcome is **`204` with `[]`, i.e. zero rows changed, and the re-read still shows
+`pending_payment`** — not a 403. PostgREST does not raise when RLS filters every row out of
+an UPDATE; it reports success over an empty set. (A `400` carrying
+`billing and credential column … service role` is what the *trigger* returns, and it only
+appears on a path that still has a write policy — i.e. after a regression.) Judging this
+fix by "did it 403?" would have told you the opposite of the truth.
