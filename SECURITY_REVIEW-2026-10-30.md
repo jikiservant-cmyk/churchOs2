@@ -47,7 +47,7 @@ the service role keeps every write the app needs.
 | P1-4 private HTML cached by the service worker | **Fixed** — default-deny allowlist, cache version bumped so the polluted cache is deleted | `public/sw.js` |
 | P1-5 `SameSite=None` with no `frame-ancestors` | **Fixed** — production-only `frame-ancestors` with an `EMBED_HOSTS` allowlist; cookies left alone so live embeds keep working | `lib/security/frame-ancestors.ts`, `next.config.ts` |
 | P2-7 webhook signs with the API key | **Reported, not refused** — see the note under P2-7 for why a hard failure was the worse option | `app/api/najiki/webhook/route.ts` |
-| P2-8 tenant can delete its own SMS audit trail | **Closed** — `church.sms_logs` narrowed to SELECT for tenants | `migrations/020` |
+| P2-8 tenant can delete its own SMS audit trail | **Closed for `sms_logs`** — every tenant write policy dropped by shape, tenant SELECT guaranteed; `members`/`new_converts`/`sms_queue` left as-is on purpose | `migrations/020` |
 | P2-6 `my_tenant_id()` nondeterminism | **Retracted** — see the correction under that heading | — |
 
 ---
@@ -230,6 +230,27 @@ RPC which requires `p_paid_amount` to equal the ledger row.
 them would re-break broadcasts — but `FOR ALL` also means a church user can delete the
 SMS audit trail (`sms_logs`) and rewrite queue history. Narrow to the verbs + columns
 each screen uses once P0-2 is fixed.
+
+**What was actually done, and the two mistakes made on the way.** `migrations/020` now
+drops every tenant-capable write policy on `church.sms_logs` by *shape* (cmd + roles,
+never touching one that also names `service_role`), then guarantees a tenant SELECT
+policy remains, resolving the tenancy column from `information_schema`. The first draft
+instead dropped a policy named `sms_logs_churchos_service_write` — **a name invented here,
+not one that exists** (the live names are 016's `churchos_tenant_write` and the schema's
+`sms_logs_insert` / `sms_logs_rw_update` / `sms_logs_delete`) — and rebuilt the read
+policy on `church_id`, a column this table does not have: `church.sms_logs` keys tenancy
+on `tenant_id`. That would have aborted Phase B at step 3. It passed CI at first because
+the harness had no `sms_logs` table, so the step took its own "does not exist, skipping"
+branch: **a test that skips a code path is how a broken migration looks green.** The
+fixture now carries both naming shapes and asserts delete/insert are refused, reads
+still work, and the dispatcher can still log.
+
+`members`, `new_converts` and `sms_queue` keep their `FOR ALL` policies on purpose: they
+are what the roster screens and the broadcast queue write through, and each is scoped by
+`USING`/`WITH CHECK` to the caller's own tenant (verified policy-by-policy, 37 write
+policies checked for a tenant or owner predicate — all 37 are scoped). Narrowing them to
+per-verb, per-column policies is a real improvement and a real chance of breaking a
+screen; it is deliberately not part of this change.
 
 ---
 

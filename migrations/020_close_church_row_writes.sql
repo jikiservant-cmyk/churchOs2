@@ -31,9 +31,10 @@
 --      (service role, Edge function, SQL editor), and current_setting() here
 --      cannot be set by a client — PostgREST writes it from the verified token.
 --
---   3. Narrows church.sms_logs to read-only for tenants, so a church cannot
---      delete its own delivery evidence after a failed blast. Its writers are the
---      webhook and the dispatch Edge function, both service-role.
+--   3. Drops every tenant write policy on church.sms_logs so a church cannot delete
+--      its own delivery evidence after a failed blast, keeping the SELECT its admin
+--      screen needs. Its writers are the webhook and the dispatch Edge function, both
+--      service-role, so nothing in the application loses a write.
 --
 -- Safe to run twice: everything is IF EXISTS / OR REPLACE / DROP-then-CREATE.
 --
@@ -154,41 +155,71 @@ CREATE TRIGGER guard_church_privileged_columns
   FOR EACH ROW EXECUTE FUNCTION church.guard_church_privileged_columns();
 
 -- ---------------------------------------------------------------------------
--- 3. sms_logs: tenants read, the service role writes. Rebuilt from 016's shape
---    with FOR ALL -> SELECT for authenticated; the USING expression is unchanged,
---    so a church still sees exactly its own logs and nothing else.
+-- 3. sms_logs: tenants read, the service role writes, so a church cannot delete
+--    its own delivery evidence after a failed blast (P2-8).
+--
+--    Dropped by shape for the same reason as step 1: the live databases carry this
+--    privilege under different names depending on which repair they ran — 016 created
+--    "churchos_tenant_write" (FOR ALL, tenant_id scoped) while supabase-schema.sql
+--    ships sms_logs_insert / sms_logs_rw_update / sms_logs_delete. The first draft of
+--    this file dropped a single hard-coded name and, worse, rebuilt the replacement
+--    policy on a `church_id` column: church.sms_logs has `tenant_id` (its FK to
+--    churches), so that CREATE POLICY would have aborted Phase B outright. Column
+--    names are therefore resolved from the catalog, never assumed.
 -- ---------------------------------------------------------------------------
 DO $$
+DECLARE
+  r record;
+  v_dropped integer := 0;
+  v_reads integer;
+  v_column text;
 BEGIN
   IF to_regclass('church.sms_logs') IS NULL THEN
     RAISE NOTICE 'church.sms_logs does not exist here - skipping the audit-trail step.';
     RETURN;
   END IF;
-  IF NOT EXISTS (
-    SELECT 1 FROM pg_policies
+
+  FOR r IN
+    SELECT policyname
+      FROM pg_policies
      WHERE schemaname = 'church' AND tablename = 'sms_logs'
-       AND policyname = 'sms_logs_churchos_service_write'
-  ) THEN
-    RAISE NOTICE 'sms_logs_churchos_service_write not installed here (016 never ran) - skipping.';
-    RETURN;
+       AND cmd IN ('ALL', 'INSERT', 'UPDATE', 'DELETE')
+       AND (roles::text LIKE '%authenticated%' OR roles::text = '{public}')
+       AND roles::text NOT LIKE '%service_role%'
+     ORDER BY policyname
+  LOOP
+    EXECUTE format('DROP POLICY %I ON church.sms_logs', r.policyname);
+    RAISE NOTICE 'PHASE B · dropped tenant write policy % on church.sms_logs', r.policyname;
+    v_dropped := v_dropped + 1;
+  END LOOP;
+
+  IF v_dropped = 0 THEN
+    RAISE NOTICE 'PHASE B · no tenant-only write policy on church.sms_logs was present.';
   END IF;
 
-  DROP POLICY IF EXISTS "sms_logs_churchos_service_write" ON church.sms_logs;
-  CREATE POLICY "sms_logs_churchos_service_write"
-    ON church.sms_logs FOR SELECT TO authenticated
-    USING (church_id = church.my_tenant_id());
+  -- Reads must survive: the admin messages screen reads its own send history as the
+  -- signed-in caller (app/c/[church_slug]/admin/(authenticated)/messages/page.tsx),
+  -- so removing the write policies cannot be allowed to blank that page.
+  SELECT count(*) INTO v_reads
+    FROM pg_policies
+   WHERE schemaname = 'church' AND tablename = 'sms_logs'
+     AND cmd IN ('SELECT', 'ALL')
+     AND (roles::text LIKE '%authenticated%' OR roles::text = '{public}');
 
-  -- Anything else that still lets this role group write to the audit trail is reported,
-  -- not deleted: unlike church.churches, an SMS write path the operator relies on and
-  -- this file cannot see is a plausible thing to find here, and a delivery log that
-  -- stops writing is a worse outcome than a delete that is still possible.
-  IF EXISTS (
-    SELECT 1 FROM pg_policies
-     WHERE schemaname = 'church' AND tablename = 'sms_logs'
-       AND cmd IN ('ALL', 'UPDATE', 'DELETE')
-       AND roles::text LIKE '%authenticated%'
-  ) THEN
-    RAISE NOTICE 'PHASE B · church.sms_logs still has a tenant ALL/UPDATE/DELETE policy; review it by hand (P2-8).';
+  IF v_reads = 0 THEN
+    SELECT c.column_name INTO v_column
+      FROM information_schema.columns c
+     WHERE c.table_schema = 'church' AND c.table_name = 'sms_logs'
+       AND c.column_name IN ('tenant_id', 'church_id')
+     ORDER BY CASE c.column_name WHEN 'tenant_id' THEN 1 ELSE 2 END
+     LIMIT 1;
+    IF v_column IS NULL THEN
+      RAISE EXCEPTION 'PHASE B FAILED: church.sms_logs has neither tenant_id nor church_id - refusing to guess a tenancy predicate';
+    END IF;
+    EXECUTE format(
+      'CREATE POLICY "churchos_tenant_select" ON church.sms_logs FOR SELECT TO authenticated USING (%I = church.my_tenant_id())',
+      v_column);
+    RAISE NOTICE 'PHASE B · no tenant SELECT policy remained on church.sms_logs, created one on %.', v_column;
   END IF;
 END
 $$;

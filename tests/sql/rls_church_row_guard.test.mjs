@@ -31,7 +31,7 @@ const MEMBER_EKERO = 'cccccccc-cccc-cccc-cccc-cccccccccccc';
  * it, the tenancy helper, and a churches table whose column set can be narrowed by
  * the caller to model a database where 011/017 have not been applied yet.
  */
-async function buildLegacyDb({ columns = 'full' } = {}) {
+async function buildLegacyDb({ columns = 'full', smsLogsShape = 'schema' } = {}) {
   const db = new PGlite();
   const churchColumns = columns === 'partial'
     // A live project mid-provisioning: passkey exists (011) but is_active and
@@ -46,6 +46,25 @@ async function buildLegacyDb({ columns = 'full' } = {}) {
        passkey text, passkey_hash text, passkey_version integer NOT NULL DEFAULT 1,
        passkey_updated_at timestamptz, activation_status text,
        activation_paid_at timestamptz, created_at timestamptz DEFAULT now()`;
+
+  // Two shapes for the same privilege, because the live projects carry different
+  // ones: the granular set supabase-schema.sql ships, and the single FOR ALL policy
+  // migrations/016_rls_policy_repair.sql creates as churchos_tenant_write. The
+  // column is tenant_id, not church_id — 020 must handle either name and neither
+  // assumption, or the admin send-history screen is what breaks.
+  const smsLogsPolicySql = smsLogsShape === '016'
+    ? `CREATE POLICY "churchos_tenant_select" ON church.sms_logs FOR SELECT TO authenticated
+         USING (tenant_id = church.my_tenant_id());
+       CREATE POLICY "churchos_tenant_write" ON church.sms_logs FOR ALL TO authenticated
+         USING (tenant_id = church.my_tenant_id()) WITH CHECK (tenant_id = church.my_tenant_id());`
+    : `CREATE POLICY "sms_logs_rw_select" ON church.sms_logs FOR SELECT TO authenticated
+         USING (tenant_id = church.my_tenant_id());
+       CREATE POLICY "sms_logs_insert" ON church.sms_logs FOR INSERT TO authenticated
+         WITH CHECK (tenant_id = church.my_tenant_id());
+       CREATE POLICY "sms_logs_rw_update" ON church.sms_logs FOR UPDATE TO authenticated
+         USING (tenant_id = church.my_tenant_id()) WITH CHECK (tenant_id = church.my_tenant_id());
+       CREATE POLICY "sms_logs_delete" ON church.sms_logs FOR DELETE TO authenticated
+         USING (tenant_id = church.my_tenant_id());`;
 
   await db.exec(`
     CREATE SCHEMA IF NOT EXISTS church;
@@ -103,6 +122,24 @@ async function buildLegacyDb({ columns = 'full' } = {}) {
     CREATE POLICY "members_rw_select" ON church.members FOR SELECT TO authenticated
       USING (church_id = church.my_tenant_id());
 
+    -- church.sms_logs, both shapes that exist in the wild: the granular set that
+    -- supabase-schema.sql ships, and the single FOR ALL policy that
+    -- migrations/016_rls_policy_repair.sql creates under the name
+    -- churchos_tenant_write. 020 has to close either without blanking the admin
+    -- screen that reads its own send history — the column is tenant_id, not
+    -- church_id, which is the mistake this fixture exists to catch.
+    CREATE TABLE church.sms_logs (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id uuid NOT NULL REFERENCES church.churches(id),
+      to_phone text,
+      status text
+    );
+    ALTER TABLE church.sms_logs ENABLE ROW LEVEL SECURITY;
+    CREATE POLICY "Service role full access on sms_logs"
+      ON church.sms_logs FOR ALL TO service_role USING (true);
+
+    ${smsLogsPolicySql}
+
     GRANT USAGE ON SCHEMA public, church TO anon, authenticated, service_role;
     GRANT SELECT ON public.admin_profiles TO authenticated;
     -- Supabase grants the table-wide shape below by default in the public schema; a
@@ -112,6 +149,10 @@ async function buildLegacyDb({ columns = 'full' } = {}) {
     -- cover it.
     GRANT SELECT, UPDATE, DELETE ON church.churches TO authenticated;
     GRANT SELECT, INSERT, UPDATE, DELETE ON church.members TO authenticated;
+    -- Supabase's default privileges put these on every table in an exposed schema,
+    -- which is what makes P2-8 reachable at all: policy AND grant both have to allow
+    -- it. Without this line the fixture would "fix" the hole by accident.
+    GRANT SELECT, INSERT, UPDATE, DELETE ON church.sms_logs TO authenticated;
     GRANT ALL ON ALL TABLES IN SCHEMA public, church TO service_role;
 
     INSERT INTO public.tenants (id, name) VALUES ('${EKERO}', 'Ekero Family Chapel'), ('${BUKOTO}', 'Bukoto Grace Assembly');
@@ -124,6 +165,10 @@ async function buildLegacyDb({ columns = 'full' } = {}) {
       ('${PASTOR_EKERO}', 'pastor@ekero.example', 'pastor', '${EKERO}'),
       ('${STAFF_EKERO}', 'staff@ekero.example', 'staff', '${EKERO}'),
       ('${MEMBER_EKERO}', 'member@ekero.example', 'member', '${EKERO}');
+    -- after the churches rows, because tenant_id is a real FK
+    INSERT INTO church.sms_logs (tenant_id, to_phone, status) VALUES
+      ('${EKERO}', '+2567001112223', 'sent'),
+      ('${EKERO}', '+2567005556667', 'failed');
   `);
   return db;
 }
@@ -409,6 +454,58 @@ test('019 is safe on a project without the ledger table', async () => {
   await db.exec(MIGRATION_019); // must notice and skip, not abort a deployment
   const churches = await asService(db, `SELECT count(*)::int AS n FROM church.churches`);
   assert.equal(churches.rows[0].n, 2, 'the rest of the database is untouched');
+  await db.close();
+});
+
+test('020 closes the audit-trail delete the shipped schema allows (P2-8)', async () => {
+  const db = await buildLegacyDb();
+  // One specific row, not the whole table: a baseline that deletes everything would
+  // leave the read assertions below proving nothing but their own destruction.
+  const before = await asUser(db, PASTOR_EKERO, `DELETE FROM church.sms_logs WHERE to_phone = '+2567001112223'`);
+  assert.equal(before.affected, 1, 'baseline: today a church can delete rows from its own delivery log');
+
+  await db.exec(MIGRATION_020);
+
+  const after = await asUser(db, PASTOR_EKERO, `DELETE FROM church.sms_logs WHERE tenant_id = '${EKERO}'`);
+  assert.notEqual(after.affected, 2, `the delete must be refused (affected ${after.affected})`);
+  const forge = await asUser(db, PASTOR_EKERO,
+    `UPDATE church.sms_logs SET status = 'sent' WHERE status = 'failed' AND tenant_id = '${EKERO}'`);
+  assert.notEqual(forge.affected, 1, 'and a failed send must not be rewritten into a delivered one');
+
+  const reads = await asUser(db, PASTOR_EKERO, `SELECT status FROM church.sms_logs ORDER BY status`);
+  assert.ok(reads.ok && reads.rows.length === 1,
+    `the admin send-history screen reads as the caller, so it must still see its rows: ${JSON.stringify(reads)}`);
+  const dispatcher = await asService(db,
+    `INSERT INTO church.sms_logs (tenant_id, to_phone, status) VALUES ('${EKERO}', '+2567009998887', 'queued')`);
+  assert.ok(dispatcher.ok && dispatcher.affected === 1, `the dispatcher must still be able to log: ${dispatcher.error ?? ''}`);
+  await db.close();
+});
+
+test('020 closes the same hole in the migrations/016 shape, which used a different policy name', async () => {
+  const db = await buildLegacyDb({ smsLogsShape: '016' });
+  const before = await asUser(db, PASTOR_EKERO, `DELETE FROM church.sms_logs WHERE to_phone = '+2567001112223'`);
+  assert.equal(before.affected, 1, 'baseline: churchos_tenant_write FOR ALL permits it');
+  await db.exec(MIGRATION_020);
+  const after = await asUser(db, PASTOR_EKERO, `DELETE FROM church.sms_logs WHERE tenant_id = '${EKERO}'`);
+  assert.notEqual(after.affected, 1, 'the paste must find the privilege by shape, not by the name in this repository');
+  const insert = await asUser(db, PASTOR_EKERO,
+    `INSERT INTO church.sms_logs (tenant_id, to_phone, status) VALUES ('${EKERO}', '+2567004445556', 'sent')`);
+  assert.notEqual(insert.affected, 1, 'and a fabricated delivery record must be refused the same way');
+  const reads = await asUser(db, PASTOR_EKERO, `SELECT count(*)::int AS n FROM church.sms_logs`);
+  assert.equal(reads.rows[0]?.n, 1, 'the SELECT that 016 installed stays');
+  await db.close();
+});
+
+test('020 rebuilds the tenant read when dropping the write would have blinded the screen', async () => {
+  // The bug this exists to keep out: the first draft recreated the read policy on a
+  // `church_id` column that church.sms_logs does not have, which aborts the whole
+  // migration. So the column is resolved from the catalog, and this proves it.
+  const db = await buildLegacyDb({ smsLogsShape: '016' });
+  await db.exec('DROP POLICY "churchos_tenant_select" ON church.sms_logs');
+  await db.exec(MIGRATION_020);
+  const reads = await asUser(db, PASTOR_EKERO, `SELECT count(*)::int AS n FROM church.sms_logs`);
+  assert.ok(reads.ok, `020 must have created a working read policy: ${reads.error ?? ''}`);
+  assert.equal(reads.rows[0]?.n, 2, 'scoped to this tenant only');
   await db.close();
 });
 
