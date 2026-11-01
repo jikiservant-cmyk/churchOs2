@@ -253,12 +253,20 @@ COMMIT;
 -- this read-only; it is how the next candidate gets chosen, and it is deliberately
 -- not acted on by this file:
 --   SELECT g.table_schema, g.table_name, g.grantee, g.privilege_type,
---          (SELECT count(*) FROM pg_policy p
---             JOIN pg_class c ON c.oid = p.polrelid
---            WHERE c.relname = g.table_name AND p.polcmd IN ('a','w','d','*')) AS write_policies
+--          COALESCE(q.write_policies, 0) AS tenant_write_policies
 --     FROM information_schema.role_table_grants g
+--     LEFT JOIN (
+--            SELECT schemaname, tablename, count(*)::int AS write_policies
+--              FROM pg_policies
+--             WHERE cmd IN ('ALL','UPDATE','INSERT','DELETE')
+--               AND (roles::text LIKE '%authenticated%' OR roles::text LIKE '%anon%'
+--                    OR roles::text LIKE '%public%')
+--             GROUP BY 1, 2) q
+--            ON q.schemaname = g.table_schema AND q.tablename = g.table_name
 --    WHERE g.grantee IN ('anon','authenticated')
 --      AND g.privilege_type IN ('INSERT','UPDATE','DELETE')
 --      AND g.table_schema IN ('church','public')
---    ORDER BY write_policies, g.table_name;
+--    ORDER BY tenant_write_policies, g.table_name;
+--   (0 write policies + a live grant = a privilege nothing hands out: the next revoke.
+--    A big number = the grant is load-bearing until the policies are narrowed first.)
 -- ---------------------------------------------------------------------------
