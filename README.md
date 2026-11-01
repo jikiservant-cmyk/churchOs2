@@ -68,6 +68,7 @@ Open Supabase Dashboard → SQL Editor and run each file in order:
 018_usher_passkey_default.sql       ← Gives churches.churches.passkey its DEFAULT (the usher portal needs a code)
 019_activation_ledger_rls.sql       ← Puts RLS on the activation payment ledger (additive; safe any time)
 020_close_church_row_writes.sql     ← Takes write access to church.churches away from tenant accounts
+021_close_excess_grants.sql         ← Revokes the table privileges RLS cannot constrain (TRUNCATE especially); run AFTER 020
 ```
 
 **020 is not like the others: run it only after this code is deployed.** It removes the

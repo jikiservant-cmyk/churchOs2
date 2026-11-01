@@ -395,6 +395,34 @@ test('020 refuses to commit rather than narrowing a policy that also names servi
   await db.close();
 });
 
+test('020 never widens a stricter SELECT policy that is already live', async () => {
+  // Found by reading the live project: its churches SELECT policy also filters on
+  // app_type, a predicate this repository does not contain. Because policies are
+  // PERMISSIVE and OR together, 020 adding its own looser SELECT policy next to that
+  // one would have opened cross-app-type reads that the live database does not have.
+  const db = await buildLegacyDb();
+  await db.exec(`
+    ALTER TABLE church.churches ADD COLUMN app_type text NOT NULL DEFAULT 'church';
+    -- The shape found live: one strict SELECT policy, and the FOR ALL write policy that
+    -- 020 is there to remove.
+    CREATE POLICY "churches_strict_select" ON church.churches
+      FOR SELECT TO authenticated
+      USING (id = church.my_tenant_id() AND app_type = 'church');
+  `);
+
+  await db.exec(MIGRATION_020);
+
+  const preds = await asService(db, `
+    SELECT polname, pg_get_expr(polqual, polrelid) AS pred
+      FROM pg_policy p JOIN pg_class c ON c.oid = p.polrelid
+     WHERE c.relname = 'churches' AND p.polcmd IN ('r','*')
+  `);
+  const tenantSelect = preds.rows.filter((r) => /app_type|my_tenant_id/.test(r.pred ?? ''));
+  assert.equal(tenantSelect.length, 1, `expected exactly the strict policy to remain, got ${JSON.stringify(preds.rows)}`);
+  assert.match(tenantSelect[0].pred, /app_type/, 'the stricter predicate must be the one still in force');
+  await db.close();
+});
+
 test('020 is idempotent and self-verifying', async () => {
   const db = await buildLegacyDb();
   await db.exec(MIGRATION_020);

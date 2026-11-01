@@ -28,6 +28,22 @@ claims PostgREST sets for a browser session**. That harness is now in the repo:
 Ready to hold church data: **not yet.** Both P0s are ~a day of work and neither
 requires a schema redesign. Do them before onboarding congregations that pay.
 
+> **2026-11-01 — the live database corrected this section.** The two bullets above were
+> derived from `supabase-schema.sql`, and for a database built from that file they are
+> true. A read-only audit of the production project's catalog (`pg_policy`,
+> `information_schema.role_table_grants`) found something narrower: `church.churches`
+> there carries **one** policy — `SELECT` for `authenticated`, scoped to the tenant *and*
+> to `app_type` — and **no tenant write policy at all**. So the `PATCH` in bullet one is
+> **not reachable on that database today**: RLS filters it to zero rows changed. The claim
+> that it was live-exploitable is withdrawn; what is actually live is bullet three's
+> counterpart, a privilege rather than a policy — `anon` and `authenticated` both hold
+> `UPDATE`, `DELETE` and **`TRUNCATE`** on `church.churches`, and RLS does not apply to
+> `TRUNCATE`. That is `migrations/021_close_excess_grants.sql`.
+>
+> The lesson recorded here rather than buried: **a repository proves what a fresh install
+> does, not what a running project holds.** Every statement in this document about the
+> production database is now labelled with which of the two it came from.
+
 ---
 
 ## Fix status (same day, this branch)
@@ -41,7 +57,8 @@ the service role keeps every write the app needs.
 
 | Finding | State | Where |
 | --- | --- | --- |
-| P0-1 tenant can write its own billing/passkey columns | **Closed** — `FOR ALL` replaced by SELECT-only, plus a BEFORE UPDATE column guard that holds even if a wide policy returns | `supabase-schema.sql`, `migrations/020` |
+| P0-1 tenant can write its own billing/passkey columns | **Closed for a database built from this repository**; on the audited production database there was no tenant write policy to drop — plus a BEFORE UPDATE column guard that holds even if a wide policy returns | `FOR ALL` replaced by SELECT-only, plus a BEFORE UPDATE column guard that holds even if a wide policy returns | `supabase-schema.sql`, `migrations/020` |
+| P1-6 browser roles hold privileges RLS cannot reach (`TRUNCATE` on `church.churches`) | **Found live, closed by revoke** — TRUNCATE/REFERENCES/TRIGGER swept off every table in `church`/`public`/`business`, churches DML revoked behind a guard that refuses if a tenant write policy is still live, `SELECT` deliberately kept | `migrations/021` |
 | P0-2 `createAdminClient()` was not the service role | **Fixed** — sessionless service-role client, loud-once fallback when the key is absent | `lib/supabase/service-client.ts`, `lib/supabase/server.ts` |
 | P1-3 ledger has no security posture | **Closed** — RLS + service-role policy + guaranteed grants; refuses to finish if the app would lose access | `migrations/019` |
 | P1-4 private HTML cached by the service worker | **Fixed** — default-deny allowlist, cache version bumped so the polluted cache is deleted | `public/sw.js` |
@@ -326,9 +343,22 @@ settings.
    deletion and the trigger install use `IF EXISTS` / `OR REPLACE`, so re-running it is
    a no-op.
 3. Verify on a live church (the probes at the end of this file are the read-only half of
-   this): a `PATCH /rest/v1/churches` from a signed-in member console must go from `204,
-   1 row` to refused; then rotate a passkey and save meeting days, which are the
-   service-role paths — if *those* fail, the deployed code is not this code.
+   this). The expected PASS is **`HTTP 204` with `[]` / zero rows changed** and a re-read
+   showing the old status — *not* a 403. With no UPDATE policy, PostgREST filters the row
+   away silently, so "0 rows" is the success signal and a 204 on its own proves nothing;
+   the `42501` text from the column guard only appears once a write policy exists again,
+   i.e. as a regression alarm. On the audited production database this probe already
+   returned 0 rows before Phase B — which is how the discrepancy in the Verdict box was
+   found. Then rotate a passkey and save meeting days, which are the service-role paths —
+   if *those* fail, the deployed code is not this code. (And on a database that has no
+   tenant write policy at all, those service-role writes are the ones that were silently
+   doing nothing, so 020 plus this PR's client fix is what makes them work again.)
+4. **Phase C — `migrations/021_close_excess_grants.sql`.** Privileges, not policies: the
+   `TRUNCATE`/`REFERENCES`/`TRIGGER` sweep, the churches DML revoke, and the ledger's write
+   grants. Run it **after** 020 on any database where tenant write policies exist — its
+   step 3 counts them and aborts rather than pulling a grant out from under a live policy,
+   so on such a database it refuses; on the audited production database it changes
+   behaviour in exactly one place, and it is a privilege no code path holds.
 
 **Deliberately not done.**
 
@@ -377,3 +407,52 @@ an UPDATE; it reports success over an empty set. (A `400` carrying
 `billing and credential column … service role` is what the *trigger* returns, and it only
 appears on a path that still has a write policy — i.e. after a regression.) Judging this
 fix by "did it 403?" would have told you the opposite of the truth.
+
+---
+
+## 2026-11-01 · reconciliation with the live catalog
+
+Read-only queries run against production, and what they changed in this repository.
+
+| Claim in this document | Production catalog said | What was done |
+| --- | --- | --- |
+| P0-1: a tenant `PATCH` marks the church paid today | No tenant write policy on `church.churches`, so zero rows change | Verdict annotated above; the finding stands for any DB built from `supabase-schema.sql`, which is what 020 and the schema edit fix |
+| P1-3: the ledger has no posture in the repo (RLS off, no policies) | RLS **enabled**, one policy present, `authenticated` holds SELECT only | 019 stays — it is what a fresh DB needs, and it is idempotent — but its `RAISE` on "RLS off" would not fire here, and the deferred revoke at 019:128 became 021's step 4 |
+| (nothing in this document) | `anon` + `authenticated` hold UPDATE/DELETE/**TRUNCATE** on `church.churches` | New finding **P1-6** and `migrations/021_close_excess_grants.sql` |
+| (nothing in this document) | the churches read policy also filters on `app_type` | **No `app_type`-scoped churches policy exists anywhere in this repository** — 020 as first written would have *added* a looser SELECT policy beside it. Permissive policies OR together, so that would have widened read access on a database that is currently stricter. 020 now counts existing tenant SELECT policies and skips-and-reports instead of adding |
+
+Two defects in my own hardening scripts, both found by taking the live evidence
+seriously rather than re-reading the repo:
+
+1. **020 widened reads.** Step 1b created its SELECT policy unconditionally. Fixed:
+   `migrations/020_close_church_row_writes.sql` step 1b now runs the `CREATE POLICY`
+   only when no `authenticated` select-capable policy exists, and reports the skip.
+   `tests/sql/rls_church_row_guard.test.mjs` · *"020 never widens a stricter SELECT
+   policy that is already live"* builds the app_type-scoped shape and asserts the strict
+   predicate is the one still in force.
+2. **021's guard was blind to `FOR ALL`.** It looked for write policies with
+   `polcmd IN ('w','i','d','a')`. `pg_policy.polcmd` is a single character and `FOR ALL`
+   is stored as `*`; there is no `'i'` (INSERT is `'a'`). So on a database whose tenant
+   policy is `FOR ALL` — every database this repository ships — the preflight counted
+   zero and the revoke would have gone ahead, which is precisely the behaviour change
+   the guard exists to prevent. Fixed to `('a','w','d','*')`, with the legend written into
+   the file, and `tests/sql/grants_hardening.test.mjs` · *"021 refuses to revoke DML while
+   a tenant write policy is still live"* fails if the set is wrong again. `migrations/016`
+   and `scripts/fix-sms-wallet-rls.sql` already used the correct `('r','*')`.
+
+`tests/sql/grants_hardening.test.mjs` is also the first test in this repository that
+proves the grant/policy distinction directly: as `authenticated`, an `UPDATE` on another
+church's row is filtered to **0 rows** by RLS, while `TRUNCATE church.churches CASCADE`
+on the same table by the same role **succeeds and empties it** — every church, plus the
+member rows that hang off it. After 021 the first still returns 0 rows (nothing about
+policies changed) and the second is `permission denied for table churches`, while
+`service_role` keeps every write the application makes and `anon` keeps the SELECT that
+`public.churches_public` — declared `WITH (security_invoker = true)`, so it reads the base
+table as the visitor — needs in order to stay executable at all.
+
+**Still open after all of this**, unchanged and stated plainly: intra-tenant
+authorization — 0 of 79 policies are role-aware and there is no `is_church_admin()` SQL
+helper, so any signed-in member can still write the tenant-scoped tables that carry
+`authenticated` write policies (members, new converts, sms_queue, attendance flags).
+That is a design decision recorded in `lib/auth-security.ts`, not an oversight, and no
+migration in this branch changes it.

@@ -99,11 +99,42 @@ END
 $$;
 
 -- 1b. Read stays: every church page renders the name, slug, theme and activation state.
+--
+--     But only if there is no tenant SELECT policy already. Policies are PERMISSIVE, so
+--     two of them OR together: adding the predicate below next to an existing, stricter
+--     one (a live project was found with `id = church.my_tenant_id() AND app_type =
+--     'church'`) would not tighten anything — it would WIDEN what every member can read,
+--     because a row satisfying either policy passes. A hardening script must never be
+--     able to do that, so this step checks first and defers to what is already there.
 DROP POLICY IF EXISTS "Churches are readable by their own members" ON church.churches;
 
-CREATE POLICY "Churches are readable by their own members"
-  ON church.churches FOR SELECT TO authenticated
-  USING (id = church.my_tenant_id());
+DO $$
+DECLARE
+  v_existing integer;
+BEGIN
+  SELECT count(*) INTO v_existing
+    FROM pg_policy p
+    JOIN pg_class c ON c.oid = p.polrelid
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+   WHERE n.nspname = 'church' AND c.relname = 'churches'
+     -- polcmd is a single char and FOR ALL is stored as '*', not 'a' ('a' is INSERT):
+     -- pg_policy('r') SELECT, 'a' INSERT, 'w' UPDATE, 'd' DELETE, '*' ALL. Getting this
+     -- set wrong makes the check blind to exactly the FOR ALL policies this file exists
+     -- to leave alone.
+     AND p.polcmd IN ('r', '*')                      -- select-capable, including FOR ALL
+     AND (p.polroles::regrole[]::text LIKE '%authenticated%' OR p.polroles = '{}');
+
+  IF v_existing > 0 THEN
+    RAISE NOTICE 'PHASE B · tenants already hold % SELECT policy/policies on church.churches - not adding another (permissive policies OR, so a second predicate could only widen read access).', v_existing;
+    RETURN;
+  END IF;
+
+  EXECUTE $pol$CREATE POLICY "Churches are readable by their own members"
+             ON church.churches FOR SELECT TO authenticated
+             USING (id = church.my_tenant_id())$pol$;
+  RAISE NOTICE 'PHASE B · created the tenant SELECT policy on church.churches';
+END
+$$;
 
 -- The service role needs no policy of its own (it bypasses RLS), and one is not
 -- added here on purpose: an explicit FOR ALL TO service_role policy already
@@ -299,5 +330,13 @@ COMMIT;
 --    b) rotating a passkey in Settings and saving meeting days must still work —
 --       those are the service-role paths, and if they fail, the code from this
 --       PR is not the version that is deployed;
---    c) a new church must still provision end to end.
+--    c) a new church must still provision end to end;
+--    d) read the notices. If step 1b printed "tenants already hold N SELECT
+--       policy/policies ... not adding another", that is the intended outcome on a
+--       database whose existing policy is stricter than the one here (permissive
+--       policies OR, so adding a second predicate could only widen read access). Do
+--       not "fix" it by creating the policy by hand without checking what it then sits
+--       next to.
+-- Phase C is migrations/021_close_excess_grants.sql, run after this file: it revokes the
+-- TRUNCATE/UPDATE/DELETE *grants*, which no policy can constrain.
 -- ---------------------------------------------------------------------------
