@@ -32,10 +32,16 @@ export default async function MessagesPage(props: {
         .maybeSingle();
 
       if (profile?.tenant_id) {
+        // Named columns, not `*`. This runs on the caller's own PostgREST connection,
+        // and `migrations/022_hide_church_credential_columns.sql` gives that role
+        // SELECT on columns rather than on the table: the usher passkey and its hash are
+        // deliberately unreadable here, so `select("*")` would raise 42501 instead of
+        // quietly over-fetching a credential this page never uses. These are the five
+        // fields read below.
         const { data: profileChurch } = await supabase
           .schema("church")
           .from("churches")
-          .select("*")
+          .select("id, name, slug, theme_color, logo_url")
           .eq("id", profile.tenant_id)
           .maybeSingle();
 

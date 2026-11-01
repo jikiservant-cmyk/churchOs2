@@ -58,6 +58,7 @@ the service role keeps every write the app needs.
 | Finding | State | Where |
 | --- | --- | --- |
 | P0-1 tenant can write its own billing/passkey columns | **Closed for a database built from this repository**; on the audited production database there was no tenant write policy to drop — plus a BEFORE UPDATE column guard that holds even if a wide policy returns | `FOR ALL` replaced by SELECT-only, plus a BEFORE UPDATE column guard that holds even if a wide policy returns | `supabase-schema.sql`, `migrations/020` |
+| P1-7 RLS cannot hide a column: any member can read their own church's usher code | **Fixed** — the browser roles get column-level SELECT on `church.churches`, so the four credential columns are unreadable through REST while every service-role read the app makes is untouched | `migrations/022`, `supabase-schema.sql`, `app/c/…/messages/page.tsx` |
 | P1-6 browser roles hold privileges RLS cannot reach (`TRUNCATE` on `church.churches`) | **Found live, closed by revoke** — TRUNCATE/REFERENCES/TRIGGER swept off every table in `church`/`public`/`business`, churches DML revoked behind a guard that refuses if a tenant write policy is still live, `SELECT` deliberately kept | `migrations/021` |
 | P0-2 `createAdminClient()` could not fail loudly when the key is missing (the role claim in the heading is retracted — measured as `service_role`) | **Fixed** — sessionless service-role client, loud-once fallback when the key is absent, identity pinned by a test | `lib/supabase/service-client.ts`, `lib/supabase/server.ts`, `tests/admin-client-identity.test.ts` |
 | P1-3 ledger has no security posture | **Closed** — RLS + service-role policy + guaranteed grants; refuses to finish if the app would lose access | `migrations/019` |
@@ -293,6 +294,82 @@ are what the roster screens and the broadcast queue write through, and each is s
 policies checked for a tenant or owner predicate — all 37 are scoped). Narrowing them to
 per-verb, per-column policies is a real improvement and a real chance of breaking a
 screen; it is deliberately not part of this change.
+
+---
+
+## P1-7 · RLS hides rows, never columns — so the usher code was readable by any member
+
+**Finding, and it is a different bug from P0-1.** `church.churches` is protected by a
+tenant predicate, `id = church.my_tenant_id()`, and that predicate is *good*: no church
+can read another church's row. It is also the only protection on the column that holds
+`passkey` — the shared usher code, stored in plain text because the attendance screen has
+to show it to a pastor so they can tell a volunteer what to type. So this succeeds for
+**any signed-in account of that church**, pastor or member, from a browser:
+
+```
+GET /rest/v1/churches?id=eq.<that-church-uuid>&select=passkey
+```
+
+The row matches the policy, so the row is returned, and RLS has no notion of
+"this column, not that one". `020` stopped tenants *writing* the credential (policy +
+column guard) and `021` stopped them *truncating* the table; neither had anything to say
+about reading it. The admin portal itself is role-gated — `layout.tsx` admits only
+`pastor`/`admin` — but PostgREST does not consult the router, so the gate was a UI
+convention, not a boundary.
+
+**Fix: `migrations/022_hide_church_credential_columns.sql`.** Revoke the table-level
+`SELECT` from `anon`/`authenticated` and grant back every column *except*
+`passkey, passkey_hash, passkey_version, passkey_updated_at`. A browser-role query that
+names a hidden column now gets 42501 rather than a code. Three properties made it safe
+rather than merely strict:
+
+* **the granted list is built from the catalog, never hard-coded** — the same lesson 020
+  learned the hard way, so a database where 011/017 have not run still applies cleanly
+  and only hides what exists (`tests/sql/church_column_privileges.test.mjs` asserts
+  exactly that shape);
+* **it refuses to run beside a policy that reads a hidden column** (policy expressions are
+  evaluated under the querying role's column privileges, so that combination would have
+  turned every member's admin screen into an error) **or a view that walks around the
+  grant** — including the `security_invoker` case, whose semantics live in
+  `pg_class.reloptions` and *not* in a `relsecurity` column, which does not exist in any
+  released Postgres; the first draft used `c2.relsecurity` and the harness caught it;
+* **it proves the outcome by running the queries as the roles**, inside its own
+  transaction: the granted columns readable, `public.churches_public` still executable,
+  the hidden column refused, `service_role` intact — and it will not commit on a promise.
+
+**What had to change in the application:** one query.
+`app/c/[church_slug]/admin/(authenticated)/messages/page.tsx` read
+`.from('churches').select('*')` on the *caller's* client and used five fields of it. With
+column-level grants, `select=*` is a permission error, so it now names those five. It was
+also the repository's only such read: every other access to the four hidden columns
+(`attendance/page.tsx:30,36`, `lib/attendance-actions.ts:61,229,432`,
+`lib/usher-passkey.ts:126,164,171`, `lib/tenant.ts:38-40`) goes through
+`createAdminClient()` or `scopedDb.admin`, and `service_role` keeps the table-level
+privilege. No browser component queries this table at all. The over-fetch was worth
+removing on its own terms: a page that selects `*` from a table is a page that silently
+starts shipping whatever column is added next.
+
+**What this deliberately does not do.** There is **no hashing requirement and no re-issue**
+of existing codes: the code has to stay readable by a human, so it stays stored as a
+value on the row. Consequences, stated rather than buried —
+
+* anyone holding the service key, the table owner's connection, or the Supabase dashboard
+  still sees every church's usher code in plain text. 022 hardens *tenant against tenant*,
+  which is the boundary RLS is meant to enforce; it is not a defence against an operator
+  or a stolen service key. `passkey_hash` already exists and the login path prefers it
+  (`attendance-actions.ts` compares the HMAC when present), so a future change to
+  hash-only storage is available, but it is a product decision about whether the pastor
+  should still be able to read the code back, not a security fix I can make unilaterally;
+* `sender_id` and the billing columns stay readable by the tenant: they are configuration
+  and status the tenant's own screens display, and hiding them would break the SMS enqueue
+  route and the activation screen for no secret gained;
+* no policy is created, dropped or edited here — `020` and `021` own that surface.
+
+`migrations/022` is in `supabase-schema.sql` too (marked `BEGIN/END 022-CONVERGED`, with a
+test that extracts the schema's own block and *runs* it), so a new project is not born with
+the hole. One behaviour change to know about: a browser-role `select=*` on this table now
+fails loudly instead of returning everything — nothing in the repository does one, and the
+rollback is a single statement at the foot of the file.
 
 ---
 
@@ -601,7 +678,7 @@ select p.polname,
 
 ### In the repository, waiting on a merge
 
-PR #22, head `8768e24`, into `main` — CI green on every step (`typecheck`, `lint`, `test`
+PR #22, head `1fe58cc`+ (`022` follows in the same branch), into `main` — CI green on every step (`typecheck`, `lint`, `test`
 253/253, `test:sql` 63/63, `security:audit`, `build`; the SQL suite now runs in CI so the
 policy and privilege proofs cannot rot silently). **`main` is still `7523871`, so none of
 the application-side fixes are live**: the fee/test-pricing source, the gate that an unpaid
@@ -635,6 +712,10 @@ fallback, and the schema's closed-by-default churches policy for *new* installs.
   constraint — hard-coding `'church'` into the churches read policy would deny a non-church
   tenant its own row. If that scoping is wanted, it has to compare the caller's profile
   `app_type`, not a literal, and that is a migration of its own with its own tests.
+* **No hashing of the stored usher code, on instruction.** `022` removes the *read*
+  path for the browser roles and leaves the storage as it is, because the pastor must be
+  able to read the code aloud. `passkey_hash` and the HMAC comparison already exist, so
+  hash-only storage is a later decision, not a blocker here. See P1-7 for the consequence.
 * **Ledger `SELECT` for `anon`/`authenticated`** left in place (see the table above for the
   preflight); and the gate still reads `churches.activation_status` rather than being
   derived from `activation_payments`, which is the right end state but a paid-path

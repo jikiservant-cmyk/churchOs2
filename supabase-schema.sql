@@ -1084,6 +1084,46 @@ CREATE OR REPLACE VIEW public.churches_public WITH (security_invoker = true) AS
 
 GRANT SELECT ON public.churches_public TO anon, authenticated, service_role;
 
+-- BEGIN 022-CONVERGED (kept in step with migrations/022_hide_church_credential_columns.sql;
+-- tests/sql/church_column_privileges.test.mjs asserts the two agree, because a fresh
+-- install must not be born able to read its own usher credential out of the row)
+--
+-- RLS hides rows, never columns: `id = church.my_tenant_id()` lets any signed-in account
+-- of a church read every column of its own row, including `passkey` — the shared usher
+-- code, which the attendance screen shows to the pastor. Give the browser roles a
+-- column-level read instead: everything the tenant-facing screens select, and none of the
+-- four credential columns. Reads of those four in this application go through a
+-- service-role connection (attendance page, usher-passkey issue/rotate, requireTenant),
+-- so service_role keeps the table-level privilege and nothing here breaks the app.
+DO $$
+DECLARE
+  v_secret text[] := ARRAY['passkey', 'passkey_hash', 'passkey_version', 'passkey_updated_at'];
+  v_list   text;
+  v_count  integer;
+BEGIN
+  SELECT string_agg(quote_ident(c.column_name), ', ' ORDER BY c.ordinal_position), count(*)
+    INTO v_list, v_count
+    FROM information_schema.columns c
+   WHERE c.table_schema = 'church' AND c.table_name = 'churches'
+     AND NOT (c.column_name = ANY (v_secret));
+
+  IF v_list IS NULL OR v_count = 0 THEN
+    RAISE EXCEPTION 'supabase-schema: church.churches has no non-credential columns to grant';
+  END IF;
+
+  EXECUTE format('REVOKE SELECT (%s) ON church.churches FROM anon, authenticated',
+    (SELECT string_agg(quote_ident(x), ', ')
+       FROM unnest(v_secret) x
+      WHERE exists (SELECT 1 FROM information_schema.columns c
+                     WHERE c.table_schema = 'church' AND c.table_name = 'churches'
+                       AND c.column_name = x)));
+
+  EXECUTE 'REVOKE SELECT ON church.churches FROM anon, authenticated';
+  EXECUTE format('GRANT SELECT (%s) ON church.churches TO anon, authenticated', v_list);
+END
+$$;
+-- END 022-CONVERGED
+
 -- RPC Functions for Attendance
 CREATE OR REPLACE FUNCTION church.get_or_create_event(
   p_church_id uuid,
