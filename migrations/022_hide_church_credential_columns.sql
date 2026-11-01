@@ -272,6 +272,10 @@ BEGIN
     WHEN OTHERS THEN
       v_broken := v_broken || 'unexpected error on select=*: ' || SQLERRM || ' | ';
   END;
+  -- The switch is LOCAL to this transaction, so it would unwind at COMMIT anyway — but
+  -- the assertions after it name roles explicitly and must not depend on which role is
+  -- currently in effect while it still is.
+  RESET ROLE;
   END IF;
   END IF;  -- v_can_set_role
 
