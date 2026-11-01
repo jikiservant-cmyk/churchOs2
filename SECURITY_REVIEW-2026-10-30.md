@@ -66,6 +66,7 @@ the service role keeps every write the app needs.
 | P1-5 `SameSite=None` with no `frame-ancestors` | **Fixed** — production-only `frame-ancestors` with an `EMBED_HOSTS` allowlist; cookies left alone so live embeds keep working | `lib/security/frame-ancestors.ts`, `next.config.ts` |
 | P2-7 webhook signs with the API key | **Reported, not refused** — see the note under P2-7 for why a hard failure was the worse option | `app/api/najiki/webhook/route.ts` |
 | P2-8 tenant can delete its own SMS audit trail | **Closed for `sms_logs`** — every tenant write policy dropped by shape, tenant SELECT guaranteed; `members`/`new_converts`/`sms_queue` left as-is on purpose | `migrations/020` |
+| P1-8 eleven RPCs the app calls are absent from this repository | **Partly cleared, not closed** — catalogue measured on the live project: all 12 exist, all owned by `postgres`, `search_path` pinned on every one, `anon` can execute exactly one (invoker, so RLS-bounded), and the provisioning path checks `auth.uid()` in SQL. Definition review and `migrations/023` still outstanding; a privilege revoke is *not* the fix here and the reason is now a test | `SECURITY_REVIEW` P1-8, `tests/rpc-caller-identity.test.ts` |
 | P2-6 `my_tenant_id()` nondeterminism | **Retracted** — see the correction under that heading | — |
 
 ---
@@ -464,6 +465,150 @@ select p.proname, pg_get_functiondef(p.oid) as definition
 
 ---
 
+### Measured 2026-11-01 · the live catalogue, read-only
+
+The metadata query came back. **All 12 names exist in production**, so the application's
+calls resolve — the gap is version control and auditability, not a broken dependency.
+
+| Property | Measured |
+| --- | --- |
+| Owner | `postgres` for all 12 |
+| `search_path` | pinned on all 12 → no search_path-hijack surface in this set |
+| `anon` may `EXECUTE` | **one** of the 12: `public.get_denomination_branding` |
+| `authenticated` may `EXECUTE` | **all 12** |
+| `SECURITY DEFINER` | `private.provision_church_v3_impl`, `public.create_denomination_overseer_invite`, `public.redeem_denomination_overseer_invite` |
+| invoker | the six `overseer_*`, `my_login_context`, `get_denomination_branding`, `provision_church_v3` |
+
+Reading of the definitions supplied the call chain: `provision_church_v3` → `private.…_impl`
+(definer), which checks `p_user_id = auth.uid()`, validates and locks the invite, then calls
+`provision_church_v2`, which re-checks the caller and requires the `pastor` role;
+`my_login_context` → `private.my_login_context_impl` (definer); `private.hash_invite_code` is
+an invoker helper with a pinned empty `search_path` and no direct `EXECUTE` for either browser
+role. That is better than the shape I feared — the provisioning path checks identity in the
+database and not only in the application.
+
+Three things this changes about the finding, in descending order of importance.
+
+1. **`private.my_login_context_impl` is `SECURITY DEFINER` and was not in the 12 names.**
+   The wrapper pattern (a public invoker function delegating to a private definer one) means
+   a scoped query on the names the app calls *undercounts* the definer set. The enumeration
+   below is database-wide for that reason. It also means an invoker wrapper buys nothing
+   security-wise: `my_login_context` is invoker, but the read that matters happens with
+   `postgres` privileges one frame deeper. The same shape is why `provision_church_v3_impl`
+   has to check `auth.uid()` itself, which per the reading it does.
+2. **`authenticated` EXECUTE on these cannot be revoked, because the app needs it.**
+   `lib/super-admin-overseer-actions.ts:166-168` says it out loud: "issue the invite through
+   the session client so the database RPC receives `auth.uid()`". Calling a definer function
+   on the service-role connection would not skip the guard, it would *blind* it — the bearer
+   token carries no user claim, `auth.uid()` is `NULL`, and the body either refuses a valid
+   request or falls back to a caller-supplied `p_*` identity argument, which is the
+   escalation. So the hardening here is not a privilege change; it is making sure the
+   in-database check exists and keeping the app honest about which connection it uses. The
+   latter is now pinned by `tests/rpc-caller-identity.test.ts` (9 call sites across the two
+   overseer modules must stay on the session client; mutating actions must keep their
+   membership re-check; verified by mutation: routing the mint RPC onto `admin` fails it with
+   the reason, and so does deleting the `isAuthorizedOverseer` guard from `detach`).
+3. **Reachability is not the same as `EXECUTE`, and I conflated them.** `EXECUTE` is
+   necessary but not sufficient: PostgREST will only call a function whose schema is exposed
+   to the role, which is `USAGE` on the schema plus the role's `pgrst.db_schemas`. Recorded
+   so the next version of this audit states exposure, not grants. One consequence visible
+   from the repository: 131 call sites use `.schema("church")` from browser-role code, so
+   `church` *must* be exposed for the app to work at all — which means any `church.*` function
+   an invoker can execute is browser-reachable, not merely grantable. `private` has no such
+   requirement (0 call sites), so its exposure is a free win if it turns out to be exposed.
+   `get_denomination_branding` is reachable by `anon` and is invoker, so its read is bounded
+   by `anon`'s own RLS; the open question there is narrower than "leaks data" — the
+   documented behaviour at `lib/denomination.ts:124` is that *unlisted* denominations still
+   return branding when looked up by slug, which makes the slug the only thing gating that
+   surface. Low severity, but it is a choice worth making deliberately.
+
+Still open, in priority order, and all three need bodies rather than metadata:
+
+* `public.create_denomination_overseer_invite` (definer, `authenticated` may execute): does
+  the body re-derive the caller's global role from `auth.uid()`, or does it trust that the
+  Next.js `requireSuperAdmin()` ran first? A member's own JWT posted straight to
+  `/rpc/create_denomination_overseer_invite` skips the Next.js layer entirely. This is the
+  highest-value unknown in the whole review right now, because the answer is either
+  "the boundary is where it should be" or "every signed-in member can mint an invite that
+  grants platform oversight of a denomination".
+* `public.redeem_denomination_overseer_invite` (definer): the app's only precondition is
+  "signed in", correctly, because the redeemer is not yet an overseer. So the code is the
+  credential: hash comparison, `expires_at`, `uses_count < max_uses`, single-use per user, and
+  `auth.uid()` bound into the row it writes — each one needs to be *in* the function.
+* `overseer_revoke_invite`: `lib/overseer-actions.ts:145-155` sends the same user string as
+  `p_invite_id`, and on error re-sends it as `p_code`, because the application does not know
+  the signature — a direct symptom of an unversioned function. The fallback is the risk: if
+  the body does not scope by the caller's denomination, an overseer who learns another
+  denomination's invite code can revoke it. Nuisance and availability, not escalation, but
+  it is a cross-tenant write path and it exists in the app today.
+
+---
+
+### Inventory queries for the next pass (read-only)
+
+```sql
+-- (1) every SECURITY DEFINER function in the schemas this application lives in, with the
+--     exposure facts that actually decide reachability. Wide on purpose — see point 1 above.
+select n.nspname||'.'||p.proname as function,
+       pg_get_userbyid(p.proowner) as owner,
+       coalesce(array_to_string(p.proconfig, ','), '(search_path NOT pinned)') as settings,
+       has_schema_privilege('anon',          n.nspname, 'USAGE') as anon_usage,
+       has_schema_privilege('authenticated', n.nspname, 'USAGE') as member_usage,
+       has_function_privilege('anon',          p.oid, 'EXECUTE') as anon_exec,
+       has_function_privilege('authenticated', p.oid, 'EXECUTE') as member_exec,
+       array_to_string(p.proargnames, ', ')  as argument_names,
+       pg_get_function_identity_arguments(p.oid) as identity_arguments
+  from pg_proc p
+  join pg_namespace n on n.oid = p.pronamespace
+ where p.prosecdef
+   and n.nspname in ('public','church','private','business')
+ order by 1;
+
+-- (2) the definer + caller-supplied-identity combination, which is the whole escalation
+--     pattern: a function that runs as postgres and is *told* who the caller is.
+select n.nspname||'.'||p.proname as function,
+       p.prosecdef as definer,
+       array_to_string(p.proargnames, ', ') as argument_names,
+       (select count(*) from pg_proc x
+         where x.proname = p.proname and x.pronamespace = p.pronamespace) as overloads
+  from pg_proc p
+  join pg_namespace n on n.oid = p.pronamespace
+ where n.nspname in ('public','church','private','business')
+   and array_to_string(p.proargnames, ', ') ~* 'p_user_id|p_new_user_id|p_user|p_email|p_role|p_church_id|p_denomination_id|p_code'
+ order by definer desc, 1;
+
+-- (3) schema exposure and role membership, plus what the API role is configured to expose.
+--     If `churches_public`-style surprises hide here, this is where they show up.
+select n.nspname as schema,
+       coalesce(array_to_string(n.nspacl, ','), '(no explicit ACL)') as acl,
+       has_schema_privilege('anon',          n.nspname, 'USAGE') as anon_usage,
+       has_schema_privilege('authenticated', n.nspname, 'USAGE') as member_usage
+  from pg_namespace n
+ where n.nspname in ('public','church','private','business')
+ order by 1;
+
+select r.rolname as role,
+       coalesce(string_agg(m.rolname, ', ' order by m.rolname), '(member of no roles)') as member_of
+  from pg_roles r
+  left join pg_auth_members a on a.member = r.oid
+  left join pg_roles m on m.oid = a.roleid
+ where r.rolname in ('anon','authenticated','service_role','authenticator')
+ group by 1 order by 1;
+
+select r.rolname as role, unnest(s.setconfig) as setting
+  from pg_db_role_setting s
+  join pg_roles r on r.oid = s.setrole
+ where s.setconfig::text ~ 'pgrst'
+ order by 1, 2;
+```
+
+If that last query returns nothing, `pgrst.db_schemas` is not set on a role and the API's
+exposed-schema list is whatever the project's REST config says — Dashboard → Project Settings
+→ API, or `SUPABASE_JWT_*`/`PGRST_DB_SCHEMAS` for a self-hosted PostgREST. That list, not the
+ACLs alone, is the boundary the first two findings of this section keep running into.
+
+---
+
 ## What held up (all of it re-checked in code or proven in the harness)
 
 | Control | Status |
@@ -830,4 +975,6 @@ fallback, and the schema's closed-by-default churches policy for *new* installs.
 
 Cross-tenant isolation holds, the church row is now write-protected at both the policy and
 the privilege layer on the live database, and the remaining risk is *inside* a tenant
-rather than between tenants. What is left is a deploy decision and one query.
+rather than between tenants. What is left is two things: a deploy decision (merge #22 →
+deploy → run `022`), and the definition review in P1-8, which is the first finding in this
+file that could not be closed by reading this repository at all.
