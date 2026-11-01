@@ -18,6 +18,11 @@ jobs:
       - run: npm run typecheck
       - run: npm run lint
       - run: npm test
+      # The RLS/grants proofs in tests/sql/*.test.mjs run migrations 019-021 against a
+      # real PostgreSQL engine (PGlite, no server needed). Without this step someone can
+      # revert a policy hardening in migrations/ and CI stays green, because `npm test`
+      # covers the app and only the psql attendance suite runs elsewhere.
+      - run: npm run test:sql
       - run: npm run security:audit
       - run: npm run build
 
