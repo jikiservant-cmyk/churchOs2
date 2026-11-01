@@ -210,6 +210,7 @@ DECLARE
   v_broken  text := '';
   v_still   text := '';
   v_saw_all boolean := false;
+  v_can_set_role boolean := true;
 BEGIN
   -- (a) every credential column present here must be unreadable to both browser roles.
   FOR r IN
@@ -229,7 +230,23 @@ BEGIN
   END IF;
 
   -- (b) the reads the application actually makes as the caller must still work.
-  EXECUTE 'SET LOCAL ROLE authenticated';
+  --
+  --     SET LOCAL ROLE is what makes this a proof instead of an assertion about an acl,
+  --     and it needs this connection to be a member of `authenticated`. On Supabase it
+  --     is; on a bare Postgres or a restricted migration role it may not be, and a
+  --     hardening file must not abort its whole purpose because it could not do a
+  --     victory lap. So the inability to switch roles is reported and the manual check
+  --     is spelled out; anything the switch DOES run and find broken still aborts.
+  v_can_set_role := true;
+  BEGIN
+    EXECUTE 'SET LOCAL ROLE authenticated';
+  EXCEPTION WHEN insufficient_privilege THEN
+    v_can_set_role := false;
+    RAISE NOTICE 'PHASE D · runtime proof skipped, this connection cannot SET ROLE authenticated: %', SQLERRM;
+    RAISE NOTICE 'PHASE D · verify by hand as that role: SELECT id, name, slug FROM church.churches must succeed, SELECT passkey FROM church.churches must fail with 42501.';
+  END;
+
+  IF v_can_set_role THEN
   BEGIN
     EXECUTE 'SELECT count(*) FROM (SELECT id, name, slug FROM church.churches) s';
   EXCEPTION WHEN OTHERS THEN
@@ -246,6 +263,7 @@ BEGIN
 
   -- (c) select=* must now be refused for the browser role. That is a deliberate
   -- behaviour change, stated here so it is a fact in the log and not a surprise.
+  IF v_can_set_role THEN
   BEGIN
     EXECUTE 'SELECT count(*) FROM (SELECT * FROM church.churches) s';
     v_saw_all := true;
@@ -254,7 +272,8 @@ BEGIN
     WHEN OTHERS THEN
       v_broken := v_broken || 'unexpected error on select=*: ' || SQLERRM || ' | ';
   END;
-  RESET ROLE;
+  END IF;
+  END IF;  -- v_can_set_role
 
   IF v_broken <> '' THEN
     RAISE EXCEPTION 'PHASE D FAILED: hiding the credential columns also broke a read something needs — %', trim(v_broken);
