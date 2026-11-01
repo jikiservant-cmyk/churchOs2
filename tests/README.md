@@ -26,6 +26,21 @@ live service credentials.
 | `sms-topup-e2e.ts` | Actual wallet initiation action → mocked Na'jiki request → signed webhook route → mocked settlement RPC; confirms one credit, duplicate acknowledgement, and status-API reconciliation when a signed callback omits the provider transaction ID. |
 | `sql/attendance_streaks.test.sql` | Runs the real attendance migrations and PostgreSQL functions against a scratch database with behavior assertions. CI runs this against PostgreSQL 16. |
 
+### Security regressions
+
+These exist because `npm test` alone would let a policy or privilege change pass CI.
+`npm run test:sql` applies the real migration files to an in-process PostgreSQL (PGlite,
+no server needed) with Row Level Security enforced and the JWT claims PostgREST sets, and
+CI runs it as its own step.
+
+| File | What it covers |
+| --- | --- |
+| `sql/rls_church_row_guard.test.mjs` | Applies `migrations/019` and `020` for real: every tenant write path on `church.churches` is refused while `service_role` keeps each write the app makes, the column guard survives a database where 011/017 have not run, `sms_logs` keeps its read while losing its tenant writes, and 020 refuses to widen a stricter SELECT policy that already exists. |
+| `sql/grants_hardening.test.mjs` | Applies `migrations/021`: proves the grant/policy split directly — as `authenticated`, an `UPDATE` on another church's row is filtered to 0 rows while `TRUNCATE … CASCADE` by the same role **succeeds** — then that the revoke closes it, that `anon` can still execute `public.churches_public`, that the file refuses to run before 020, and that it is idempotent. |
+| `sql/rls_activation_bypass_poc.test.mjs` | Reproduces the legacy `FOR ALL` policy and reports the exploit as OPEN/CLOSED rather than asserting red, so closing the hole never costs more than the bug. The defences that must hold either way (cross-tenant denial, anon denial, no profile forging) do assert. |
+| `admin-client-identity.test.ts` | Pins the identity of the privileged client: the bearer token on a real PostgREST request is the service key, the client cannot see a user session, and a missing/whitespace key yields `null` rather than a client that answers with a silent empty result. Re-run `npm run probe:admin-identity` after any `@supabase/*` bump — it re-measures the library rather than trusting this file's prose. |
+| `deployment-hardening.test.ts` | The application-side findings: the sessionless service-role client and its fallback notice, `frame-ancestors` construction (production-only, malformed entries dropped, `EMBED_HOSTS=*` never inferred), and source-level guards that the webhook keeps warning rather than refusing on a shared signing secret. |
+
 The Na'jiki contract suite uses `helpers/mock-najiki-server.ts` for partner
 endpoints and verbatim validator/signature fixtures in `fixtures/najiki/`. See
 the fixture README for provenance and refresh instructions.
