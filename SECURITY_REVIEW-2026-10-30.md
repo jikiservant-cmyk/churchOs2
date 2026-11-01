@@ -430,15 +430,29 @@ seriously rather than re-reading the repo:
    `tests/sql/rls_church_row_guard.test.mjs` · *"020 never widens a stricter SELECT
    policy that is already live"* builds the app_type-scoped shape and asserts the strict
    predicate is the one still in force.
-2. **021's guard was blind to `FOR ALL`.** It looked for write policies with
-   `polcmd IN ('w','i','d','a')`. `pg_policy.polcmd` is a single character and `FOR ALL`
-   is stored as `*`; there is no `'i'` (INSERT is `'a'`). So on a database whose tenant
-   policy is `FOR ALL` — every database this repository ships — the preflight counted
-   zero and the revoke would have gone ahead, which is precisely the behaviour change
-   the guard exists to prevent. Fixed to `('a','w','d','*')`, with the legend written into
-   the file, and `tests/sql/grants_hardening.test.mjs` · *"021 refuses to revoke DML while
-   a tenant write policy is still live"* fails if the set is wrong again. `migrations/016`
-   and `scripts/fix-sms-wallet-rls.sql` already used the correct `('r','*')`.
+2. **Both catalog checks were blind, in two different ways.** 021's guard looked for
+   write policies with `polcmd IN ('w','i','d','a')` and 020's new 1b check used
+   `('r','a')`. Two mistakes each time:
+
+   * `pg_policy.polcmd` is a single char and **`FOR ALL` is stored as `*`**; `INSERT` is
+     `'a'` and there is no `'i'` at all. So a database whose tenant policy is `FOR ALL` —
+     every database this repository ships — was counted as having no write policy, and
+     021 would have revoked the grant out from under it, the exact behaviour change the
+     guard exists to refuse. (`migrations/016` and `scripts/fix-sms-wallet-rls.sql` already
+     used the right set, `('r','*')`; the harness caught this only because a test asserted
+     the abort.)
+   * A policy created **without a `TO` clause** applies to PUBLIC, and `pg_policy` stores
+     that as `polroles = {0}` — which is not `'{}'` (so `= '{}'` never matches) and casts
+     through `regrole` to `{-}` (so a role-name `LIKE` misses it too). Both files had a
+     branch written for that case that could not fire.
+
+   Fixed by dropping `pg_policy` in both places and reading **`pg_policies`**, where `cmd`
+   is `'ALL'/'UPDATE'/'INSERT'/'DELETE'/'SELECT'` and `roles` renders `{public}`. Three
+   tests now hold the line: *"021 refuses to revoke DML while a tenant write policy is
+   still live"* (`FOR ALL TO authenticated`), *"the same guard fires for a PUBLIC write
+   policy, which pg_policy hides"* (no `TO` clause, and it asserts the raw catalog really
+   is invisible first, so the test cannot silently stop proving anything), and *"020 also
+   defers to a PUBLIC read policy"*.
 
 `tests/sql/grants_hardening.test.mjs` is also the first test in this repository that
 proves the grant/policy distinction directly: as `authenticated`, an `UPDATE` on another

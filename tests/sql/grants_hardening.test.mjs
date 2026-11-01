@@ -19,7 +19,7 @@ const EKERO = '11111111-1111-1111-1111-111111111111';
 const BUKOTO = '22222222-2222-2222-2222-222222222222';
 const PASTOR_EKERO = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
 
-async function buildDb({ tenantWritePolicy = false } = {}) {
+async function buildDb({ tenantWritePolicy = false, noToClause = false } = {}) {
   const db = new PGlite();
   await db.exec(`
     CREATE ROLE anon NOLOGIN;
@@ -104,10 +104,17 @@ async function buildDb({ tenantWritePolicy = false } = {}) {
   `);
 
   if (tenantWritePolicy) {
-    await db.exec(`
-      CREATE POLICY "legacy_tenant_write" ON church.churches
-        FOR ALL TO authenticated
-        USING (id = church.my_tenant_id()) WITH CHECK (id = church.my_tenant_id())`);
+    // Two shapes of the same privilege, because both are out there: 020/016 name the
+    // role explicitly, while supabase-schema.sql's own churches policy is created
+    // WITHOUT a TO clause and so applies to PUBLIC — which pg_policy stores as
+    // polroles = {0}, casting to '{-}' and dodging any role-name LIKE.
+    await db.exec(noToClause
+      ? `CREATE POLICY "legacy_tenant_write" ON church.churches
+           FOR ALL USING (id = church.my_tenant_id())
+           WITH CHECK (id = church.my_tenant_id())`
+      : `CREATE POLICY "legacy_tenant_write" ON church.churches
+           FOR ALL TO authenticated
+           USING (id = church.my_tenant_id()) WITH CHECK (id = church.my_tenant_id())`);
   }
   return db;
 }
@@ -255,6 +262,29 @@ test('021 refuses to revoke DML while a tenant write policy is still live', asyn
   const still = await runAs(db, PASTOR_EKERO,
     `UPDATE church.churches SET theme_color = '#654321' WHERE id = '${EKERO}'`);
   assert.equal(still.affected, 1, 'a rejected run must leave the write path exactly as it was');
+  await db.close();
+});
+
+test('the same guard fires for a PUBLIC write policy, which pg_policy hides', async () => {
+  // FOR ALL with no TO clause is stored as polroles = {0} and polcmd = '*'. A check
+  // written against pg_policy sees neither: '{0}' is not '{}' and regrole renders it
+  // '{-}'. That is how 021's first draft would have revoked a live grant and reported
+  // success, so the no-TO shape is asserted here, not left to reasoning.
+  const db = await buildDb({ tenantWritePolicy: true, noToClause: true });
+  const writes = await db.query(
+    `SELECT polcmd, polroles::text AS oids, polroles::regrole[]::text AS cast
+       FROM pg_policy WHERE polname = 'legacy_tenant_write'`);
+  assert.equal(writes.rows[0].cast, '{-}', 'sanity: the raw catalog really is invisible to a role-name LIKE');
+  assert.equal(writes.rows[0].polcmd, '*', 'sanity: FOR ALL is not a or i');
+
+  let failed = '';
+  try {
+    await db.exec(MIGRATION_021);
+  } catch (error) {
+    await db.exec('ROLLBACK');
+    failed = String(error?.message ?? error);
+  }
+  assert.match(failed, /tenant write polic/i);
   await db.close();
 });
 

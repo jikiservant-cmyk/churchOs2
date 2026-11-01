@@ -131,20 +131,23 @@ BEGIN
   -- Refuse to revoke a privilege that a policy is currently handing to a tenant. That
   -- would change live behaviour rather than clean up, and it would mask the fact that
   -- 020 has not been applied yet.
+  -- pg_policies, not pg_policy, for two reasons learned the hard way:
+  --   * pg_policy.polcmd is a single char and FOR ALL is stored as '*' ('a' is INSERT,
+  --     there is no 'i'). The first draft used ('w','i','d','a'), saw nothing on a
+  --     FOR ALL database - every database this repository ships - and would have
+  --     revoked straight through the guard.
+  --   * a policy created without a TO clause applies to PUBLIC, and pg_policy stores
+  --     that as polroles = {0}: not '{}' (so '= {}' never matches), and casting it
+  --     through regrole renders '{-}', so even a LIKE on the role names misses it.
+  --     pg_policies resolves both: cmd is 'ALL'/'UPDATE'/... and roles is '{public}'.
+  -- tests/sql/grants_hardening.test.mjs asserts the FOR ALL shape and the no-TO shape.
   SELECT count(*) INTO v_policy_writes
-    FROM pg_policy p
-    JOIN pg_class c ON c.oid = p.polrelid
-    JOIN pg_namespace n ON n.oid = c.relnamespace
-   WHERE n.nspname = 'church' AND c.relname = 'churches'
-     -- 'i' is not a pg_policy command and FOR ALL is '*', so the correct write set is
-     -- ('a' INSERT, 'w' UPDATE, 'd' DELETE, '*' ALL). Written as ('w','i','d','a') this
-     -- check saw nothing on a database whose tenant policy is FOR ALL - which is every
-     -- database this repository shipped - and the guard below would have revoked the
-     -- grant out from under a live policy. Caught by tests/sql/grants_hardening.test.mjs.
-     AND p.polcmd IN ('a', 'w', 'd', '*')
-     AND (p.polroles::regrole[]::text LIKE '%authenticated%'
-          OR p.polroles::regrole[]::text LIKE '%anon%'
-          OR p.polroles = '{}');                     -- no TO clause = PUBLIC
+    FROM pg_policies
+   WHERE schemaname = 'church' AND tablename = 'churches'
+     AND cmd IN ('ALL', 'UPDATE', 'INSERT', 'DELETE')
+     AND (roles::text LIKE '%authenticated%' OR roles::text LIKE '%anon%'
+          OR roles::text LIKE '%public%')
+     AND roles::text NOT LIKE '%service_role%';
 
   IF v_policy_writes > 0 THEN
     RAISE EXCEPTION

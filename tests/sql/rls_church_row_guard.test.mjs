@@ -423,6 +423,36 @@ test('020 never widens a stricter SELECT policy that is already live', async () 
   await db.close();
 });
 
+test('020 also defers to a PUBLIC read policy, which pg_policy hides as {0}', async () => {
+  // Same trap as migrations/021's guard, different step: a policy created WITHOUT a TO
+  // clause is stored as polroles = {0}, which is neither '{}' nor a name a LIKE can
+  // match. If 020 failed to see one, it would add its looser predicate next to it and
+  // widen reads on a database that was tighter than this repository.
+  const db = await buildLegacyDb();
+  await db.exec(`
+    -- The fixture's tenant privilege is the FOR ALL policy, which 020 step 1a drops;
+    -- this is the read policy it must respect, created with no TO clause on purpose.
+    CREATE POLICY "public_strict_select" ON church.churches
+      FOR SELECT USING (id = church.my_tenant_id());
+  `);
+
+  await db.exec(MIGRATION_020);
+
+  const read = await asService(db, `
+    SELECT policyname FROM pg_policies
+     WHERE schemaname = 'church' AND tablename = 'churches'
+       AND cmd IN ('SELECT','ALL')
+       AND roles::text NOT LIKE '%service_role%'`);
+  assert.deepEqual(read.rows.map((r) => r.policyname), ['public_strict_select'],
+    'the existing no-TO policy must be the only tenant read policy after 020');
+  const created = await asService(db, `
+    SELECT count(*)::int AS n FROM pg_policies
+     WHERE schemaname = 'church' AND tablename = 'churches'
+       AND policyname = 'Churches are readable by their own members'`);
+  assert.equal(created.rows[0].n, 0, '020 must not add a second SELECT policy beside it');
+  await db.close();
+});
+
 test('020 is idempotent and self-verifying', async () => {
   const db = await buildLegacyDb();
   await db.exec(MIGRATION_020);

@@ -112,17 +112,15 @@ DO $$
 DECLARE
   v_existing integer;
 BEGIN
+  -- pg_policies rather than pg_policy: cmd is spelled out ('SELECT'/'ALL'), and a
+  -- policy with no TO clause shows up as roles = {public} instead of polroles = {0},
+  -- which casts to '{-}' and is invisible to a role-name LIKE. Both traps are recorded
+  -- in migrations/021's step 3, where the same mistake would have been dangerous.
   SELECT count(*) INTO v_existing
-    FROM pg_policy p
-    JOIN pg_class c ON c.oid = p.polrelid
-    JOIN pg_namespace n ON n.oid = c.relnamespace
-   WHERE n.nspname = 'church' AND c.relname = 'churches'
-     -- polcmd is a single char and FOR ALL is stored as '*', not 'a' ('a' is INSERT):
-     -- pg_policy('r') SELECT, 'a' INSERT, 'w' UPDATE, 'd' DELETE, '*' ALL. Getting this
-     -- set wrong makes the check blind to exactly the FOR ALL policies this file exists
-     -- to leave alone.
-     AND p.polcmd IN ('r', '*')                      -- select-capable, including FOR ALL
-     AND (p.polroles::regrole[]::text LIKE '%authenticated%' OR p.polroles = '{}');
+    FROM pg_policies
+   WHERE schemaname = 'church' AND tablename = 'churches'
+     AND cmd IN ('SELECT', 'ALL')
+     AND (roles::text LIKE '%authenticated%' OR roles::text LIKE '%public%');
 
   IF v_existing > 0 THEN
     RAISE NOTICE 'PHASE B · tenants already hold % SELECT policy/policies on church.churches - not adding another (permissive policies OR, so a second predicate could only widen read access).', v_existing;
