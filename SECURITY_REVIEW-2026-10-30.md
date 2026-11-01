@@ -59,7 +59,7 @@ the service role keeps every write the app needs.
 | --- | --- | --- |
 | P0-1 tenant can write its own billing/passkey columns | **Closed for a database built from this repository**; on the audited production database there was no tenant write policy to drop — plus a BEFORE UPDATE column guard that holds even if a wide policy returns | `FOR ALL` replaced by SELECT-only, plus a BEFORE UPDATE column guard that holds even if a wide policy returns | `supabase-schema.sql`, `migrations/020` |
 | P1-6 browser roles hold privileges RLS cannot reach (`TRUNCATE` on `church.churches`) | **Found live, closed by revoke** — TRUNCATE/REFERENCES/TRIGGER swept off every table in `church`/`public`/`business`, churches DML revoked behind a guard that refuses if a tenant write policy is still live, `SELECT` deliberately kept | `migrations/021` |
-| P0-2 `createAdminClient()` was not the service role | **Fixed** — sessionless service-role client, loud-once fallback when the key is absent | `lib/supabase/service-client.ts`, `lib/supabase/server.ts` |
+| P0-2 `createAdminClient()` could not fail loudly when the key is missing (the role claim in the heading is retracted — measured as `service_role`) | **Fixed** — sessionless service-role client, loud-once fallback when the key is absent, identity pinned by a test | `lib/supabase/service-client.ts`, `lib/supabase/server.ts`, `tests/admin-client-identity.test.ts` |
 | P1-3 ledger has no security posture | **Closed** — RLS + service-role policy + guaranteed grants; refuses to finish if the app would lose access | `migrations/019` |
 | P1-4 private HTML cached by the service worker | **Fixed** — default-deny allowlist, cache version bumped so the polluted cache is deleted | `public/sw.js` |
 | P1-5 `SameSite=None` with no `frame-ancestors` | **Fixed** — production-only `frame-ancestors` with an `EMBED_HOSTS` allowlist; cookies left alone so live embeds keep working | `lib/security/frame-ancestors.ts`, `next.config.ts` |
@@ -131,6 +131,31 @@ Notes that matter for triage:
   an isolation bug.
 
 ## P0-2 · `createAdminClient()` is not the service role during a user request
+> **CORRECTION, measured 2026-11-01 — the heading is wrong and so was the
+> alarm attached to it.** `node scripts/probe-admin-client-identity.mjs` builds the
+> client exactly as `lib/supabase/server.ts:44` does on `main` and reads the outgoing
+> header: it is `Authorization: Bearer <SUPABASE_SERVICE_ROLE_KEY>`, i.e. PostgREST
+> resolves the role to **`service_role`**, not `authenticated`. The reason is one line of
+> the deployed code: the admin client passes `cookies: { getAll: () => [], setAll: () => {} }`
+> — an *empty* store — so `_getAccessToken()` has no session to prefer and falls through
+> to `this.supabaseKey`. The `_getAccessToken()` precedence quoted below is real, but it
+> only bites a client whose auth storage can see a session, and no revision of this file
+> ever passed one to the admin client (`git log --all -S"getAll: async () =>" --
+> lib/supabase/server.ts` → nothing).
+>
+> What survives of the finding: (i) when `SUPABASE_SERVICE_ROLE_KEY` is *absent*, the
+> placeholder client turns a privileged read into a silent empty result — the incident
+> shape this section named, and what `service-client.ts` + the loud-once notice fix;
+> (ii) paths built on `createClient()` genuinely do run under the caller's policies,
+> which is the whole reason P0-1 was reachable from the browser; (iii) the design smell
+> of an "admin" client whose identity depends on a cookie adapter is worth removing even
+> when it happens to be correct today.
+>
+> What does **not** survive: the ordering rule in "What shipped" below. Narrowing
+> `authenticated` policies and revoking `authenticated` privileges cannot interrupt the
+> application's privileged writes, because those writes are not `authenticated`. See the
+> dated production record at the end of this file.
+
 
 `lib/supabase/server.ts:44` builds the "admin" client with `createServerClient(url,
 SUPABASE_SERVICE_ROLE_KEY, { cookies: { getAll() … } })`, and supabase-js picks the
@@ -298,11 +323,23 @@ screen; it is deliberately not part of this change.
 
 ## What shipped, and the order to run it in
 
-The order is the substance of this section. The policy tightening in P0-1 and the
-client fix in P0-2 are the same bug seen from two sides: the reason the `FOR ALL`
-policy was ever needed is that the application's own "admin" writes were running as
-`authenticated`. Reversing the two steps locks live churches out of saving their
-settings.
+The order in this section was written around a claim that turned out to be wrong —
+read the correction under P0-2 first. The original reasoning: `FOR ALL` existed because
+the app's own "admin" writes ran as `authenticated`, so deploying the client fix had to
+precede the policy narrowing or live churches would lose their settings. Measured
+behaviour: those writes already run as `service_role` (`Bearer <service key>` on the
+wire, verified by `scripts/probe-admin-client-identity.mjs`), and `service_role` bypasses
+RLS and keeps every grant these files revoke. So **019, 020 and 021 are safe before or
+after the deploy**, and that is now how they were in fact applied on 2026-11-01 — with
+nothing in the application redeployed — with the results recorded at the end of this
+file.
+
+The order still worth keeping, for a different reason, is **020 before 021**: 021's step 3
+refuses to revoke `church.churches` DML while a tenant write policy is live, so that a
+cleanup can never double as a behaviour change. On a database with no tenant write
+policy — the audited production one — 021 runs standalone and 020 only installs the
+column guard. Deploying this branch is still what closes P0-1 for *new* installs and
+makes the missing-key case loud; it is simply no longer a precondition for the SQL.
 
 **Code (deploy first).**
 
@@ -470,3 +507,61 @@ helper, so any signed-in member can still write the tenant-scoped tables that ca
 `authenticated` write policies (members, new converts, sms_queue, attendance flags).
 That is a design decision recorded in `lib/auth-security.ts`, not an oversight, and no
 migration in this branch changes it.
+
+---
+
+## 2026-11-01 · Phase B and Phase C applied to the live project
+
+Run against production **before** this branch was merged or deployed, which the
+correction above is what made safe. Reported results:
+
+* **020 (Phase B).** Step 1b's new guard found the existing tenant SELECT policy on
+  `church.churches` and **declined to add a second one** — the behaviour that would
+  otherwise have widened reads on a database stricter than the repository. Nothing else
+  in 020 had anything to drop (no tenant write policies existed), so what actually landed
+  there is the `guard_church_privileged_columns` trigger and the `sms_logs` narrowing.
+* **021 (Phase C).** Committed with its own validation checks passing. Post-change:
+  `authenticated` TRUNCATE on `church.churches` **false**, `anon` TRUNCATE **false**,
+  `anon` SELECT **true** (public view path intact), `service_role` UPDATE **true** (admin
+  write path intact). Browser-role `TRUNCATE`/`REFERENCES`/`TRIGGER` revoked across
+  `church`/`public`/`business`; `INSERT`/`UPDATE`/`DELETE` revoked on `church.churches`;
+  ledger write privileges revoked. The ledger's `SELECT` grant and policy were left
+  alone, as the script specifies.
+
+Why no application path could have been broken by the revokes, stated as a check rather
+than a promise — every writer of the two narrowed tables on `main`:
+
+| Path | Client on the wire | Affected by 020/021? |
+| --- | --- | --- |
+| `lib/church-settings-actions.ts:24` (meeting days) | `createAdminClient()` → `service_role` | no |
+| `lib/attendance-actions.ts:87,257,459` (passkey rotation, attendance) | `createAdminClient()` → `service_role` | no |
+| `app/c/…/settings/page.tsx:27,33` (churches reads) | `adminDb` → `service_role` | no |
+| `lib/activation/index.ts` (ledger + gate) | `getAdminClient()` → `service_role` | no |
+| `app/api/najiki/webhook/route.ts:197,248,288` (`sms_logs`, ledger, activation) | service client | no |
+| `supabase/functions/church-najiki-dispatch` (`sms_logs` upsert/update) | service key from function secrets | no |
+| `app/c/…/messages/page.tsx:227` (`sms_logs` **read**) | caller's session | no — 020 guarantees a tenant SELECT policy remains |
+| new-church signup | `public.provision_church_v2`, `SECURITY DEFINER` | no — runs as the owner, not the caller |
+
+The last two rows are the ones to watch at runtime, because they *are* the caller's
+identity: a member opening SMS send history must still see their own rows, and a new
+church must still provision end to end. Both are unaffected by privilege changes for the
+reasons in the table, but they are the two assertions worth doing in a browser.
+
+**Optional follow-up, deliberately not run.** `authenticated` and `anon` still hold
+`SELECT` on `church.activation_payments`. The table has no browser-role reader anywhere
+in `app/` or `lib/` (the webhook and `lib/activation` both use the service role), so the
+grant is wider than any code path needs:
+
+```sql
+-- read-only first: does anything grant a policy that depends on it?
+select polname, polcmd, pg_get_expr(polqual, polrelid)
+  from pg_policy p join pg_class c on c.oid = p.polrelid
+ where c.relname = 'activation_payments';
+-- if the only reader is service_role, this is the last of it:
+-- revoke select on church.activation_payments from anon, authenticated;
+```
+
+It is left as a decision because the production ledger policy was created outside this
+repository, so unlike the TRUNCATE case I cannot prove from code what depends on that
+grant being there — and a revoke whose justification is a grep is a worse trade than a
+grant sitting under a policy that already denies the rows.

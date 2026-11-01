@@ -14,7 +14,8 @@
     "security:audit": "npm audit --omit=dev --audit-level=moderate",
     "test:migrations": "node --test tests/sql/passkey_migration.test.mjs",
     "test:sql": "node --test tests/sql/*.test.mjs",
-    "capture:rpc": "node scripts/capture-rpc.mjs"
+    "capture:rpc": "node scripts/capture-rpc.mjs",
+    "probe:admin-identity": "node scripts/probe-admin-client-identity.mjs"
   },
   "dependencies": {
     "@fontsource/outfit": "^5.3.0",

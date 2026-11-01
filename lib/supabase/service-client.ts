@@ -2,19 +2,24 @@
  * The service-role connection used by server-side code that has to see past RLS.
  *
  * WHY THIS FILE EXISTS (SECURITY_REVIEW-2026-10-30.md, P0-2)
- * `createAdminClient()` used to be built with `createServerClient(...)` and the
- * request's cookie store as the session storage. supabase-js then chooses the bearer
- * token per request as:
+ * This file exists because the *shape* of that client was wrong, not because it was
+ * measurably sending the wrong token: on `main` the admin client passes an EMPTY cookie
+ * store (`getAll: () => []`), so there is no session to pick up and the service key goes
+ * out — verified by `scripts/probe-admin-client-identity.mjs`, and recorded as a
+ * retraction in SECURITY_REVIEW-2026-10-30.md's P0-2. What an ssr-backed construction
+ * does allow is far more dangerous than that correction: supabase-js chooses the bearer
+ * token per request as
  *
  *     data.session?.access_token ?? this.supabaseKey
  *
- * so inside a logged-in request the "admin" client sent **the user's JWT** and the
- * service key went out as `apikey` only. PostgREST takes the role from the JWT, which
- * means every privileged read and write in a user-initiated path was actually running
- * as `authenticated`, under the caller's own row-level-security policies. Two things
- * followed: a service-role read of a table the caller has no policy on returned
- * "0 rows, no error" (the shape of two earlier incidents in this repo), and any
- * tightening of the `authenticated` policies would have broken the app's own writes.
+ * so a client that CAN see a user's session sends **that user's JWT** and the service
+ * key only as `apikey`. PostgREST takes the role from the JWT. Any future version that
+ * wires the request's cookie store into `createAdminClient()` — an edit that looks like
+ * simplification — would silently move every privileged read and write onto the caller's
+ * policies, and a read of a table the caller has no policy on would come back as
+ * "0 rows, no error". Two incidents in this repo already had that shape (from the
+ * missing-key path below), which is why the identity is pinned by
+ * `tests/admin-client-identity.test.ts` rather than trusted.
  *
  * WHAT THIS DOES
  * Builds a sessionless client whose Authorization header is the service key, always,

@@ -1,5 +1,7 @@
 // Guards for the two findings that were about the *application*, not the database:
-// P0-2 (createAdminClient() was not actually the service role) and P1-5 (SameSite=None
+// P0-2 (a missing service-role key made the "admin" client answer with a silent empty
+// result; the separate claim that it was authenticating as the caller was measured and
+// retracted — see scripts/probe-admin-client-identity.mjs) and P1-5 (SameSite=None
 // cookies with nothing refusing to be framed). See SECURITY_REVIEW-2026-10-30.md.
 //
 // These run in-process against the real modules — no mocks of the behaviour under
