@@ -377,12 +377,25 @@ rollback is a single statement at the foot of the file.
 
 Triggered by the 2026-11-01 preflight, which surfaced a missing `public.churches_public`
 and sent me looking for other divergence. I enumerated every RPC the application calls and
-asked the repository where each one is created:
+asked the repository where each one is created — 23 distinct functions, 12 of them
+defined in this repository's SQL, 11 not:
 
+```bash
+grep -rhoE "\.rpc\(\s*['\"][a-zA-Z_0-9]+" --include="*.ts" --include="*.tsx" --include="*.js" \
+     app lib components supabase | sed -E "s/.*['\"]//" | sort -u        # → 23 distinct functions
+while read fn; do grep -rq "FUNCTION [a-zA-Z_.]*$fn *(" --include="*.sql" . \
+     || echo "MISSING: $fn"; done < rpcs.txt                              # → 12 defined, 11 not
 ```
-grep -rhoE "\.rpc\('[a-z_0-9]+'" app lib components     →  17 distinct functions
-grep -rl "FUNCTION [a-z_.]*<name>(" --include="*.sql" .   →  7 found, 10 not defined here
-```
+
+The first count of this section said 17 and 10, because the grep matched single-quoted
+`.rpc('name')` only and the double-quoted call sites were invisible to it. Both quote
+styles are in use here, so the numbers above are from the corrected pair of commands. The
+set of *missing* functions did not change; the set of defined ones grew by six, which is
+the direction that matters — the SMS queue RPCs (`claim_sms_queue_item`,
+`complete_sms_queue_item`, `fail_sms_queue_item`, `release_sms_queue_item`,
+`reserve_sms_queue_debit`, `list_sms_queue_candidates`) are all in
+`migrations/`, so the money-adjacent queue is version-controlled and the identity surface
+below is not.
 
 | Called by the app | Defined in this repository |
 | --- | --- |
@@ -391,6 +404,7 @@ grep -rl "FUNCTION [a-z_.]*<name>(" --include="*.sql" .   →  7 found, 10 not d
 | `overseer_church_summary`, `overseer_create_invite`, `overseer_list_invites`, `overseer_revoke_invite`, `overseer_detach_church`, `overseer_denomination_totals`, `create_denomination_overseer_invite`, `redeem_denomination_overseer_invite` — the platform-overseer and denomination-admin surface (`lib/overseer-actions.ts`, `lib/super-admin-overseer-actions.ts`) | **no**, all eight |
 | `get_denomination_branding` | **no** |
 | `increment_event_attendance`, `decrement_event_attendance`, `refresh_inactive_30_days`, `process_topup_webhook` | `supabase-schema.sql` |
+| `claim_sms_queue_item`, `complete_sms_queue_item`, `fail_sms_queue_item`, `release_sms_queue_item`, `reserve_sms_queue_debit`, `list_sms_queue_candidates` | `migrations/` — the SMS debit queue, including the wallet reservation, is reproducible |
 | `activate_church_workspace_v2` | `migrations/008` |
 | `refresh_consecutive_event_flags` | `migrations/005` |
 
