@@ -373,6 +373,83 @@ rollback is a single statement at the foot of the file.
 
 ---
 
+## P1-8 · The application calls database functions this repository has never seen
+
+Triggered by the 2026-11-01 preflight, which surfaced a missing `public.churches_public`
+and sent me looking for other divergence. I enumerated every RPC the application calls and
+asked the repository where each one is created:
+
+```
+grep -rhoE "\.rpc\('[a-z_0-9]+'" app lib components     →  17 distinct functions
+grep -rl "FUNCTION [a-z_.]*<name>(" --include="*.sql" .   →  7 found, 10 not defined here
+```
+
+| Called by the app | Defined in this repository |
+| --- | --- |
+| `my_login_context` — three login screens (`app/admin/login/page.tsx`, `app/admin/page.tsx`, `app/applet/app/admin/login/page.tsx`) | **no** |
+| `provision_church_v3` — every new church signup (`lib/provision-actions.ts`, `lib/denomination.ts`, `lib/usher-passkey.ts`) | **no** — and `migrations/014_passkey_not_null.sql:9-10` *describes* it as an invoker-mode wrapper delegating to `private.provision_church_v3_impl` (SECURITY DEFINER), which is also **not defined here**. A migration documents a function the repository does not contain. |
+| `overseer_church_summary`, `overseer_create_invite`, `overseer_list_invites`, `overseer_revoke_invite`, `overseer_detach_church`, `overseer_denomination_totals`, `create_denomination_overseer_invite`, `redeem_denomination_overseer_invite` — the platform-overseer and denomination-admin surface (`lib/overseer-actions.ts`, `lib/super-admin-overseer-actions.ts`) | **no**, all eight |
+| `get_denomination_branding` | **no** |
+| `increment_event_attendance`, `decrement_event_attendance`, `refresh_inactive_30_days`, `process_topup_webhook` | `supabase-schema.sql` |
+| `activate_church_workspace_v2` | `migrations/008` |
+| `refresh_consecutive_event_flags` | `migrations/005` |
+
+Why this is a security finding and not housekeeping: the money and identity paths that
+were *not* covered by this review's source reading are exactly these ten. `provision_church_v3`
+creates tenants and credentials; the eight overseer functions read and write across
+churches by design, which is the one place in the product where cross-tenant access is
+legitimate — so their internal guards are load-bearing, and I cannot see them. Concretely,
+for each one it is unknown to version control: whether it is `SECURITY DEFINER`, whether
+`search_path` is pinned (an unpinned path in a definer function is a search_path hijack),
+who owns it, and whether `EXECUTE` is granted to `anon` or `authenticated`. Two of the
+hardening items in this file turn on that last fact: `supabase-schema.sql:338` revokes
+`EXECUTE` on `provision_church_v2`, a function the app no longer even calls, while the v3
+that it does call has never passed through this repository.
+
+This also explains the drift pattern the preflight showed — the ledger's policy, the
+`app_type` scoping on `church.churches`, the missing `churches_public` view: this project
+has a second, undocumented deployment channel, the dashboard.
+
+**Remediation, in order, and none of it needs a deploy:**
+
+1. Inventory and dump the ten (queries at the foot of this section), paste them here.
+2. I audit them against the same bar as the rest of the review — definer mode, pinned
+   `search_path`, `EXECUTE` grantees, and for the overseer set, whether each one checks
+   the caller's identity against the church it is about to touch.
+3. They land as `migrations/023_trusted_database_functions.sql` with
+   `CREATE OR REPLACE FUNCTION` from the dumped definitions, so the next environment is
+   reproducible and the next review can actually read them. The dump is the source of
+   truth; nothing is rewritten silently, because a "cleanup" of a function nobody has
+   reviewed is how a live app loses a guard it did not know it had.
+
+```sql
+-- (1) metadata for everything the app calls but this repository does not define
+select n.nspname||'.'||p.proname as function,
+       p.prosecdef                       as security_definer,
+       pg_get_userbyid(p.proowner)       as owner,
+       coalesce(array_to_string(p.proconfig, ', '), '(search_path NOT pinned)') as settings,
+       has_function_privilege('anon',          p.oid, 'EXECUTE') as anon_can_execute,
+       has_function_privilege('authenticated', p.oid, 'EXECUTE') as member_can_execute,
+       pg_get_function_identity_arguments(p.oid) as arguments
+  from pg_proc p
+  join pg_namespace n on n.oid = p.pronamespace
+ where p.proname in ('my_login_context','provision_church_v3','provision_church_v3_impl',
+                     'get_denomination_branding','overseer_church_summary','overseer_create_invite',
+                     'overseer_list_invites','overseer_revoke_invite','overseer_detach_church',
+                     'overseer_denomination_totals','create_denomination_overseer_invite',
+                     'redeem_denomination_overseer_invite')
+ order by 1;
+
+-- (2) the definitions, overloads included — paste the two that matter most first
+select p.proname, pg_get_functiondef(p.oid) as definition
+  from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+ where n.nspname in ('public','church','private')
+   and p.proname in ('provision_church_v3','provision_church_v3_impl','my_login_context')
+ order by 1;
+```
+
+---
+
 ## What held up (all of it re-checked in code or proven in the harness)
 
 | Control | Status |
@@ -618,6 +695,18 @@ than a promise — every writer of the two narrowed tables on `main`:
 | `supabase/functions/church-najiki-dispatch` (`sms_logs` upsert/update) | service key from function secrets | no |
 | `app/c/…/messages/page.tsx:227` (`sms_logs` **read**) | caller's session | no — 020 guarantees a tenant SELECT policy remains |
 | new-church signup | `public.provision_church_v2`, `SECURITY DEFINER` | no — runs as the owner, not the caller |
+
+**2026-11-01 · `migrations/022` preflight, read-only (file NOT applied yet).** Live
+`church.churches` carries all four credential columns; **both `anon` and `authenticated`
+can currently read every column of it**, so the P1-7 exposure is confirmed present, not
+inferred; no browser-role policy on that table references any hidden column (so 022's
+step-1 guard will not fire); and **`public.churches_public` does not exist in the live
+database at all**, which is why 022's view loop will find nothing — expected, not a
+failure, and the reason 021's header note about that view was corrected. The 022 apply is
+held until PR #22 is deployed, because the version of `messages/page.tsx` running on
+`main` still does `.from('churches').select('*')` on the caller's client and would start
+raising 42501 on the SMS page. That search for divergence is what produced **P1-8**,
+which is the bigger finding.
 
 The last two rows are the ones to watch at runtime, because they *are* the caller's
 identity: a member opening SMS send history must still see their own rows, and a new

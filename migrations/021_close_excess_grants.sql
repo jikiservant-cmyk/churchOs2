@@ -39,6 +39,13 @@
 --   * SELECT on church.churches, for either role. public.churches_public is declared
 --     WITH (security_invoker = true), so a visitor executing that view reads
 --     church.churches AS THEMSELVES and needs SELECT on the base table underneath it.
+--     MEASURED CORRECTION (2026-11-01 preflight): that view does not exist in the
+--     audited production database at all — no application code queries it either, the
+--     public pages reach churches through a service-role read (lib/db.ts:30-31), so its
+--     absence costs nothing and keeping this grant protects no live path. It stays
+--     anyway, and step 5 asserts it survives, for the general case: a database built from
+--     supabase-schema.sql has the view, and a revoke here would have it fail at the
+--     privilege layer while every policy still reads correctly.
 --     supabase-schema.sql currently gives anon no policy on churches at all, so the
 --     view returns zero rows either way — which is precisely why the privilege is kept
 --     instead of "cleaned up": if a public read policy is ever restored (the schema
@@ -215,7 +222,7 @@ BEGIN
   END IF;
 
   IF NOT has_table_privilege('anon', 'church.churches', 'SELECT') THEN
-    RAISE EXCEPTION 'PHASE C FAILED: anon lost SELECT on church.churches — public.churches_public is security_invoker, so every public page would start failing with permission denied instead of simply returning no rows';
+    RAISE EXCEPTION 'PHASE C FAILED: anon lost SELECT on church.churches — public.churches_public is security_invoker on a database built from supabase-schema.sql, so re-grant it before running anything that reads that view (the audited production database has no such view and no anon policy, which is why losing this grant there changes nothing user-visible; see the header note)';
   END IF;
 
   RAISE NOTICE 'PHASE C OK · TRUNCATE/REFERENCES/TRIGGER gone from browser roles · churches DML revoked · SELECT surface preserved';
