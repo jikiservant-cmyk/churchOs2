@@ -565,3 +565,85 @@ It is left as a decision because the production ledger policy was created outsid
 repository, so unlike the TRUNCATE case I cannot prove from code what depends on that
 grant being there — and a revoke whose justification is a grep is a worse trade than a
 grant sitting under a policy that already denies the rows.
+
+---
+
+## Closing status · 2026-11-01
+
+Read this section first if you are picking the work up later. It is the only part that
+describes what is *actually where*, as opposed to what the audit found.
+
+### Applied to the live database (2026-11-01, before any deploy — and that was safe, see the P0-2 correction)
+
+| File | Landed on production | Evidence |
+| --- | --- | --- |
+| `migrations/020_close_church_row_writes.sql` | **Partly by design.** Step 1b detected the existing tenant SELECT policy and declined to add another; there were no tenant write policies to drop; the `guard_church_privileged_columns` trigger and the `sms_logs` narrowing are what actually changed | Reported notices, plus the `pg_policies` probe in "Run these against the live project" |
+| `migrations/021_close_excess_grants.sql` | **Yes, committed with its own assertions passing** | `authenticated`/`anon` TRUNCATE on `church.churches` → false; `anon` SELECT → true; `service_role` UPDATE → true |
+| `migrations/019_activation_ledger_rls.sql` | **Unconfirmed.** The audit found RLS enabled on `church.activation_payments` with one policy whose role/command was never reported back — which could be 019, or hand-set dashboard config. Do not assume either way | Run the query below |
+
+```sql
+-- Did 019 land, or is the ledger protected by hand-configured policy alone?
+select p.polname,
+       case p.polcmd when 'r' then 'SELECT' when 'a' then 'INSERT' when 'w' then 'UPDATE'
+                     when 'd' then 'DELETE' when '*' then 'ALL' end            as cmd,
+       r.rolname                                                               as for_role,
+       c.relrowsecurity, c.relforcerowsecurity
+  from pg_policy p
+  join pg_class c     on c.oid = p.polrelid
+  join pg_namespace n on n.oid = c.relnamespace
+  left join pg_roles r on r.oid = any (p.polroles)
+ where n.nspname = 'church' and c.relname = 'activation_payments';
+```
+
+`019` is idempotent and additive, so if that comes back with a `service_role` policy and
+`relforcerowsecurity = false`, re-running it is a no-op; if the only policy is for
+`authenticated`, re-running it is what gives the application its ledger access.
+
+### In the repository, waiting on a merge
+
+PR #22, head `8768e24`, into `main` — CI green on every step (`typecheck`, `lint`, `test`
+253/253, `test:sql` 63/63, `security:audit`, `build`; the SQL suite now runs in CI so the
+policy and privilege proofs cannot rot silently). **`main` is still `7523871`, so none of
+the application-side fixes are live**: the fee/test-pricing source, the gate that an unpaid
+church cannot slip through, the usher passkey for new churches, the default-deny service
+worker, `frame-ancestors`, the sessionless service-role client with its loud-once
+fallback, and the schema's closed-by-default churches policy for *new* installs.
+
+### Set these when you deploy (all three are documented in `.env.example`, +37 lines on this branch)
+
+* `SUPABASE_SERVICE_ROLE_KEY` — the admin path depends on it; without it the deployed
+  build answers privileged reads with a silent empty result. `npm run probe:admin-identity`
+  shows what the client presents, and should be re-run after any `@supabase/*` bump.
+* `NAJIKI_WEBHOOK_SECRET` — give it its own value of 32+ characters, different from
+  `NAJIKI_API_KEY`. The app now warns once per process instead of refusing, because
+  deployments that sign with the API key must keep activating churches.
+* `EMBED_HOSTS` — leave unset unless the workspace is genuinely framed by another origin;
+  `frame-ancestors` is production-only and a malformed entry is dropped rather than
+  passed through.
+
+### Deliberately not done, so it does not look overlooked
+
+* **Intra-tenant authorization.** 0 of 79 policies are role-aware and there is no
+  `is_church_admin()` SQL helper, so any signed-in member can still write the
+  tenant-scoped tables that carry `authenticated` write policies (`members`,
+  `new_converts`, `sms_queue`, attendance flags). Recorded in `lib/auth-security.ts`;
+  changing it is a product decision with lockout risk, not a patch.
+* **Do not copy production's `app_type` predicate into the repo's policies.** It looked
+  like the stricter shape and 020 now defers to it, but `app_type` is a live discriminator
+  across `public.wallets` and provisioning (`app_type: 'church'` upserts,
+  `lib/provisioning-security.ts`), and `church.churches.app_type` has no CHECK
+  constraint — hard-coding `'church'` into the churches read policy would deny a non-church
+  tenant its own row. If that scoping is wanted, it has to compare the caller's profile
+  `app_type`, not a literal, and that is a migration of its own with its own tests.
+* **Ledger `SELECT` for `anon`/`authenticated`** left in place (see the table above for the
+  preflight); and the gate still reads `churches.activation_status` rather than being
+  derived from `activation_payments`, which is the right end state but a paid-path
+  behaviour change that belongs after this settles.
+* Backups, PII retention and the Supabase dashboard's own exposure are out of scope for a
+  code review and were not touched.
+
+### One-line summary
+
+Cross-tenant isolation holds, the church row is now write-protected at both the policy and
+the privilege layer on the live database, and the remaining risk is *inside* a tenant
+rather than between tenants. What is left is a deploy decision and one query.
