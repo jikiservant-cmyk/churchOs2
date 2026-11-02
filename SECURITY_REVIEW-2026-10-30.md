@@ -1098,6 +1098,13 @@ held until PR #22 is deployed, because the version of `messages/page.tsx` runnin
 raising 42501 on the SMS page. That search for divergence is what produced **P1-8**,
 which is the bigger finding.
 
+**Update, 2026-11-02 — the code half of that dependency is cleared; the SQL half is
+still open.** PR #22 merged into `main` at `0906685`, so the narrow `select` is what the
+deployment builds from now on. `022` has still **not** been applied to the live database,
+and the preflight above should be re-run against that deployment — not a preview — before
+applying it, because the file that made 022 unsafe only stopped selecting `*` inside this
+branch.
+
 **2026-11-02 · `migrations/023` APPLIED, in corrected hand-run form.** The three unpinned
 definers (`church.is_pastor()`, `church.messages_broadcast_trigger()`,
 `church.delete_church_tenant_cascade()`) are pinned to `search_path = pg_catalog, pg_temp`;
@@ -1186,17 +1193,31 @@ select p.polname,
 `relforcerowsecurity = false`, re-running it is a no-op; if the only policy is for
 `authenticated`, re-running it is what gives the application its ledger access.
 
-### In the repository, waiting on a merge
+### Merged 2026-11-02 — and what that does and does not mean
 
-PR #22, head `1fe58cc`+ (`022` follows in the same branch), into `main` — CI green on every step (`typecheck`, `lint`, `test`
-253/253, `test:sql` 63/63, `security:audit`, `build`; the SQL suite now runs in CI so the
-policy and privilege proofs cannot rot silently). **`main` is still `7523871`, so none of
-the application-side fixes are live**: the fee/test-pricing source, the gate that an unpaid
-church cannot slip through, the usher passkey for new churches, the default-deny service
-worker, `frame-ancestors`, the sessionless service-role client with its loud-once
-fallback, and the schema's closed-by-default churches policy for *new* installs.
+PR #22 (25 commits, head `f61635b`) merged into `main` at `0906685`. CI on the merge commit
+is green: `attendance-sql` and the `app` job (`typecheck`, `lint`, `test` 276/276,
+`test:sql` 140/140, `security:audit`, `build`; the SQL suite runs in CI so the policy and
+privilege proofs cannot rot silently), and Vercel reported `success` for the
+`najiki/churchsys` build on that commit. So the application-side fixes are in the build
+that ships: the fee/test-pricing source, the gate an unpaid church cannot slip through, the
+usher passkey issued for new churches, the default-deny service worker, `frame-ancestors`,
+the sessionless service-role client with its loud-once fallback, the install prompt no
+longer interrupting the usher portal, and the schema's closed-by-default churches policy for
+*new* installs.
 
-### Set these when you deploy (all three are documented in `.env.example`, +37 lines on this branch)
+Three limits on that sentence, because "merged" is not "hardened":
+
+* **Vercel's `success` is the build.** Whether the production alias points at that
+  deployment is a dashboard check, not something a commit status can prove.
+* **Merging deploys code; it applies no SQL.** `022` and `024` are now *on* `main` and still
+  *not in* the live database. `023` was applied by hand before the merge, from the corrected
+  variant, and that ordering is deliberate — the pinning never depended on the deploy.
+* **A deploy changes what a preflight measures.** Re-run 022's read-only preflight against
+  the deployed build before applying it; the measurement from 2026-11-01 described the
+  database behind the *previous* deployment.
+
+### Confirm these on the production deployment (all three are documented in `.env.example`; after the merge at `0906685` these are settings the live build needs, not future work)
 
 * `SUPABASE_SERVICE_ROLE_KEY` — the admin path depends on it; without it the deployed
   build answers privileged reads with a silent empty result. `npm run probe:admin-identity`
