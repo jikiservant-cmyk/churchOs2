@@ -76,7 +76,9 @@ describe('security-relevant RPCs travel on the caller’s own session connection
     'my_login_context',
   ];
 
-  // Nine call sites across the two modules as the preflight measured them. A name that
+  // Eight call sites across the two modules — seven in lib/overseer-actions.ts and two in
+  // the super-admin module, minus the `p_code` retry that migrations/023's sibling work
+  // deleted once the live signature was measured as `p_invite_id uuid` only. A name that
   // disappears from the source makes the loop above vacuous, so the total is pinned too:
   // if this fails, the call moved somewhere the scan does not read, and the new home
   // needs the same rule rather than a bumped number.
@@ -105,8 +107,8 @@ describe('security-relevant RPCs travel on the caller’s own session connection
           );
         }
       }
-      assert.equal(sitesFound, 9,
-        `expected the 9 audited call sites, found ${sitesFound} — a moved or renamed call is `
+      assert.equal(sitesFound, 8,
+        `expected the 8 audited call sites, found ${sitesFound} — a moved or renamed call is `
         + 'not a passing test, it is an unchecked one');
   });
 

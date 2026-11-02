@@ -67,6 +67,9 @@ the service role keeps every write the app needs.
 | P2-7 webhook signs with the API key | **Reported, not refused** — see the note under P2-7 for why a hard failure was the worse option | `app/api/najiki/webhook/route.ts` |
 | P2-8 tenant can delete its own SMS audit trail | **Closed for `sms_logs`** — every tenant write policy dropped by shape, tenant SELECT guaranteed; `members`/`new_converts`/`sms_queue` left as-is on purpose | `migrations/020` |
 | P1-8 eleven RPCs the app calls are absent from this repository | **Partly cleared, not closed** — catalogue measured on the live project: all 12 exist, all owned by `postgres`, `search_path` pinned on every one, `anon` can execute exactly one (invoker, so RLS-bounded), and the provisioning path checks `auth.uid()` in SQL. Definition review and `migrations/023` still outstanding; a privilege revoke is *not* the fix here and the reason is now a test | `SECURITY_REVIEW` P1-8, `tests/rpc-caller-identity.test.ts` |
+| P1-9 66 definer routines, three unpinned, anon-executable definers the app never calls | **Fixed where the catalog proves it is safe** — `migrations/023` pins the path for every unpinned definer whose body has no resolving unqualified reference, defers the rest by name with the offending relation, and revokes the passkey validators + tenant deleter from `PUBLIC, anon, authenticated` behind a policy-reference guard; the two repo-side unpinned definer triggers are pinned in `supabase-schema.sql`; the usher-session pair is still unread | `migrations/023`, `tests/sql/definer_hardening.test.mjs`, `supabase-schema.sql` |
+| P1-8 (follow-up) unlisted-denomination branding via a definer helper anon can execute | **Reported, deliberately not changed** — see P1-9; `is_listed` is not filtered by `private.get_denomination_branding_impl` and the code comments say that is intended | owner decision |
+
 | P2-6 `my_tenant_id()` nondeterminism | **Retracted** — see the correction under that heading | — |
 
 ---
@@ -609,6 +612,122 @@ ACLs alone, is the boundary the first two findings of this section keep running 
 
 ---
 
+## P1-9 · The definer surface is 66 routines wide; three did not pin their search_path
+
+The database-wide enumeration P1-8 asked for came back on 2026-11-02, read-only. It is a
+much larger boundary than "the eleven functions the app calls":
+
+* **66 `SECURITY DEFINER` routines** exist across `public`, `church`, `private` and `business`
+  (including one overload). **63 pin their own `search_path`; three do not:**
+  `church.is_pastor`, `church.messages_broadcast_trigger`, `church.delete_church_tenant_cascade`.
+* `church` **and** `private` grant `USAGE` to both browser roles. `authenticator` is a member of
+  `anon`, `authenticated` and `service_role`.
+* No `pgrst.*` setting exists in `pg_db_role_setting`. Which schemas the API actually exposes is
+  therefore configured outside the catalogs, and **no SQL query can settle reachability** — only
+  a request can.
+
+### Why an unpinned path matters, proven in the repository rather than asserted
+
+`migrations/023_harden_definer_routines.sql` is now covered by
+`tests/sql/definer_hardening.test.mjs`, and the first case in that file is not a
+bookkeeping check — it is the attack:
+
+> an unpinned `SECURITY DEFINER` function whose body reads `from widgets` returned **3**, the
+> row count of the caller's `TEMP TABLE widgets`, while the schema-qualified sibling next to it
+> returned the real **2**.
+
+That is the whole hazard in one assertion: a definer function runs as its owner, but it resolves
+names through *the caller's* `search_path`, and any connection may put its own temporary schema in
+front of every user schema. The owner's privileges plus the caller's name resolution is the
+combination to avoid, and it is why 63 of the 66 already pin. `pg_temp` is deliberately **absent**
+from the pinned list — a pin that included it would leave the hole exactly where it was, and the
+test asserts its absence, not just the presence of a `search_path`.
+
+### What 023 does, and the one thing it refuses to do
+
+**Part A** pins `search_path = pg_catalog, public, church, private, business, extensions` on
+every definer routine in those four schemas that has none — but only where the catalog proves the
+body has no unqualified reference that resolves to a real relation today. `plpgsql` bodies are
+not tracked in `pg_depend`, so the check is `regexp_matches` over `pg_get_functiondef()` piped
+through `to_regclass()`: a captured word that names no relation (a plpgsql variable in
+`SELECT x INTO y`, a set-returning function after `FROM`) is not a reason to defer; one that does
+name a relation is. For those, 023 reports the offending names and stops, because pinning the
+path could change *which object the body finds* — which is a behaviour change in a live tenant's
+code path, not a hardening. The report is the handoff: qualify the reference in a reviewed edit,
+re-run 023, and it pins itself (the third test case runs exactly that loop).
+
+**Part B** revokes `EXECUTE` for `PUBLIC, anon, authenticated` on exactly three signatures and
+grants it to `service_role`:
+
+| Signature | Evidence the browser roles do not need it |
+| --- | --- |
+| `church.validate_usher_passkey(text,text)`, `public.validate_usher_passkey(text,text)` | `grep -rn validate_usher_passkey app lib components` → **no call sites.** The usher portal compares the code in TypeScript on the service-role client (`lib/usher-passkey.ts:123`) and never asks the database. |
+| `church.delete_church_tenant_cascade(uuid)` | Same: no call sites. And `supabase-schema.sql:741-742` / `:1524-1527` *already* say `REVOKE … FROM PUBLIC, anon, authenticated` + `GRANT … TO service_role` for these very signatures — production had drifted from the repository, so Part B applies what the repo already documents rather than inventing a policy. |
+
+The guard before touching either: **if any row-policy predicate in the live database mentions the
+function name, 023 aborts and names the policy**, because a policy is evaluated as the table's
+reader and a revoke would break ordinary `SELECT`s on that table. That guard has its own test, and
+it also verifies the abort is total — Part A's pins roll back with it, so 023 is one transaction
+rather than two migrations half-applied.
+
+### Two things the same lens found in this repository
+
+`church.create_tenant_for_church` and `public.initialize_tenant_wallet` — the two
+`SECURITY DEFINER` **triggers** that create a tenant row and its wallet — were the repo's own
+unpinned definers (`supabase-schema.sql:477`, `:533`). A definer trigger writing `public.wallets`
+while inheriting the caller's name resolution is the worst instance of this pattern in the codebase,
+and it was in the *new-install* path. Both now carry
+`SET search_path = pg_catalog, public, church`; every object either touches is schema-qualified, so
+no resolution changes, and the harness suite that executes the schema still passes.
+
+`church.is_pastor` deserves a separate look before anyone treats it as dead weight: the name says
+"policy predicate", and production has policies this repository does not. My "0 of 79 policies are
+role-aware" count was measured **from the repository's SQL**, so it says nothing about what your
+live `pg_policy` rows do — if a live policy calls `church.is_pastor`, then part of the deferred
+intra-tenant-role item is already implemented in production and must be read before it is
+re-implemented here. That is one query:
+
+```sql
+select n.nspname||'.'||c.relname as table_name, p.polname, p.polcmd,
+       pg_get_expr(p.polqual, c.oid) as using_clause
+  from pg_policy p
+  join pg_class c on c.oid = p.polrelid
+  join pg_namespace n on n.oid = c.relnamespace
+ where coalesce(pg_get_expr(p.polqual, c.oid),'') || ' ' || coalesce(pg_get_expr(p.polwithcheck, c.oid),'')
+       ~ 'is_pastor|is_church_admin|my_tenant_id|my_denomination_id'
+ order by 1, 2;
+```
+
+### Two claims of mine that this batch disproved
+
+1. **"`get_denomination_branding` is invoker, so anon's read is bounded by anon's RLS."** Wrong.
+   It delegates to `private.get_denomination_branding_impl()`, which is `SECURITY DEFINER` **and
+   executable by `anon`** — so the read runs as the owner and RLS never applies. It also does not
+   filter `is_listed`. `lib/denomination.ts:124` records that as intended ("Unlisted denominations
+   still return branding when looked up by slug"), so the decision is yours, not a bug to fix in
+   silence: either unlisted branding is genuinely public and the slug is a shareable link rather
+   than a secret, or the impl needs `AND is_listed` for callers without a membership. Both are one
+   statement; the second would make the public page for an unlisted denomination stop rendering its
+   own brand, which is why nobody should apply it without saying so first.
+2. **"If `private` turns out to be exposed, revoking its `USAGE` is a free win."** Not free, and
+   not safe: the public invoker wrappers *call* private implementations, and an invoker function
+   resolves and executes those calls as the caller — so `anon`/`authenticated` need `USAGE` on
+   `private` for the app's own login and branding paths to work at all. Revoking it would break the
+   wrappers, not the attackers. Reachability is the API's exposed-schema list, which is not in the
+   catalogs; 023 therefore never touches `USAGE`, only `EXECUTE` on three named signatures.
+
+### What is left in this finding
+
+`church.create_usher_session` and `church.get_usher_session` — definer, anon-executable, **not in
+this repository at all**, and the application has its own separate usher-session mechanism (a
+`usher_session_<slug>` cookie plus `lib/usher-passkey.ts`), which means the database has a parallel
+implementation nobody in this codebase reads. Next batch, in this order: the bodies of
+`create_usher_session`, `get_usher_session`, `validate_usher_passkey` (live copy, to compare against
+the repo's), then the full list of the 66 rows where `anon` can execute, since the three named so
+far were introduced with "such as".
+
+---
+
 ## What held up (all of it re-checked in code or proven in the harness)
 
 | Control | Status |
@@ -866,6 +985,23 @@ held until PR #22 is deployed, because the version of `messages/page.tsx` runnin
 `main` still does `.from('churches').select('*')` on the caller's client and would start
 raising 42501 on the SMS page. That search for divergence is what produced **P1-8**,
 which is the bigger finding.
+
+**2026-11-02 · definer inventory, read-only.** 66 `SECURITY DEFINER` routines across
+`public`/`church`/`private`/`business`; 63 pin their `search_path`, three do not
+(`church.is_pastor`, `church.messages_broadcast_trigger`, `church.delete_church_tenant_cascade`);
+`church` and `private` both grant `USAGE` to `anon` and `authenticated`; `authenticator` is a member
+of all three app roles; no `pgrst.*` setting exists in `pg_db_role_setting`, so exposed-schema
+reachability is configured outside the catalogs and can only be settled by a request. Authorization
+outcome of the P1-8 bodies: **the concern that mattered is guarded in the database** —
+`create_denomination_overseer_invite` re-derives `super_admin` from `auth.uid()` inside its definer
+body, redemption validates + locks + counts uses before linking, the six `overseer_*` implementations
+scope themselves through `private.my_denomination_id()`, and the live revoke signature is
+`p_invite_id uuid` filtered to the caller's denomination (which is why the app's `p_code` retry was
+deleted: it addressed a parameter that does not exist). `migrations/023` is written and harness-proved
+for the search_path gap and for three signatures the application never calls; **the `private` schema's
+`USAGE` was deliberately left alone** because the public invoker wrappers need it, and
+`private.get_denomination_branding_impl` is reported rather than changed because hiding unlisted
+denomination branding would break the public page for an unlisted denomination.
 
 The last two rows are the ones to watch at runtime, because they *are* the caller's
 identity: a member opening SMS send history must still see their own rows, and a new

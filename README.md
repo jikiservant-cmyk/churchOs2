@@ -69,7 +69,8 @@ Open Supabase Dashboard → SQL Editor and run each file in order:
 019_activation_ledger_rls.sql       ← Puts RLS on the activation payment ledger (additive; safe any time)
 020_close_church_row_writes.sql     ← Takes write access to church.churches away from tenant accounts
 021_close_excess_grants.sql         ← Revokes the table privileges RLS cannot constrain (TRUNCATE especially); run AFTER 020
-022_hide_church_credential_columns.sql ← Column-level SELECT on churches: the usher credential columns stop being readable by a browser role
+022_hide_church_credential_columns.sql ← Column-level SELECT on churches: the usher credential columns stop being readable by a browser role  ← RUN AFTER DEPLOY
+023_harden_definer_routines.sql       ← Pins search_path on SECURITY DEFINER routines that lack it, and revokes three functions the app never calls (safe any time, before or after 022)
 ```
 
 **020 is not like the others: run it only after this code is deployed.** It removes the

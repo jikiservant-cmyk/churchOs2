@@ -474,7 +474,8 @@ BEGIN
   ON CONFLICT (id) DO NOTHING;
   RETURN NEW;
 END;
-$$ LANGUAGE plpgsql SECURITY DEFINER;
+$$ LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = pg_catalog, public, church;  -- every object below is schema-qualified, so this changes no resolution today; it keeps a caller-chosen path (including a temporary schema) from becoming the resolution order for a definer trigger that writes tenants and wallets
 
 DROP TRIGGER IF EXISTS trigger_create_tenant_for_church ON church.churches;
 CREATE TRIGGER trigger_create_tenant_for_church
@@ -529,7 +530,8 @@ BEGIN
   ON CONFLICT (tenant_id) DO NOTHING;
   RETURN NEW;
 END;
-$$ LANGUAGE plpgsql SECURITY DEFINER;
+$$ LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = pg_catalog, public, church;  -- every object below is schema-qualified, so this changes no resolution today; it keeps a caller-chosen path (including a temporary schema) from becoming the resolution order for a definer trigger that writes tenants and wallets
 
 DROP TRIGGER IF EXISTS trigger_initialize_tenant_wallet ON public.tenants;
 CREATE TRIGGER trigger_initialize_tenant_wallet
