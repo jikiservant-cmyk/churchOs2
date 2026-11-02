@@ -70,6 +70,10 @@ Open Supabase Dashboard → SQL Editor and run each file in order:
 020_close_church_row_writes.sql     ← Takes write access to church.churches away from tenant accounts
 021_close_excess_grants.sql         ← Revokes the table privileges RLS cannot constrain (TRUNCATE especially); run AFTER 020
 022_hide_church_credential_columns.sql ← Column-level SELECT on churches: the usher credential columns stop being readable by a browser role  ← RUN AFTER DEPLOY
+                                     (the deploy landed on 2026-11-02, `main` at `0906685`, so the app-side
+                                     prerequisite is met; 022 is still NOT applied to the live database, and its
+                                     read-only preflight must be re-run against that build first — the 2026-11-01
+                                     measurement described the deployment before this code existed)
 023_harden_definer_routines.sql       ← Pins search_path on SECURITY DEFINER routines that lack it, and revokes three functions the app never calls (safe any time, before or after 022) — APPLIED 2026-11-02, by hand, in corrected form
 024_usher_session_guard.sql           ← REPORT ONLY by default: measures the two unversioned usher-session functions and refuses to touch privileges unless you flip v_apply after reading the report
 ```
