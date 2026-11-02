@@ -68,6 +68,8 @@ the service role keeps every write the app needs.
 | P2-8 tenant can delete its own SMS audit trail | **Closed for `sms_logs`** — every tenant write policy dropped by shape, tenant SELECT guaranteed; `members`/`new_converts`/`sms_queue` left as-is on purpose | `migrations/020` |
 | P1-8 eleven RPCs the app calls are absent from this repository | **Partly cleared, not closed** — catalogue measured on the live project: all 12 exist, all owned by `postgres`, `search_path` pinned on every one, `anon` can execute exactly one (invoker, so RLS-bounded), and the provisioning path checks `auth.uid()` in SQL. Definition review and `migrations/023` still outstanding; a privilege revoke is *not* the fix here and the reason is now a test | `SECURITY_REVIEW` P1-8, `tests/rpc-caller-identity.test.ts` |
 | P1-9 66 definer routines, three unpinned, anon-executable definers the app never calls | **Fixed where the catalog proves it is safe** — `migrations/023` pins the path for every unpinned definer whose body has no resolving unqualified reference, defers the rest by name with the offending relation, and revokes the passkey validators + tenant deleter from `PUBLIC, anon, authenticated` behind a policy-reference guard; the two repo-side unpinned definer triggers are pinned in `supabase-schema.sql`; the usher-session pair is still unread | `migrations/023`, `tests/sql/definer_hardening.test.mjs`, `supabase-schema.sql` |
+| P1-9 applied | **Applied 2026-11-02 by hand, in corrected form** — the three unpinned definers are pinned (to `pg_catalog, pg_temp`, which differs from the file's choice and is recorded as a tightening rather than a defect), the live validator and cascade function lost browser EXECUTE with `service_role` preserved, the cascade trigger verified still-enabled, and my `(uuid)` signature proved to be a repository-only overload | live measurement + `migrations/023` updated to match |
+| P1-10 unversioned usher-session functions, definer and anon-reachable | **Bounded, deliberately not revoked** — `migrations/024` reports usage and refuses to act while the session table is being written; the alternative is three lines inside the function, and whether this is a cross-tenant write or a data-integrity defect depends on a consumer this repository does not contain | `migrations/024`, `tests/sql/definer_hardening.test.mjs` |
 | P1-8 (follow-up) unlisted-denomination branding via a definer helper anon can execute | **Reported, deliberately not changed** — see P1-9; `is_listed` is not filtered by `private.get_denomination_branding_impl` and the code comments say that is intended | owner decision |
 
 | P2-6 `my_tenant_id()` nondeterminism | **Retracted** — see the correction under that heading | — |
@@ -662,13 +664,46 @@ grants it to `service_role`:
 | Signature | Evidence the browser roles do not need it |
 | --- | --- |
 | `church.validate_usher_passkey(text,text)`, `public.validate_usher_passkey(text,text)` | `grep -rn validate_usher_passkey app lib components` → **no call sites.** The usher portal compares the code in TypeScript on the service-role client (`lib/usher-passkey.ts:123`) and never asks the database. |
-| `church.delete_church_tenant_cascade(uuid)` | Same: no call sites. And `supabase-schema.sql:741-742` / `:1524-1527` *already* say `REVOKE … FROM PUBLIC, anon, authenticated` + `GRANT … TO service_role` for these very signatures — production had drifted from the repository, so Part B applies what the repo already documents rather than inventing a policy. |
+| `church.delete_church_tenant_cascade()` / `(uuid)` | Same: no call sites. **Correction from the live run:** the `(uuid)` signature named here is what `supabase-schema.sql:729` defines, but it **does not exist in production** — the live function of that name is a zero-argument *trigger* function. So the repository's revoke at `:743-744` has never reached the live function, and re-running the schema file would not fix it either: it would add an overload beside the trigger. 023's target list now carries both spellings, and the `to_regprocedure` null-skip is why my wrong signature produced a report line instead of a failed migration. And `supabase-schema.sql:741-742` / `:1524-1527` *already* say `REVOKE … FROM PUBLIC, anon, authenticated` + `GRANT … TO service_role` for these signatures — production had drifted from the repository, so Part B applies what the repo already documents rather than inventing a policy. |
 
 The guard before touching either: **if any row-policy predicate in the live database mentions the
 function name, 023 aborts and names the policy**, because a policy is evaluated as the table's
 reader and a revoke would break ordinary `SELECT`s on that table. That guard has its own test, and
 it also verifies the abort is total — Part A's pins roll back with it, so 023 is one transaction
 rather than two migrations half-applied.
+
+### Applied 2026-11-02 · what actually landed, and where it differs from the file
+
+023 was **not** run as pasted; it was applied by hand in corrected form, inside one guarded
+transaction, and the corrections are the interesting part.
+
+* Pinned to `search_path = pg_catalog, pg_temp`: `church.is_pastor()`,
+  `church.messages_broadcast_trigger()`, `church.delete_church_tenant_cascade()`. Every body is
+  schema-qualified, so no resolution changed. `authenticated` kept EXECUTE on `is_pastor()` —
+  which is what proved the live RLS policies use it (see the reframing under "What is left").
+* Revoked browser-role EXECUTE on the **live** signatures: `church.validate_usher_passkey(text,text)`
+  and `church.delete_church_tenant_cascade()`; `service_role` retained both. No policy referenced
+  either target. `public.validate_usher_passkey(text,text)` is absent from production entirely, and
+  the surviving `church` wrapper calls that missing function, so it would error if anything invoked
+  it — which is stronger evidence for the "no call sites" grep, not weaker: nothing in this
+  application has ever depended on that path.
+* The cascade trigger stayed enabled, and that is the correct outcome rather than an oversight:
+  Postgres checks EXECUTE on a trigger function when the trigger is *defined*, not on every firing.
+  `tests/sql/definer_hardening.test.mjs` now pins that with a fixture shaped like production
+  (zero-argument function, real trigger, anon insert) and asserts the trigger still fires after the
+  revoke — so a future change cannot quietly turn this privilege tightening into a behaviour change
+  for every insert on that table.
+* One deliberate difference from the file: **023 pins to a list without `pg_temp`; the applied pin
+  puts `pg_temp` last.** For a fully-qualified body the two are equivalent today, and they stop
+  being equivalent the day an unqualified reference appears, because a path containing `pg_temp`
+  lets a caller's temporary object win. For `church.is_pastor()` the caller is *every query on a
+  table whose policy calls it*, which is the one place in this set where the stricter form is worth
+  taking next time the function is touched (`SET search_path = pg_catalog` alone, since its body
+  qualifies everything). Recorded as a tightening, not a finding: nothing is exploitable as it
+  stands, and I am not going to restate a hardening gap as an exploit.
+
+The file stays safe to run as-is afterwards: the three pinned functions no longer match its
+"has no search_path" filter, and the two absent signatures land in the `skipped` report.
 
 ### Two things the same lens found in this repository
 
@@ -725,6 +760,77 @@ implementation nobody in this codebase reads. Next batch, in this order: the bod
 `create_usher_session`, `get_usher_session`, `validate_usher_passkey` (live copy, to compare against
 the repo's), then the full list of the 66 rows where `anon` can execute, since the three named so
 far were introduced with "such as".
+
+---
+
+## P1-10 · Two anon-reachable definer functions mint usher sessions, and this repository has never seen them
+
+Discovered while closing P1-9: `church.create_usher_session` and `church.get_usher_session` exist in
+production, are `SECURITY DEFINER`, and `anon` can execute both. Neither name appears anywhere in this
+repository — `grep -rn create_usher_session app lib components` returns nothing, and `usher_session`
+as a *string* in the application means a cookie (`usher_session_<slug>`, `lib/attendance-actions.ts`),
+not a table. So the database carries a second implementation of the usher session mechanism that the
+code neither writes nor reads.
+
+Measured behaviour, from the retrieved bodies (2026-11-02), stated exactly:
+
+* `create_usher_session` **checks the passkey**, then accepts a caller-supplied **session token**,
+  a caller-supplied **expiry**, and a caller-supplied **event id**. It does not cap the expiry and
+  does not verify that the event belongs to the church whose passkey was just presented.
+* `get_usher_session` returns the stored session for a valid token.
+
+Why each of those three is a problem, and why none of them is "anyone can get in":
+
+1. **The gate is the passkey, so this is not open access.** An attacker still needs the church's
+   code, which is exactly the credential P1-7 removed from browser-role reads. Guessing remains
+   ~1.1e12 possibilities against an 8-character code.
+2. **A caller-chosen expiry with no cap quietly weakens rotation.** Today the pastor rotates the
+   code on the attendance screen and that is what retires a leaked one. A session issued with
+   `expires_at = 2099-…` does not care: the rotation happens, and the old session keeps working
+   until its own expiry says otherwise. The repo's `passkey_version` column exists precisely to
+   invalidate live usher sessions, and `migrations/011` comments that the defaults are what keep
+   pre-existing sessions valid — so this path sits alongside a mechanism the repository designed
+   on purpose, without going through it.
+3. **An event id accepted without checking whose it is** is a cross-tenant write on the row that
+   binds a session to an event. What that costs depends entirely on whether anything *consumes* the
+   binding, which I cannot determine from this repository because nothing in it reads these rows. If
+   a kiosk or an external client does, it is the class of bug this whole review has been calling the
+   hard part; if nothing does, it is a data-integrity defect. I am not going to pick one of those
+   and describe the other as settled.
+4. **Whether a browser can reach either function is still unverified**, and I do not want to repeat
+   the mistake of reasoning about your live database from the repository. `church` grants `USAGE` to
+   `anon` and 131 browser call sites use `.schema("church")`, which strongly implies the schema is in
+   the API's exposed list; there is no `pgrst.*` setting in the catalogs to prove it (measured
+   2026-11-02). One request settles it, with no data touched:
+
+   ```bash
+   curl -s "$SUPABASE_URL/rest/v1/churches?select=id&limit=0" \
+        -H "apikey: $ANON_KEY" -H 'Accept-Profile: __nope__'
+   ```
+   PostgREST answers `PGRST106` and, in that build, names the schemas it will accept. If `church` is
+   in the list, both functions are callable by any visitor with the anon key; if it is not, the
+   exposure is confined to whatever can reach the database directly.
+
+**What I shipped for it: `migrations/024_usher_session_guard.sql`, which changes nothing by
+default.** This is the one finding where the safe answer is not "revoke it now", because these
+functions *write* and an usher client I cannot see might be using them mid-service. So the file
+reports the signatures it found, who can execute them, which session table it located, and how
+recently that table was written; it **refuses** to revoke while the table has rows newer than a
+staleness window; it aborts outright if any row policy calls one of the names (that makes the
+function part of RLS, and policies run as the table's reader); and it only revokes when an operator
+sets `v_apply := true` by hand after reading the report. Five cases in
+`tests/sql/definer_hardening.test.mjs` cover all of that, including "a report must not change a
+single privilege, not even when it has found something serious".
+
+If the table turns out to be live, the fix is not a revoke. It is three reviewed lines in the body,
+under version control: generate the token in the database rather than accepting one, cap it with
+`LEAST(p_expires_at, now() + interval '12 hours')`, and refuse an event id that does not belong to
+the church row the passkey just matched.
+
+**What this section deliberately does not claim:** I have not read these bodies, so I do not know
+whether the token is stored hashed or plaintext, whether `passkey_version` is consulted, or whether
+the passkey comparison is constant-time. Those are the next three questions if you want this one
+closed rather than bounded, and each is answered by one `pg_get_functiondef`.
 
 ---
 
@@ -934,9 +1040,15 @@ policies changed) and the second is `permission denied for table churches`, whil
 table as the visitor — needs in order to stay executable at all.
 
 **Still open after all of this**, unchanged and stated plainly: intra-tenant
-authorization — 0 of 79 policies are role-aware and there is no `is_church_admin()` SQL
-helper, so any signed-in member can still write the tenant-scoped tables that carry
-`authenticated` write policies (members, new converts, sms_queue, attendance flags).
+authorization — **0 of the 79 policies in this repository** are role-aware and there is no
+`is_church_admin()` SQL helper, so on a database built from these files any signed-in member
+can still write the tenant-scoped tables that carry `authenticated` write policies (members,
+new converts, sms_queue, attendance flags). **The live project is not that database:** on
+2026-11-02 `church.is_pastor()` was found to be referenced by live RLS policies, so some role
+awareness is protecting production today and exists nowhere in version control. That reframes
+this item from "no role checks exist" to "the role checks your churches are relying on would
+not survive a rebuild from this repository" — the same drift this file keeps tripping over, in
+the direction that matters most.
 That is a design decision recorded in `lib/auth-security.ts`, not an oversight, and no
 migration in this branch changes it.
 
@@ -985,6 +1097,20 @@ held until PR #22 is deployed, because the version of `messages/page.tsx` runnin
 `main` still does `.from('churches').select('*')` on the caller's client and would start
 raising 42501 on the SMS page. That search for divergence is what produced **P1-8**,
 which is the bigger finding.
+
+**2026-11-02 · `migrations/023` APPLIED, in corrected hand-run form.** The three unpinned
+definers (`church.is_pastor()`, `church.messages_broadcast_trigger()`,
+`church.delete_church_tenant_cascade()`) are pinned to `search_path = pg_catalog, pg_temp`;
+browser-role EXECUTE is gone from `church.validate_usher_passkey(text,text)` and
+`church.delete_church_tenant_cascade()` with `service_role` preserved; no policy referenced either
+target; the cascade trigger remains enabled and firing. Two facts about the live database came out
+of that run and are load-bearing: the deleter's live signature has **no arguments** (the repo's
+`(uuid)` version is an overload that production never had, so the schema file's revoke at
+`:743-744` has never applied to it), and **live RLS policies call `church.is_pastor()`** — role
+awareness that protects your churches exists outside version control. `migrations/024` was written
+for the remaining usher-session exposure and does not change privileges by design; the branding
+question (P1-9) and the `pg_temp`-last tightening are still open decisions. See P1-9's
+"Applied 2026-11-02" section for what differs between the file and what was run.
 
 **2026-11-02 · definer inventory, read-only.** 66 `SECURITY DEFINER` routines across
 `public`/`church`/`private`/`business`; 63 pin their `search_path`, three do not
@@ -1084,11 +1210,14 @@ fallback, and the schema's closed-by-default churches policy for *new* installs.
 
 ### Deliberately not done, so it does not look overlooked
 
-* **Intra-tenant authorization.** 0 of 79 policies are role-aware and there is no
-  `is_church_admin()` SQL helper, so any signed-in member can still write the
-  tenant-scoped tables that carry `authenticated` write policies (`members`,
-  `new_converts`, `sms_queue`, attendance flags). Recorded in `lib/auth-security.ts`;
-  changing it is a product decision with lockout risk, not a patch.
+* **Intra-tenant authorization.** 0 of the repository's 79 policies are role-aware and
+  there is no `is_church_admin()` SQL helper, so a database built from these files lets any
+  signed-in member write the tenant-scoped tables carrying `authenticated` write policies
+  (`members`, `new_converts`, `sms_queue`, attendance flags). Recorded in `lib/auth-security.ts`;
+  changing it is a product decision with lockout risk, not a patch. Production calls
+  `church.is_pastor()` from its policies instead — a function this repository does not contain —
+  so the first step here is not inventing a helper, it is dumping the live policies and the live
+  `is_pastor()` into migrations, so what protects the churches is what the code says.
 * **Do not copy production's `app_type` predicate into the repo's policies.** It looked
   like the stricter shape and 020 now defers to it, but `app_type` is a live discriminator
   across `public.wallets` and provisioning (`app_type: 'church'` upserts,

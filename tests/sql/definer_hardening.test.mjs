@@ -20,6 +20,17 @@ import assert from 'node:assert/strict';
 
 const MIGRATION = readFileSync(
   new URL('../../migrations/023_harden_definer_routines.sql', import.meta.url), 'utf8');
+const MIGRATION_024 = readFileSync(
+  new URL('../../migrations/024_usher_session_guard.sql', import.meta.url), 'utf8');
+
+/** 024 is a report until an operator opts in; the tests need both modes. */
+function withApply(text, apply) {
+  const from = 'v_apply        constant boolean := false;';
+  const to = `v_apply        constant boolean := ${apply};`;
+  const out = text.replace(from, to);
+  assert.notEqual(out, text, 'the switch this file is built around must exist to be flipped');
+  return out;
+}
 
 async function buildDb({ policyCallsValidator = false } = {}) {
   const db = new PGlite();
@@ -256,6 +267,259 @@ test('PART B refuses to revoke a function that a row policy calls, because polic
     assert.equal(await canExecute(db, 'anon', 'church.validate_usher_passkey(text,text)'), true);
     assert.equal(await settings(db, 'church.safe_fn'), '',
       'the abort must roll Part A back too — 023 is one transaction, not two migrations');
+  } finally {
+    await db.exec('DISCARD ALL').catch(() => {});
+  }
+});
+
+/**
+ * Production's `church.delete_church_tenant_cascade()` takes no arguments and is attached as a
+ * trigger, while supabase-schema.sql defines a `(uuid)` deleter with the same name — measured
+ * 2026-11-02. Two properties follow, and this fixture is the one the live database actually
+ * has: 023 must revoke the zero-argument function it finds and report the signature that is
+ * absent, and revoking a trigger function's EXECUTE must not stop the trigger from firing,
+ * because that is what "the cascade trigger remains enabled" means for the churches using it.
+ */
+async function buildTriggerDb() {
+  const db = new PGlite();
+  await db.exec(`
+    CREATE ROLE anon NOLOGIN;
+    CREATE ROLE authenticated NOLOGIN;
+    CREATE ROLE service_role NOLOGIN;
+    CREATE SCHEMA church;
+
+    CREATE TABLE church.things (id int);
+    CREATE TABLE church.cascade_log (id serial PRIMARY KEY, fired_at timestamptz DEFAULT now());
+
+    CREATE FUNCTION church.delete_church_tenant_cascade() RETURNS trigger
+      LANGUAGE plpgsql SECURITY DEFINER AS $$
+      BEGIN
+        INSERT INTO church.cascade_log DEFAULT VALUES;
+        RETURN NEW;
+      END $$;
+
+    CREATE TRIGGER thing_cascade AFTER INSERT ON church.things
+      FOR EACH ROW EXECUTE FUNCTION church.delete_church_tenant_cascade();
+
+    GRANT USAGE ON SCHEMA church TO anon, authenticated;
+    GRANT INSERT ON church.things TO anon;
+    GRANT SELECT ON church.cascade_log TO anon;
+    REVOKE EXECUTE ON FUNCTION church.delete_church_tenant_cascade() FROM PUBLIC;
+    GRANT EXECUTE ON FUNCTION church.delete_church_tenant_cascade() TO anon, authenticated, service_role;
+  `);
+  return db;
+}
+
+test('the live shape: the zero-argument function is revoked, the absent overload is reported, and the trigger still fires', async () => {
+  const db = await buildTriggerDb();
+  try {
+    const before = (await db.query('select count(*)::int as n from church.cascade_log')).rows[0].n;
+    await db.exec('BEGIN; SET LOCAL ROLE anon;');
+    await db.query('INSERT INTO church.things VALUES (1)');
+    await db.exec('COMMIT');
+    const mid = (await db.query('select count(*)::int as n from church.cascade_log')).rows[0].n;
+    assert.equal(mid, before + 1, 'baseline: the trigger fires for an anon insert before 023 runs');
+
+    await db.exec(MIGRATION);
+
+    const acl = (await db.query(
+      `select action, function from _023_acl where function like '%delete_church_tenant_cascade%' order by 2`)).rows;
+    assert.deepEqual(acl, [
+      { action: 'revoked', function: 'church.delete_church_tenant_cascade()' },
+      { action: 'skipped', function: 'church.delete_church_tenant_cascade(uuid)' },
+    ], '023 must act on the signature that exists and report the one the repository invented');
+
+    for (const role of ['anon', 'authenticated']) {
+      const ok = (await db.query(
+        `select has_function_privilege($1, 'church.delete_church_tenant_cascade()', 'EXECUTE') as ok`, [role]))
+        .rows[0].ok;
+      assert.equal(ok, false, `${role} may no longer call it directly`);
+    }
+    assert.equal((await db.query(
+      `select has_function_privilege('service_role', 'church.delete_church_tenant_cascade()', 'EXECUTE') as ok`))
+      .rows[0].ok, true, 'service_role keeps it');
+
+    // The part that decides whether a live church notices: privilege is checked when a trigger
+    // is defined, not on every firing, so the revoked function must still run as the trigger.
+    await db.exec('BEGIN; SET LOCAL ROLE anon;');
+    await db.query('INSERT INTO church.things VALUES (2)');
+    await db.exec('COMMIT');
+    const after = (await db.query('select count(*)::int as n from church.cascade_log')).rows[0].n;
+    assert.equal(after, mid + 1,
+      'the cascade trigger must keep firing after the EXECUTE revoke — if this ever fails, the '
+      + 'revoke is a behaviour change for every insert on that table and belongs in the app, not here');
+  } finally {
+    await db.exec('DISCARD ALL').catch(() => {});
+  }
+});
+
+
+// ---------------------------------------------------------------------------
+// migrations/024_usher_session_guard.sql — the two usher-session functions the live
+// database has and this repository does not. Its default is to report, because these
+// functions write and an unseen client could depend on them.
+// ---------------------------------------------------------------------------
+const USHER_FIXTURE = `
+    CREATE ROLE anon NOLOGIN;
+    CREATE ROLE authenticated NOLOGIN;
+    CREATE ROLE service_role NOLOGIN;
+    CREATE SCHEMA church;
+
+    CREATE TABLE church.usher_sessions (
+      token text PRIMARY KEY,
+      event_id uuid,
+      created_at timestamptz NOT NULL DEFAULT now()
+    );
+    INSERT INTO church.usher_sessions (token) VALUES ('fresh-token');
+
+    CREATE FUNCTION church.create_usher_session(p_church_slug text, p_token text,
+                                                 p_expires_at timestamptz, p_event_id uuid)
+      RETURNS uuid LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+      BEGIN
+        INSERT INTO church.usher_sessions (token, event_id) VALUES (p_token, p_event_id);
+        RETURN gen_random_uuid();
+      END $$;
+
+    CREATE FUNCTION church.get_usher_session(p_token text)
+      RETURNS boolean LANGUAGE sql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+      SELECT EXISTS (SELECT 1 FROM church.usher_sessions u WHERE u.token = p_token) $$;
+
+    GRANT USAGE ON SCHEMA church TO anon, authenticated;
+    GRANT SELECT, INSERT ON church.usher_sessions TO anon;
+    GRANT EXECUTE ON FUNCTION church.create_usher_session(text, text, timestamptz, uuid),
+      church.get_usher_session(text) TO anon, authenticated, service_role;
+`;
+
+async function buildUsherDb(extra = '') {
+  const db = new PGlite();
+  await db.exec(`
+    CREATE TABLE public.placeholder (id int);
+    DROP TABLE public.placeholder;
+  `);
+  await db.exec(USHER_FIXTURE + extra);
+  return db;
+}
+
+const report = async (db, like) => (await db.query(
+  `select coalesce(string_agg(detail, ' | '), '') as detail from _024_report where item like $1`,
+  [like])).rows[0].detail;
+
+test('024 reports the live shape and revokes nothing while v_apply is false', async () => {
+  const db = await buildUsherDb();
+  try {
+    await db.exec(MIGRATION_024);
+
+    const both = await report(db, '%(%');
+    assert.match(both, /SECURITY DEFINER \(runs as the owner\)/,
+      'it must say, in words, that these run as the owner');
+    assert.match(both, /anon CAN execute · authenticated CAN execute/, 'and who can reach them today');
+    assert.match(both, /usher_sessions: 1 row\(s\)/, 'and what the session table holds');
+    assert.match(both, /NEWER.*than the 30-day staleness window/s,
+      'the newest row must be characterised as recent, not silently ignored');
+    assert.match(await report(db, '%decision%'), /v_apply is false, so nothing was revoked/);
+
+    assert.equal((await db.query(`select has_function_privilege('anon',
+      'church.create_usher_session(text,text,timestamptz,uuid)', 'EXECUTE') as ok`)).rows[0].ok, true,
+      'a report must not change a single privilege');
+  } finally {
+    await db.exec('DISCARD ALL').catch(() => {});
+  }
+});
+
+test('024 refuses to revoke a function whose session table is being written', async () => {
+  const db = await buildUsherDb();
+  try {
+    await assert.rejects(() => db.exec(withApply(MIGRATION_024, true)), (error) => {
+      assert.match(error.message, /024 refuses to revoke/);
+      assert.match(error.message, /written inside 30 days/);
+      assert.match(error.message, /token generated in the/);
+      return true;
+    }, 'someone is using it, so the answer is the three lines in the body, not a revoke');
+
+    await db.exec('ROLLBACK').catch(() => {});
+    assert.equal((await db.query(`select has_function_privilege('anon',
+      'church.get_usher_session(text)', 'EXECUTE') as ok`)).rows[0].ok, true,
+      'the refusal must leave the grants exactly as they were');
+  } finally {
+    await db.exec('DISCARD ALL').catch(() => {});
+  }
+});
+
+test('024 revokes for the browser roles once the table is provably stale, and keeps service_role', async () => {
+  const db = await buildUsherDb(`
+    UPDATE church.usher_sessions SET created_at = now() - interval '400 days';
+  `);
+  try {
+    await db.exec(withApply(MIGRATION_024, true));
+    assert.match(await report(db, '%usage%'), /older or absent/);
+
+    for (const sig of ['church.create_usher_session(text,text,timestamptz,uuid)', 'church.get_usher_session(text)']) {
+      assert.equal((await db.query(
+        `select has_function_privilege('anon', $1, 'EXECUTE') as ok`, [sig])).rows[0].ok, false,
+        `${sig} must stop being reachable by anon`);
+      assert.equal((await db.query(
+        `select has_function_privilege('authenticated', $1, 'EXECUTE') as ok`, [sig])).rows[0].ok, false);
+      assert.equal((await db.query(
+        `select has_function_privilege('service_role', $1, 'EXECUTE') as ok`, [sig])).rows[0].ok, true,
+        `${sig} must stay available to the application\'s privileged path`);
+    }
+
+    // Behaviour, not only ACLs.
+    await db.exec('BEGIN; SET LOCAL ROLE anon;');
+    await assert.rejects(() => db.query(`SELECT church.get_usher_session('fresh-token')`),
+      /permission denied for function (church\.)?get_usher_session/);
+    await db.exec('ROLLBACK');
+  } finally {
+    await db.exec('DISCARD ALL').catch(() => {});
+  }
+});
+
+test('024 stops outright when a row policy calls the function, because that makes it part of RLS', async () => {
+  const db = await buildUsherDb(`
+    ALTER TABLE church.usher_sessions ENABLE ROW LEVEL SECURITY;
+    CREATE POLICY token_owner ON church.usher_sessions FOR SELECT TO authenticated
+      USING (church.get_usher_session(token));
+    GRANT SELECT ON church.usher_sessions TO authenticated;
+  `);
+  try {
+    // Read-only mode still has to be runnable, because measuring the situation is the whole
+    // point of the default: it reports the policy dependency instead of refusing on it.
+    await db.exec(MIGRATION_024);
+    assert.match(await report(db, 'policy dependency'), /church\.usher_sessions · token_owner calls get_usher_session/);
+    assert.match(await report(db, 'policy dependency'), /inside RLS, not beside it/);
+
+    // Read-only mode must stay runnable even in this worst case: measuring the situation is the
+    // point of the default, so the policy dependency is reported here rather than being fatal.
+    await db.exec(MIGRATION_024);
+    assert.match(await report(db, 'policy dependency'),
+      /church\.usher_sessions · token_owner calls get_usher_session/);
+    assert.match(await report(db, 'policy dependency'), /inside RLS, not beside it/);
+    assert.equal((await db.query(`select has_function_privilege('authenticated',
+      'church.get_usher_session(text)', 'EXECUTE') as ok`)).rows[0].ok, true,
+      'a report changes nothing, not even when it has found something serious');
+
+    await assert.rejects(() => db.exec(withApply(MIGRATION_024, true)), (error) => {
+      assert.match(error.message, /024 stops here/);
+      assert.match(error.message, /part of RLS rather than a spare API/);
+      return true;
+    }, 'a policy predicate is evaluated as the reader, so a revoke would break plain SELECTs');
+    await db.exec('ROLLBACK').catch(() => {});
+    assert.equal((await db.query(`select has_function_privilege('authenticated',
+      'church.get_usher_session(text)', 'EXECUTE') as ok`)).rows[0].ok, true);
+  } finally {
+    await db.exec('DISCARD ALL').catch(() => {});
+  }
+});
+
+test('024 says so plainly when the functions are not in the database at all', async () => {
+  const db = new PGlite();
+  try {
+    await db.exec(`CREATE ROLE anon NOLOGIN; CREATE ROLE authenticated NOLOGIN; CREATE ROLE service_role NOLOGIN;`);
+    await db.exec(MIGRATION_024);
+    const rows = await db.query(`select item, detail from _024_report`);
+    assert.equal(rows.rows.length, 1, 'one line, no invented findings');
+    assert.equal(rows.rows[0].item, 'absent');
+    assert.match(rows.rows[0].detail, /nothing to revoke/);
   } finally {
     await db.exec('DISCARD ALL').catch(() => {});
   }

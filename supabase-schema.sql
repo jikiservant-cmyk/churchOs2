@@ -726,6 +726,10 @@ REVOKE EXECUTE ON FUNCTION public.apply_wallet_transaction(uuid, bigint, text, t
 GRANT EXECUTE ON FUNCTION public.apply_wallet_transaction(uuid, bigint, text, text) TO service_role;
 
 -- RPC: Cascade delete church tenant (Service Role Only)
+-- Measured on the live project 2026-11-02: production's function of this name takes NO
+-- arguments (it is a trigger function), so the REVOKE below has never applied to it, and
+-- re-running this file would create an overload beside it rather than change it. Both
+-- spellings are covered by migrations/023 Part B; fix the live signature drift there.
 CREATE OR REPLACE FUNCTION church.delete_church_tenant_cascade(p_tenant_id uuid)
 RETURNS void AS $$
 BEGIN

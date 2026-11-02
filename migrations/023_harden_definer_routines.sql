@@ -20,11 +20,11 @@
 --     recorded as a hardening gap and not as an exploit — a distinction that matters,
 --     because Part A below only automates the case where the catalog proves the body
 --     has no unqualified relation reference to exploit.
---   * `anon` can execute church.validate_usher_passkey / public.validate_usher_passkey
---     and the two church usher-session functions that this repository has never seen.
---     The passkey validators are dead exposure for the browser roles: the usher portal
---     does not call them. It compares the code in TypeScript on the service-role client
---     (lib/usher-passkey.ts:123 `adminClient.schema('church').from('churches')`), and
+--   * `anon` can execute church.validate_usher_passkey and the two church usher-session
+--     functions this repository has never seen. The validator is dead exposure for the
+--     browser roles: the usher portal does not call it. It compares the code in TypeScript
+--     on the service-role client (lib/usher-passkey.ts:123
+--     `adminClient.schema('church').from('churches')`), and
 --     `grep -rn validate_usher_passkey app lib components` returns nothing. And
 --     supabase-schema.sql:741-742 and :1524-1527 ALREADY say, for exactly these three
 --     signatures, `REVOKE ... FROM PUBLIC, anon, authenticated` + `GRANT ... TO
@@ -40,6 +40,41 @@
 --   calls the function is evaluated as the table's reader, so a revoke would break
 --   ordinary SELECTs on that table. 022's step 1 checks the same way.
 --
+-- ============================================================================
+-- APPLIED · 2026-11-02, on the live project, in a corrected hand-run form. What
+-- this file claimed versus what the database actually contains:
+--
+--   * Pinned, to `search_path = pg_catalog, pg_temp`: church.is_pastor(),
+--     church.messages_broadcast_trigger(), church.delete_church_tenant_cascade().
+--     Every one of those bodies is schema-qualified today, so the pin changes no
+--     resolution. One difference of substance from Part A below: this file deliberately
+--     omits pg_temp from its list, while the applied pin puts it last. For a qualified
+--     body the two are equivalent; they stop being equivalent the day an unqualified
+--     reference appears, because a path containing pg_temp lets a caller's temporary
+--     object win. Recorded rather than argued: church.is_pastor() is used by live RLS
+--     policies, so tightening its path is a policy-behaviour change and needs the same
+--     care the first time around.
+--   * `church.delete_church_tenant_cascade(uuid)` — the signature this file (and
+--     supabase-schema.sql:743) names — **does not exist in the live database**. The live
+--     function of that name is a zero-argument trigger function, and it is that one whose
+--     browser EXECUTE was revoked. So the repository's revoke at :743-744 has never
+--     reached production's function, and re-running the schema file would not fix it
+--     either: it would add an overload next to the trigger rather than change it. Both
+--     spellings are in Part B's list now, and the null-skip below is why a wrong
+--     signature produced a report line instead of a failed migration.
+--   * `public.validate_usher_passkey(text,text)` is absent from the live database
+--     entirely; the surviving `church.validate_usher_passkey(text,text)` wrapper calls that
+--     missing function, so it would error if anything invoked it. Revoking it therefore
+--     closes exposure without a downside, and is more evidence for the grep: nothing in
+--     this application has depended on that path.
+--   * The policy guard found no policy referencing either revoke target, the cascade
+--     trigger stayed enabled, and `authenticated` still executes church.is_pastor() —
+--     which is what proved the live policies use it.
+--
+-- Re-running this file is safe: the three pinned functions no longer match the "has no
+-- search_path" filter, and the two absent signatures land in the `skipped` report.
+-- ============================================================================
+
 -- If either part aborts, nothing is committed — and in a client that keeps the failed
 -- transaction open (psql does), issue ROLLBACK; before trying again.
 --
@@ -47,7 +82,8 @@
 -- outside this repository:
 --   GRANT EXECUTE ON FUNCTION church.validate_usher_passkey(text,text) TO anon, authenticated;
 --   GRANT EXECUTE ON FUNCTION public.validate_usher_passkey(text,text) TO anon, authenticated;
---   GRANT EXECUTE ON FUNCTION church.delete_church_tenant_cascade(uuid) TO anon, authenticated;
+--   GRANT EXECUTE ON FUNCTION church.delete_church_tenant_cascade() TO anon, authenticated;
+--   (and the same for the (uuid) overload, where it exists)
 -- A search_path pin is reverted with, per function:
 --   ALTER FUNCTION <schema>.<name>(<args>) RESET search_path;
 -- ============================================================================
@@ -209,7 +245,12 @@ declare
   v_targets  text[] := array[
     'church.validate_usher_passkey(text,text)',
     'public.validate_usher_passkey(text,text)',
-    'church.delete_church_tenant_cascade(uuid)'
+    -- Both spellings, because they are different functions: the (uuid) overload is what
+    -- supabase-schema.sql defines, and the zero-argument one is what the live database
+    -- actually has, attached as a trigger. The null-skip turns a non-existent signature
+    -- into a report line, which is exactly how this file's own error stayed harmless.
+    'church.delete_church_tenant_cascade(uuid)',
+    'church.delete_church_tenant_cascade()'
   ];
   v_name     text;
   v_oid      regprocedure;
