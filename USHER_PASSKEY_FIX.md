@@ -187,3 +187,30 @@ to have been applied:
 
 A code is never re-issued where one exists: rotation is a deliberate act by a pastor, and
 silently replacing a church's credential would lock its ushers out mid-service.
+
+## Follow-up (2026-11-02): the install prompt no longer interrupts the usher link
+
+The PWA install dialog used to appear on every surface, including the portal link a
+pastor sends a volunteer. That link is opened once, in a hurry, at a door — usually from
+WhatsApp or SMS — and a full-screen "Install churchOs" modal in front of the check-in
+screen produced support calls, not installs. The prompt is now suppressed on
+`/c/{slug}/usher` and its sub-pages only. Nothing else changed: admin, pastor, giving and
+the public pages still ask on every open until the app is installed, "Not now" still lasts
+only for the session, and the manifest, the icons and the service worker are untouched, so
+an usher who *wants* the app on their home screen can still install it from any other page.
+
+Two details worth knowing before changing this again:
+
+* The route test lives in `lib/pwa.ts` (`isUsherPortalPath`) and matches whole path
+  segments, so `/c/ekero/usher-notes` and `/usher-admin` are not exempt. Gating on
+  `pathname.startsWith('/usher')` was the tempting version of this and it would have
+  silenced the prompt on unrelated pages.
+* The component reads the path from `usePathname()`, not from a `window.location`
+  snapshot, and on the exempt path it still registers a `beforeinstallprompt` listener that
+  calls `preventDefault()`. Hiding our dialog without swallowing that event hands the ask
+  back to Chrome as its own install mini-infobar, which is the same interruption wearing a
+  different hat. iOS has no install event at all, so there it was never a programmatic
+  prompt to begin with — only our dialog, which is now absent there too.
+
+`tests/pwa.test.ts` pins the matcher, the swallowing listener, and the fact that the
+component is still mounted globally, so "the app must ask" elsewhere stays true.

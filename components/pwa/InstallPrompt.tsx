@@ -1,7 +1,8 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { detectPlatform, isInstalledApp, type Platform } from '@/lib/pwa';
+import { usePathname } from 'next/navigation';
+import { detectPlatform, isInstalledApp, isUsherPortalPath, type Platform } from '@/lib/pwa';
 
 /**
  * Install prompt shown when the app opens.
@@ -24,6 +25,30 @@ import { detectPlatform, isInstalledApp, type Platform } from '@/lib/pwa';
  * Snoozing lasts only for the session (sessionStorage), which is wiped when
  * the tab or the installed app is closed — so the next open prompts again.
  * Once installed, it never appears again.
+ *
+ * Except on the usher portal. A pastor sends that link to a volunteer through
+ * WhatsApp or SMS, and a full-screen install demand between the volunteer and
+ * the check-in screen is a support call, not a feature. So the path is read
+ * from the router (not a one-time window.location snapshot, or a client-side
+ * navigation from /admin into /usher would leave this modal standing on the
+ * exempt page) and the component does two things there:
+ *
+ *   1. shows nothing; and
+ *   2. still listens for `beforeinstallprompt` and calls `preventDefault()`.
+ *
+ * Point 2 is the part that is easy to get wrong. `beforeinstallprompt` is also
+ * how Chrome decides whether to show its own install mini-infobar; an
+ * unhandled event means the browser prompts on our behalf, and we would have
+ * removed our dialog only to hand the ask to the address bar. Swallowing the
+ * event is what actually makes the page quiet. iOS is outside our control in a
+ * different way — it has no install event at all, so there was never a
+ * programmatic prompt there to begin with, only this dialog, which is now
+ * absent.
+ *
+ * Nothing about installability is changed on those routes: the manifest link,
+ * the icons and the service worker stay exactly where they are, so the pastor
+ * and every admin page still get the prompt, and an usher who does want the
+ * app can install it from any other page.
  */
 
 interface BeforeInstallPromptEvent extends Event {
@@ -52,7 +77,23 @@ export default function InstallPrompt() {
     setVisible(false);
   }, []);
 
+  const pathname = usePathname();
+
   useEffect(() => {
+    if (isUsherPortalPath(pathname)) {
+      // The modal may already be open: a volunteer who was sent the link from the
+      // admin side can client-navigate here, and the effect re-running is the only
+      // chance to take it down. Without this line the exemption would only apply to
+      // a cold load, which is precisely the case that never happens.
+      setVisible(false);
+      const swallow = (event: Event) => {
+        // Chrome's own install UI is driven by whether this event is handled.
+        event.preventDefault();
+      };
+      window.addEventListener('beforeinstallprompt', swallow);
+      return () => window.removeEventListener('beforeinstallprompt', swallow);
+    }
+
     // Already installed (launched from the home screen): never show.
     if (isInstalledApp(window)) {
       try {
@@ -93,7 +134,7 @@ export default function InstallPrompt() {
       window.removeEventListener('beforeinstallprompt', onBeforeInstall);
       window.removeEventListener('appinstalled', onInstalled);
     };
-  }, [rememberInstalled]);
+  }, [rememberInstalled, pathname]);
 
   const install = useCallback(async () => {
     const event = deferred.current;

@@ -17,53 +17,69 @@ import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import sharp from 'sharp';
-import { detectPlatform, isInstalledApp, shouldOfferInstall } from '../lib/pwa.ts';
+import { detectPlatform, isInstalledApp, isUsherPortalPath, shouldOfferInstall } from '../lib/pwa.ts';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const read = (p: string) => readFileSync(join(ROOT, p), 'utf8');
 
-// app/manifest.ts is TypeScript returning an object; strip the import and the
-// type annotation so it can be evaluated without a Next build.
+// app/manifest.ts is a TypeScript module whose default export is a function returning
+// the manifest. Strip the import and the `export`/return-type so the file can be
+// evaluated without a Next build — but keep it AS A FUNCTION and call it. The previous
+// version of this helper tried to re-shape the declaration into `return (...)`, which
+// left the function's own `return { ... };` inside the parentheses: every call threw a
+// SyntaxError, and because it threw while the suite was being built, node reported
+// "fail 0" and CI stayed green on four tests that had never run. Hence the self-check
+// below — a loader that dies must cost a visible failure.
 function loadManifest() {
   const src = read('app/manifest.ts');
   const body = src
     .replace(/^import[^\n]*\n/gm, '')
-    .replace(/export default function manifest\(\): MetadataRoute\.Manifest \{/, 'return (')
-    .replace(/\n\}\s*$/, '\n);');
-  return new Function(body)();
+    .replace(/export default function manifest\(\)\s*:\s*[^{]*\{/, 'function manifest() {');
+  return new Function(`${body}\nreturn manifest();`)();
+}
+
+let cachedManifest: Record<string, any> | null = null;
+/** Lazy on purpose: a throw during describe() is invisible to the TAP counters. */
+function manifestValue() {
+  if (!cachedManifest) cachedManifest = loadManifest() as Record<string, any>;
+  return cachedManifest;
 }
 
 describe('PWA manifest', () => {
-  const manifest = loadManifest();
+  it('reads the manifest file (harness self-check)', () => {
+    const value = manifestValue();
+    assert.equal(typeof value, 'object');
+    assert.ok(value && value.name, 'a manifest the harness cannot compile must fail here, not silently');
+  });
 
   it('has the fields Chrome requires to consider the app installable', () => {
     for (const field of ['name', 'short_name', 'start_url', 'display']) {
-      assert.ok(manifest[field], `manifest.${field} is required for installability`);
+      assert.ok(manifestValue()[field], `manifestValue().${field} is required for installability`);
     }
-    assert.equal(manifest.display, 'standalone');
-    assert.equal(manifest.start_url, '/');
+    assert.equal(manifestValue().display, 'standalone');
+    assert.equal(manifestValue().start_url, '/');
   });
 
   it('declares 192 and 512 icons with purpose any', () => {
-    const any = manifest.icons.filter((i: { purpose?: string }) => i.purpose === 'any');
+    const any = manifestValue().icons.filter((i: { purpose?: string }) => i.purpose === 'any');
     const sizes = any.map((i: { sizes: string }) => i.sizes);
     assert.ok(sizes.includes('192x192'), 'a 192x192 any-purpose icon is required');
     assert.ok(sizes.includes('512x512'), 'a 512x512 any-purpose icon is required');
   });
 
   it('declares separate maskable icons', () => {
-    const maskable = manifest.icons.filter((i: { purpose?: string }) => i.purpose === 'maskable');
+    const maskable = manifestValue().icons.filter((i: { purpose?: string }) => i.purpose === 'maskable');
     assert.ok(maskable.length >= 2, 'maskable 192 and 512 should be declared separately');
     // A single icon declared "any maskable" lets the launcher mask artwork that
     // was not drawn with the safe zone in mind.
-    for (const icon of manifest.icons) {
+    for (const icon of manifestValue().icons) {
       assert.notEqual(icon.purpose, 'any maskable');
       assert.ok(!String(icon.purpose).includes(' '));
     }
   });
 
   it('points only at same-origin icons that exist on disk', () => {
-    for (const icon of manifest.icons) {
+    for (const icon of manifestValue().icons) {
       assert.ok(icon.src.startsWith('/'), `icon ${icon.src} must be same-origin`);
       assert.ok(!/^https?:/.test(icon.src), `icon ${icon.src} must not be remote`);
       const onDisk = join(ROOT, 'public', icon.src);
@@ -72,8 +88,15 @@ describe('PWA manifest', () => {
   });
 
   it('does not reference the placeholder photos it used to', () => {
-    const src = read('app/manifest.ts');
-    assert.doesNotMatch(src, /picsum\.photos/);
+    // Assert on the compiled manifest rather than on the source text: app/manifest.ts
+    // legitimately *documents* that it used to point at picsum.photos, and a comment is
+    // not a reference — the assertion that only looked at the file text has been failing
+    // since the day it was written (it just never ran, see loadManifest). What matters is
+    // that nothing ships an absolute URL: the manifest is read by the browser before the
+    // app has any session, so every remote asset in it is a cross-origin dependency on the
+    // install path.
+    assert.doesNotMatch(JSON.stringify(manifestValue()), /https?:\/\//,
+      'a manifest asset must be same-origin so it can be cached for the offline shell');
     const sw = read('public/sw.js');
     assert.doesNotMatch(sw, /picsum\.photos/);
     assert.doesNotMatch(sw, /manifest\.json/, 'the manifest is served as .webmanifest');
@@ -295,6 +318,98 @@ describe('install gating logic', () => {
     // "prompt on every open until installed" behaviour.
     assert.equal(shouldOfferInstall({ installed: false, snoozedThisSession: true, isStandalone: false }), false);
     assert.equal(shouldOfferInstall({ installed: false, snoozedThisSession: false, isStandalone: false }), true);
+  });
+});
+
+describe('usher portal is exempt from the install prompt', () => {
+  // The link a pastor sends a volunteer goes straight to the portal. A modal
+  // demanding an install there is a support call, so the exemption has to be
+  // exact: the portal and only the portal.
+  it('matches the portal at every depth', () => {
+    for (const path of [
+      '/c/ekero/usher',
+      '/c/ekero/usher/',
+      '/c/ekero/usher/dashboard',
+      '/c/bukoto/usher/dashboard?event=12',
+      '/c/ekero/usher#checkin',
+      '/C/Ekero/Usher',
+      '/usher',
+      '/usher/dashboard',
+    ]) {
+      assert.equal(isUsherPortalPath(path), true, `${path} is the usher portal`);
+    }
+  });
+
+  it('does not match anything else that merely contains "usher"', () => {
+    for (const path of [
+      '/c/ekero/usher-notes',
+      '/c/usher/admin',
+      '/usher-admin',
+      '/admin/usHERs',
+      '/c/ekero/admin/messages',
+      '/',
+      '/login',
+      '/signup',
+      '',
+    ]) {
+      assert.equal(isUsherPortalPath(path), false, `${path} must keep the prompt`);
+    }
+    assert.equal(isUsherPortalPath(undefined), false, 'a missing pathname must not exempt anything');
+    assert.equal(isUsherPortalPath(null), false);
+  });
+
+  it('the exemption outranks every other reason to show the dialog', () => {
+    assert.equal(shouldOfferInstall({
+      installed: false, snoozedThisSession: false, isStandalone: false, exemptPath: true,
+    }), false, 'a fresh visitor on /usher is still not asked');
+    assert.equal(shouldOfferInstall({
+      installed: false, snoozedThisSession: false, isStandalone: false, exemptPath: false,
+    }), true, 'the same visitor anywhere else is still asked');
+  });
+});
+
+describe('InstallPrompt keeps the exemption honest in the component', () => {
+  const src = read('components/pwa/InstallPrompt.tsx');
+
+  it('reads the path from the router, not a one-time window.location snapshot', () => {
+    // A client-side navigation from /c/ekero/admin into /c/ekero/usher must tear the
+    // modal down; a snapshot taken on mount would leave it standing on the exempt page.
+    assert.match(src, /import \{ usePathname \} from 'next\/navigation';/);
+    assert.match(src, /const pathname = usePathname\(\);/);
+    assert.match(src, /if \(isUsherPortalPath\(pathname\)\) \{/);
+    assert.match(src, /\}, \[rememberInstalled, pathname\]\);/);
+    assert.doesNotMatch(src, /isUsherPortalPath\(window\.location/,
+      'gating on window.location is the bug this assertion exists to prevent');
+  });
+
+  it('swallows beforeinstallprompt on the exempt path instead of just hiding the dialog', () => {
+    const exempt = src.slice(src.indexOf('if (isUsherPortalPath(pathname))'), src.indexOf('// Already installed'));
+    assert.match(exempt, /addEventListener\('beforeinstallprompt', swallow\)/);
+    assert.match(exempt, /event\.preventDefault\(\)/);
+    assert.match(exempt, /removeEventListener\('beforeinstallprompt', swallow\)/);
+    // Navigating in from another page must take an already-open modal down with it;
+    // an exemption that only applies on a cold load is no exemption.
+    assert.match(exempt, /setVisible\(false\);/);
+    assert.doesNotMatch(exempt, /prompt\(\)/,
+      'the exempt branch must never call prompt() — it only declines the event');
+  });
+
+  it('changes nothing about installability itself', () => {
+    // The fix is "do not ask here", not "make the app uninstallable".
+    const layout = read('app/layout.tsx');
+    assert.match(layout, /manifest: '\/manifest\.webmanifest'/);
+    assert.match(layout, /appleWebApp: \{/);
+    const wrapper = read('components/ClientOnlyComponents.tsx');
+    assert.match(wrapper, /<SWRegistration \/>/);
+    assert.match(wrapper, /<InstallPrompt \/>/,
+      'the component stays mounted globally — the exemption lives inside it, so every other page is untouched');
+  });
+
+  it('keeps the prompt for everyone else, unchanged', () => {
+    assert.match(src, /setTimeout\(\(\) => setVisible\(true\), 1700\)/);
+    assert.match(src, /localStorage.getItem\(INSTALLED_KEY\)/);
+    assert.match(src, /sessionStorage.getItem\(SNOOZE_KEY\)/);
+    assert.match(src, /await event\.prompt\(\)/);
   });
 });
 
