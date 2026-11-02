@@ -4,6 +4,7 @@ import { createClient } from './supabase/server';
 import { revalidatePath } from 'next/cache';
 import {
   buildOverseerDashboardSnapshot,
+  pickRevokeTarget,
   type OverseerChurchItem,
   type OverseerInvite,
   type OverseerTotals,
@@ -106,7 +107,10 @@ export async function createOverseerInvite(formData: FormData) {
     }
 
     const invite: OverseerInvite = {
-      id: row.invite_id ? String(row.invite_id) : undefined,
+      // `id` is the only thing the revoke control can act on, so the create path fills it
+      // from whichever key the RPC returned. Otherwise the invite just created cannot be
+      // revoked from this page without a reload.
+      id: row.invite_id ? String(row.invite_id) : (row.id ? String(row.id) : undefined),
       label,
       code: row.code,
       max_uses: maxUses,
@@ -140,20 +144,24 @@ export async function revokeOverseerInvite(inviteIdentifier: string) {
     return { error: 'Forbidden: overseer access required' };
   }
 
+  // The live signature is `overseer_revoke_invite(p_invite_id uuid)`, and its implementation
+  // scopes the update to the caller's own denomination — both measured on the production
+  // database on 2026-11-02. There is no `p_code` parameter, so the previous retry could never
+  // have succeeded: it turned "this row has no id" into a raw PostgREST error and kept alive a
+  // contract the database does not implement. An identifier that is not a uuid is refused here,
+  // before a request is made.
+  const target = pickRevokeTarget(inviteIdentifier);
+  if (!target.ok) {
+    return { error: target.error };
+  }
+
   try {
-    // Attempt with invite identifier (could be id or code)
     const { error } = await supabase.rpc('overseer_revoke_invite', {
-      p_invite_id: inviteIdentifier,
+      p_invite_id: target.inviteId,
     });
 
     if (error) {
-      // Fallback try with p_code if signature expects code
-      const { error: codeErr } = await supabase.rpc('overseer_revoke_invite', {
-        p_code: inviteIdentifier,
-      });
-      if (codeErr) {
-        return { error: error.message };
-      }
+      return { error: error.message };
     }
 
     revalidatePath('/overseer');

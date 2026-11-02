@@ -5,6 +5,28 @@ import { redirect } from 'next/navigation';
 import { headers } from 'next/headers';
 import { checkRateLimit, getRateLimitIp } from '@/lib/security/rate-limit';
 import { validateSignupCredentials } from '@/lib/signup-security';
+import { activationPathFor, churchAdminPathFor, resolveActivationGate, type ActivationGateRow } from '@/lib/activation-gate';
+
+/**
+ * The one place a church's post-login destination is decided.
+ *
+ * A workspace that has not paid its activation fee has exactly one screen. The
+ * admin layout bounces `/{slug}/admin` to it anyway; sending the pastor there
+ * from the login itself means the sign-in never lands on a dashboard it has to
+ * immediately leave, and — crucially — a pastor who is already signed in is
+ * never handed back to the login form to start again.
+ *
+ * When the church row could not be read at all, the portal path is returned
+ * unchanged: the layout applies the same rule with the same row, and inventing a
+ * destination here would risk a bounce loop between the two.
+ */
+function churchHomeHref(slug: string, church: ActivationGateRow | null | undefined): string {
+  if (!slug) return '/';
+  if (!church) return churchAdminPathFor(slug);
+  return resolveActivationGate(church).decision === 'pay'
+    ? activationPathFor(slug)
+    : churchAdminPathFor(slug);
+}
 
 export type AuthState = {
   error?: string;
@@ -64,11 +86,11 @@ export async function login(prevState: AuthState, formData: FormData): Promise<A
       const { data: church } = await adminSupabase
         .schema('church')
         .from('churches')
-        .select('slug')
+        .select('slug, activation_status, activation_paid_at')
         .eq('id', signedInProfile.tenant_id)
         .maybeSingle();
       if (church?.slug) {
-        return { success: true, redirectTo: `/${church.slug}/admin` };
+        return { success: true, redirectTo: churchHomeHref(church.slug, church) };
       }
     }
 
@@ -92,17 +114,19 @@ export async function login(prevState: AuthState, formData: FormData): Promise<A
             const { data: church } = await adminSupabase
               .schema('church')
               .from('churches')
-              .select('slug')
+              .select('slug, activation_status, activation_paid_at')
               .eq('id', profile.tenant_id)
               .maybeSingle();
 
             if (church?.slug) {
-              return { success: true, redirectTo: `/${church.slug}/admin` };
+              return { success: true, redirectTo: churchHomeHref(church.slug, church) };
             }
           }
 
           if (churchSlug && churchSlug !== 'admin') {
-            return { success: true, redirectTo: `/${churchSlug}/admin` };
+            // Slug from the sign-in form, no church row behind it: the helper
+            // returns the portal path unchanged and lets the layout gate decide.
+            return { success: true, redirectTo: churchHomeHref(churchSlug, null) };
           }
 
           return { success: true, redirectTo: '/signup/provision' };
@@ -177,6 +201,7 @@ export async function login(prevState: AuthState, formData: FormData): Promise<A
 
     // 3. Get the correct slug from churches
     let targetSlug: string | null = null;
+    let targetChurch: ActivationGateRow | null = null;
     const tenantId = profile.tenant_id;
     const appType = profile.app_type;
     
@@ -187,12 +212,13 @@ export async function login(prevState: AuthState, formData: FormData): Promise<A
         const { data: church } = await adminSupabase
           .schema('church')
           .from('churches')
-          .select('slug')
+          .select('slug, activation_status, activation_paid_at')
           .eq('id', tenantId)
           .maybeSingle();
         
         if (church?.slug) {
           targetSlug = church.slug;
+          targetChurch = church;
         }
       }
     }
@@ -205,7 +231,7 @@ export async function login(prevState: AuthState, formData: FormData): Promise<A
       return { success: true, redirectTo: '/signup/provision' };
     }
 
-    return { success: true, redirectTo: `/${targetSlug}/admin` };
+    return { success: true, redirectTo: churchHomeHref(targetSlug, targetChurch) };
   } catch (err: any) {
     if (err?.message === 'NEXT_REDIRECT' || err?.__next_redirect || err?.digest?.startsWith?.('NEXT_REDIRECT')) throw err;
     console.error('[Auth] Login exception:', err);

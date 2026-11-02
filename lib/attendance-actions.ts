@@ -10,53 +10,21 @@ import { membersExpectedAtEvent } from './attendance-streaks';
 import { SignJWT, jwtVerify } from 'jose';
 import { sendSingleSMS } from './sms-actions';
 import { CHURCH_ADMIN_ROLES, hasAllowedRole } from './auth-security';
+import * as usherPasskey from './usher-passkey';
 
 import crypto from 'crypto';
 
-// Returns a human-readable reason when the usher secret is unusable, or null.
-// The login path checks this explicitly so a misconfiguration is reported as a
-// misconfiguration instead of falling through to the generic catch below —
-// which is what it used to do, and which reads as a network blip.
-function usherSecretProblem(): string | null {
-  const jwtSecretValue = process.env.USHER_JWT_SECRET;
-  if (!jwtSecretValue) {
-    return 'USHER_JWT_SECRET is not set. Usher sessions are disabled until it is.';
-  }
-  if (jwtSecretValue === 'REPLACE_ME_WITH_A_STRONG_RANDOM_SECRET') {
-    return 'USHER_JWT_SECRET is still the placeholder value. Set a real 32+ byte secret.';
-  }
-  if (Buffer.byteLength(jwtSecretValue) < 32) {
-    return `USHER_JWT_SECRET is ${Buffer.byteLength(jwtSecretValue)} bytes; at least 32 are required.`;
-  }
-  return null;
-}
+// The usher credential crypto now lives in lib/usher-passkey.ts, so the
+// attendance screen and provisioning can issue a code with the exact same hash
+// this file compares against — without any of it becoming a browser-callable
+// action. These aliases keep every call site below unchanged.
+const usherSecretProblem = usherPasskey.usherSecretProblem;
+const getJwtSecret = usherPasskey.getUsherJwtSecret;
+const computePasskeyHash = usherPasskey.hashUsherPasskey;
 
-function getJwtSecret(): Uint8Array {
-  // F-04: no silent fallback to the service-role key. A dedicated secret is now
-  // mandatory, which is what makes rotation and revocation auditable.
-  const problem = usherSecretProblem();
-  if (problem) {
-    throw new Error(problem);
-  }
-  const jwtSecretValue = process.env.USHER_JWT_SECRET!;
-  // Domain-separate the usher secret to prevent raw key reuse
-  const derivedSecret = crypto.createHmac('sha256', 'usher_jwt_domain_separation').update(jwtSecretValue).digest();
-  return derivedSecret;
-}
-
-function computePasskeyHash(passkey: string): string {
-  const secret = getJwtSecret();
-  return crypto.createHmac('sha256', secret).update(passkey.trim()).digest('hex');
-}
-
+/** Retained for existing callers: the same CSPRNG code the admin button offers. */
 export async function generateSecurePasskey(): Promise<string> {
-  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-  const bytes = crypto.randomBytes(8);
-  let result = '';
-  for (let i = 0; i < 8; i++) {
-    result += chars[bytes[i] % chars.length];
-  }
-  return result;
+  return usherPasskey.generateUsherPasskeyCode();
 }
 
 export async function validateUsherPasskey(churchSlug: string, passkey: string) {
@@ -126,7 +94,7 @@ export async function validateUsherPasskey(churchSlug: string, passkey: string) 
       console.error('[validateUsherPasskey] Church has no usher passkey configured:', canonicalSlug);
       return {
         success: false,
-        error: 'No usher passkey is configured for this church yet. Ask an administrator to set one under Attendance → Usher passkey.',
+        error: 'No usher passkey is configured for this church yet. Ask an administrator to open Attendance — the church code is generated and shown there, under "Usher passkey".',
       };
     }
 

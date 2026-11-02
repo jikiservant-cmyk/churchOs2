@@ -71,6 +71,42 @@ export async function POST(request: Request) {
   }
 }
 
+/**
+ * One line per process about the shape of the inbound signing secret — finding
+ * P2-7 in SECURITY_REVIEW-2026-10-30.md. Reports, never refuses: churches are
+ * live and their provider is already signing with whatever is configured, so a
+ * hard failure here would silently stop activations instead of fixing them.
+ */
+const secretWarnFlag = globalThis as unknown as { __najikiWebhookSecretWarned?: boolean };
+
+function reportWebhookSecretShape(
+  dedicatedSecret: string | undefined,
+  apiKey: string | undefined,
+): void {
+  if (secretWarnFlag.__najikiWebhookSecretWarned) return;
+  secretWarnFlag.__najikiWebhookSecretWarned = true;
+  const resolved = dedicatedSecret || apiKey;
+  if (!resolved) return; // the caller already logged the unconfigured case
+  if (!dedicatedSecret) {
+    console.warn(
+      '[Najiki Webhook] NAJIKI_WEBHOOK_SECRET is unset, so callbacks are verified with NAJIKI_API_KEY — '
+      + 'the same credential this server signs outbound payments with. Give the webhook its own secret in '
+      + 'Vercel and configure the provider to sign with it.',
+    );
+    return;
+  }
+  if (apiKey && dedicatedSecret === apiKey) {
+    console.warn(
+      '[Najiki Webhook] NAJIKI_WEBHOOK_SECRET is set but identical to NAJIKI_API_KEY; the two are meant to '
+      + 'be different credentials. Rotate one.',
+    );
+    return;
+  }
+  if (resolved.length < 32) {
+    console.warn('[Najiki Webhook] the inbound signing secret is shorter than 32 characters; replace it.');
+  }
+}
+
 async function handlePost(request: Request) {
   // 1. Bound request size before parsing; signature verification still uses the exact bytes.
   const MAX_WEBHOOK_BYTES = 64 * 1024;
@@ -101,12 +137,23 @@ async function handlePost(request: Request) {
   );
 
   // 2. Verify the signature (fail closed, replay-protected).
-  const secret = process.env.NAJIKI_WEBHOOK_SECRET || process.env.NAJIKI_API_KEY;
+  const dedicatedSecret = process.env.NAJIKI_WEBHOOK_SECRET;
+  const apiKey = process.env.NAJIKI_API_KEY;
+  // The API key is the credential this server uses to SEND money, so accepting it
+  // as the inbound signing secret means anyone who ever reads that outbound
+  // credential — an env screen-share, a leaked .env, a preview log — can forge a
+  // `paid` event and activate a church without paying. The fallback stays (live
+  // deployments sign with it today, and refusing their callbacks would be worse)
+  // but it is reported once per process, and rotating to a dedicated secret is a
+  // two-minute change in Vercel.
+  const secret = dedicatedSecret || apiKey;
 
   if (!secret) {
     console.error('[Najiki Webhook] NAJIKI_WEBHOOK_SECRET / NAJIKI_API_KEY not set — rejecting webhook');
     return NextResponse.json({ error: 'Webhook secret unconfigured' }, { status: 500 });
   }
+
+  reportWebhookSecretShape(dedicatedSecret, apiKey);
 
   const verification = verifyNajikiWebhook({ rawBody, headers: request.headers, secret });
   if (!verification.ok) {

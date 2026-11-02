@@ -153,16 +153,18 @@ export default function OverseerDashboardClient({
     }
   };
 
-  const handleRevokeInvite = async (inviteIdentifier: string) => {
+  // An invite id, never a code: `overseer_revoke_invite(p_invite_id uuid)` is the live
+  // signature, so a code could not be acted on even when the card displays one.
+  const handleRevokeInvite = async (inviteId: string) => {
     if (!confirm('Are you sure you want to revoke this invite code?')) return;
 
     try {
-      const res = await revokeOverseerInvite(inviteIdentifier);
+      const res = await revokeOverseerInvite(inviteId);
       if (res.error) {
         toast.error(res.error);
       } else {
         toast.success('Invite code revoked');
-        setInvites(prev => prev.filter(inv => (inv.id || inv.code) !== inviteIdentifier));
+        setInvites(prev => prev.map(inv => inv.id === inviteId ? { ...inv, revoked: true } : inv));
       }
     } catch (err: any) {
       toast.error(err?.message || 'Failed to revoke invite');
@@ -683,9 +685,12 @@ export default function OverseerDashboardClient({
                       </div>
 
                       <button
-                        onClick={() => handleRevokeInvite(identifier)}
-                        disabled={!inv.id && !inv.code}
-                        title="Revoke Invite Code"
+                        onClick={() => inv.id && handleRevokeInvite(inv.id)}
+                        disabled={!inv.id}
+                        title={inv.id
+                          ? 'Revoke Invite Code'
+                          : 'This row came back without an invite id, so it cannot be revoked from here. '
+                            + 'The code stays live until it expires or reaches its allowed number of uses.'}
                         className="p-2 text-rose-700 hover:bg-rose-100 rounded-lg transition-colors disabled:cursor-not-allowed disabled:opacity-50"
                       >
                         <Trash2 className="w-3.5 h-3.5" />

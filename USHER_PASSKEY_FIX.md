@@ -159,3 +159,58 @@ code. Error messages now distinguish every case:
 | `No usher passkey is configured…` | 012 not applied and the row is empty |
 | `Invalid passkey format.` | not 6–32 chars, or outside `A-Z a-z 0-9 _ -` |
 | `Invalid passkey. Please check…` | genuinely wrong code |
+
+## Follow-up (2026-10-30): new churches were arriving with no code at all
+
+Reported as "the usher portal code is not there for the new churches". The portal was
+not broken — nothing issued a credential. `church.churches.passkey` takes its value
+from a column DEFAULT that `supabase-schema.sql` declares, but on a live project that
+DEFAULT only arrives with migration 014 (which installs it solely when the column has
+none), and `provision_church_v3` does not name the column. Where 014 had not run, every
+new church was created with `passkey IS NULL`: the admin Attendance field rendered empty,
+"Copy portal link" copied nothing, and the portal answered
+*"No usher passkey is configured for this church yet…"*.
+
+Now the code is guaranteed by the application rather than by whichever migrations happen
+to have been applied:
+
+* `lib/usher-passkey.ts` holds the crypto and the issuance rule in one place (it is not a
+  `'use server'` module, so `ensureChurchUsherPasskey` cannot be called from a browser).
+  `lib/attendance-actions.ts` keeps its behaviour through aliases.
+* Provisioning issues the code the moment the workspace exists. A failure to write it is
+  logged, never fatal — the church is already created.
+* The admin Attendance screen issues it on first visit, which repairs every existing
+  church with a blank row without touching a single credential that already exists.
+* `migrations/018_usher_passkey_default.sql` adds the DB-side DEFAULT for rows created
+  outside the app. It writes no code and bumps no `passkey_version`; run
+  `012_usher_passkey_backfill.sql` for existing blank rows.
+
+A code is never re-issued where one exists: rotation is a deliberate act by a pastor, and
+silently replacing a church's credential would lock its ushers out mid-service.
+
+## Follow-up (2026-11-02): the install prompt no longer interrupts the usher link
+
+The PWA install dialog used to appear on every surface, including the portal link a
+pastor sends a volunteer. That link is opened once, in a hurry, at a door — usually from
+WhatsApp or SMS — and a full-screen "Install churchOs" modal in front of the check-in
+screen produced support calls, not installs. The prompt is now suppressed on
+`/c/{slug}/usher` and its sub-pages only. Nothing else changed: admin, pastor, giving and
+the public pages still ask on every open until the app is installed, "Not now" still lasts
+only for the session, and the manifest, the icons and the service worker are untouched, so
+an usher who *wants* the app on their home screen can still install it from any other page.
+
+Two details worth knowing before changing this again:
+
+* The route test lives in `lib/pwa.ts` (`isUsherPortalPath`) and matches whole path
+  segments, so `/c/ekero/usher-notes` and `/usher-admin` are not exempt. Gating on
+  `pathname.startsWith('/usher')` was the tempting version of this and it would have
+  silenced the prompt on unrelated pages.
+* The component reads the path from `usePathname()`, not from a `window.location`
+  snapshot, and on the exempt path it still registers a `beforeinstallprompt` listener that
+  calls `preventDefault()`. Hiding our dialog without swallowing that event hands the ask
+  back to Chrome as its own install mini-infobar, which is the same interruption wearing a
+  different hat. iOS has no install event at all, so there it was never a programmatic
+  prompt to begin with — only our dialog, which is now absent there too.
+
+`tests/pwa.test.ts` pins the matcher, the swallowing listener, and the fact that the
+component is still mounted globally, so "the app must ask" elsewhere stays true.

@@ -2,8 +2,51 @@ import { createClient as createSupabaseClient } from '@supabase/supabase-js';
 import { randomUUID } from 'crypto';
 import { normalizeUgPhone } from '../utils.ts';
 import { createNajikiPayment, najikiApplicationCode, najikiPaymentTypeCode, NajikiApiError } from '../najiki/client.ts';
+import { ACTIVATION_STANDARD_FEE_UGX, resolveActivationFeeUgx } from '../activation-fee.ts';
+import {
+  describeActivationPromptWindow,
+  resolveActivationPromptWindowMs,
+} from '../activation-prompt-window.ts';
+import { resolveActivationGate } from '../activation-gate.ts';
 
-export const ACTIVATION_FEE_UGX = 17000;
+const resolvedActivationFee = resolveActivationFeeUgx(process.env.ACTIVATION_FEE_UGX);
+
+if (resolvedActivationFee.rejected) {
+  console.error(
+    `[Activation] ACTIVATION_FEE_UGX="${process.env.ACTIVATION_FEE_UGX}" is not usable (${resolvedActivationFee.rejected}). `
+    + `Charging the standard UGX ${ACTIVATION_STANDARD_FEE_UGX.toLocaleString('en-US')} instead.`,
+  );
+} else if (resolvedActivationFee.override) {
+  console.warn(
+    `[Activation] Test pricing ACTIVE: charging UGX ${resolvedActivationFee.amount.toLocaleString('en-US')} `
+    + `instead of the standard UGX ${ACTIVATION_STANDARD_FEE_UGX.toLocaleString('en-US')}. `
+    + 'Remove the ACTIVATION_FEE_UGX environment variable to restore standard pricing.',
+  );
+}
+
+/** What a church is charged right now. Server-side only — never re-derive this in the browser. */
+export const ACTIVATION_FEE_UGX = resolvedActivationFee.amount;
+/** The undiscounted price, for copy and for detecting that a test override is live. */
+export const ACTIVATION_PRICE_UGX = ACTIVATION_STANDARD_FEE_UGX;
+/** True while a non-standard (test) fee is in effect. */
+export const ACTIVATION_FEE_IS_TEST_PRICING = resolvedActivationFee.override;
+// How long the activation screen tells a pastor they have to approve the prompt on
+// the handset. Resolved here, next to the fee, for the same reason: it is a Vercel
+// setting rather than a number baked into a client bundle, and it must not be read
+// from process.env inside the component.
+const resolvedPromptWindow = resolveActivationPromptWindowMs(process.env.ACTIVATION_PROMPT_WINDOW_MS);
+if (resolvedPromptWindow.rejected !== null) {
+  console.error(
+    `[Activation] ACTIVATION_PROMPT_WINDOW_MS="${process.env.ACTIVATION_PROMPT_WINDOW_MS}" is not usable `
+    + `(${resolvedPromptWindow.rejected}). The screen is announcing the default `
+    + `${describeActivationPromptWindow(resolvedPromptWindow.windowMs)} window instead.`,
+  );
+}
+/** Milliseconds the handset prompt is presented as still being live. */
+export const ACTIVATION_PROMPT_WINDOW_MS = resolvedPromptWindow.windowMs;
+/** The same number as a sentence ("5 minutes"), so no copy can drift from the setting. */
+export const ACTIVATION_PROMPT_WINDOW_LABEL = describeActivationPromptWindow(resolvedPromptWindow.windowMs);
+
 export const ACTIVATION_CURRENCY = 'UGX';
 export const ACTIVATION_PLAN_PRICES = {
   standard: ACTIVATION_FEE_UGX,
@@ -70,6 +113,8 @@ export async function getChurchActivationStatus(churchId: string): Promise<Activ
       .limit(1)
       .maybeSingle();
 
+    // One rule for every surface: the gate decides, this endpoint only reports it.
+    const gate = resolveActivationGate(church);
     const activationStatus = (church.activation_status || 'pending_payment') as 'active' | 'pending_payment' | 'suspended';
 
     return {
@@ -78,7 +123,7 @@ export async function getChurchActivationStatus(churchId: string): Promise<Activ
       churchSlug: church.slug,
       activationStatus,
       activationPaidAt: church.activation_paid_at,
-      isActive: activationStatus === 'active',
+      isActive: gate.decision === 'allow',
       latestPayment: latestPayment ? {
         id: latestPayment.id,
         amount: latestPayment.amount,
@@ -139,7 +184,10 @@ export async function startActivationPayment({
     return { success: false, error: 'Church workspace not found' };
   }
 
-  if (church.activation_status === 'active') {
+  // Refuses double-payment: if the shared gate already considers this church
+  // settled, charging it again would create a second ledger row for a church
+  // that does not need one (and the settlement RPC flips nothing).
+  if (resolveActivationGate(church).decision === 'allow') {
     return {
       success: true,
       alreadyActive: true,

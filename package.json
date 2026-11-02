@@ -7,14 +7,15 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint .",
-    "test": "node --test tests/*.test.ts && tsx --test tests/sms-topup-e2e.ts tests/activation-e2e.ts tests/access-fallback-e2e.ts",
+    "test": "node --test tests/*.test.ts && tsx --test tests/sms-topup-e2e.ts tests/activation-e2e.ts tests/access-fallback-e2e.ts tests/auth-destination-e2e.ts",
     "clean": "next clean",
     "typecheck": "tsc --noEmit",
     "check": "npm run typecheck && npm run lint && npm test && npm run security:audit && npm run build",
     "security:audit": "npm audit --omit=dev --audit-level=moderate",
     "test:migrations": "node --test tests/sql/passkey_migration.test.mjs",
     "test:sql": "node --test tests/sql/*.test.mjs",
-    "capture:rpc": "node scripts/capture-rpc.mjs"
+    "capture:rpc": "node scripts/capture-rpc.mjs",
+    "probe:admin-identity": "node scripts/probe-admin-client-identity.mjs"
   },
   "dependencies": {
     "@fontsource/outfit": "^5.3.0",

@@ -386,19 +386,82 @@ USING (true);
 -- Churches Table RLS (church schema)
 ALTER TABLE church.churches ENABLE ROW LEVEL SECURITY;
 
+-- SECURITY (see SECURITY_REVIEW-2026-10-30.md, P0-1): this was
+--   CREATE POLICY "Admins can manage their associated church" ON church.churches
+--   FOR ALL TO authenticated USING (id = church.my_tenant_id()) WITH CHECK (...)
+-- `FOR ALL` means UPDATE and DELETE, and the predicate checks only *which* church —
+-- never the role, never the column. activation_status, activation_paid_at and
+-- passkey live on this row, so any signed-in account in a church (pastor, staff or
+-- member) could clear its own activation gate, or swap the usher portal code, with a
+-- single PATCH to /rest/v1/churches using the public anon key.
+--
+-- Reads stay, writes do not. Every legitimate write to this row runs server-side
+-- under the service role (lib/supabase/server.ts createAdminClient, the activation
+-- module's own client, and the two Edge functions), so narrowing this policy costs
+-- no feature — it removes a door the application never uses. The guard trigger below
+-- is the second lock: it holds even if a wide policy is ever re-created by hand.
 DROP POLICY IF EXISTS "Admins can view their associated church" ON church.churches;
 DROP POLICY IF EXISTS "Admins can manage their associated church" ON church.churches;
-CREATE POLICY "Admins can manage their associated church" 
-  ON church.churches FOR ALL 
-  TO authenticated 
-  USING (id = church.my_tenant_id())
-  WITH CHECK (id = church.my_tenant_id());
+CREATE POLICY "Churches are readable by their own members"
+  ON church.churches FOR SELECT
+  TO authenticated
+  USING (id = church.my_tenant_id());
 
 DROP POLICY IF EXISTS "Service role full access on churches" ON church.churches;
 CREATE POLICY "Service role full access on churches" 
 ON church.churches FOR ALL 
 TO service_role 
 USING (true);
+
+-- Billing and credential columns: writable only by the application's service-role
+-- connection, whatever any policy says. current_setting('request.jwt.claims') is
+-- set by PostgREST from the verified JWT, so a client cannot forge the role; an
+-- absent claim string means a trusted server connection (service role, an Edge
+-- function, or a human in the SQL editor), which is allowed.
+CREATE OR REPLACE FUNCTION church.guard_church_privileged_columns()
+RETURNS TRIGGER AS $$
+DECLARE
+  v_claims jsonb := nullif(current_setting('request.jwt.claims', true), '')::jsonb;
+  v_role text := coalesce(v_claims ->> 'role', 'service_role');
+  v_new jsonb;
+  v_old jsonb;
+  v_column text;
+  v_protected text[] := ARRAY[
+    'activation_status', 'activation_paid_at',
+    'passkey', 'passkey_hash', 'passkey_version', 'passkey_updated_at',
+    'is_active'
+  ];
+BEGIN
+  -- An absent claim string means a trusted server connection (service role, an Edge
+  -- function, or a human in the SQL editor). Only a JWT-bearing, non-service role is
+  -- challenged. The claims GUC is written by PostgREST from the verified token, so a
+  -- client cannot set it.
+  IF v_role = 'service_role' THEN
+    RETURN NEW;
+  END IF;
+
+  -- Compared through jsonb rather than `NEW.col IS DISTINCT FROM OLD.col` on
+  -- purpose: activation_status arrives with 017 and the passkey columns with 011, and
+  -- a trigger body that names a column the database does not have does not fail to
+  -- install — it fails EVERY UPDATE to the table at run time. The ? test skips a
+  -- column that is not there yet instead of taking the workspace down with it.
+  v_new := to_jsonb(NEW);
+  v_old := to_jsonb(OLD);
+  FOREACH v_column IN ARRAY v_protected LOOP
+    IF v_new ? v_column AND (v_new -> v_column) IS DISTINCT FROM (v_old -> v_column) THEN
+      RAISE EXCEPTION
+        'church.churches: the billing and credential column % is written only by the application service role', v_column
+        USING ERRCODE = '42501';
+    END IF;
+  END LOOP;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, church;
+
+DROP TRIGGER IF EXISTS guard_church_privileged_columns ON church.churches;
+CREATE TRIGGER guard_church_privileged_columns
+  BEFORE UPDATE ON church.churches
+  FOR EACH ROW EXECUTE FUNCTION church.guard_church_privileged_columns();
 
 -- 5.1 Removed: Schools feature disabled to focus on churches
 
@@ -411,7 +474,8 @@ BEGIN
   ON CONFLICT (id) DO NOTHING;
   RETURN NEW;
 END;
-$$ LANGUAGE plpgsql SECURITY DEFINER;
+$$ LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = pg_catalog, public, church;  -- every object below is schema-qualified, so this changes no resolution today; it keeps a caller-chosen path (including a temporary schema) from becoming the resolution order for a definer trigger that writes tenants and wallets
 
 DROP TRIGGER IF EXISTS trigger_create_tenant_for_church ON church.churches;
 CREATE TRIGGER trigger_create_tenant_for_church
@@ -466,7 +530,8 @@ BEGIN
   ON CONFLICT (tenant_id) DO NOTHING;
   RETURN NEW;
 END;
-$$ LANGUAGE plpgsql SECURITY DEFINER;
+$$ LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = pg_catalog, public, church;  -- every object below is schema-qualified, so this changes no resolution today; it keeps a caller-chosen path (including a temporary schema) from becoming the resolution order for a definer trigger that writes tenants and wallets
 
 DROP TRIGGER IF EXISTS trigger_initialize_tenant_wallet ON public.tenants;
 CREATE TRIGGER trigger_initialize_tenant_wallet
@@ -661,6 +726,10 @@ REVOKE EXECUTE ON FUNCTION public.apply_wallet_transaction(uuid, bigint, text, t
 GRANT EXECUTE ON FUNCTION public.apply_wallet_transaction(uuid, bigint, text, text) TO service_role;
 
 -- RPC: Cascade delete church tenant (Service Role Only)
+-- Measured on the live project 2026-11-02: production's function of this name takes NO
+-- arguments (it is a trigger function), so the REVOKE below has never applied to it, and
+-- re-running this file would create an overload beside it rather than change it. Both
+-- spellings are covered by migrations/023 Part B; fix the live signature drift there.
 CREATE OR REPLACE FUNCTION church.delete_church_tenant_cascade(p_tenant_id uuid)
 RETURNS void AS $$
 BEGIN
@@ -1020,6 +1089,46 @@ CREATE OR REPLACE VIEW public.churches_public WITH (security_invoker = true) AS
   FROM church.churches;
 
 GRANT SELECT ON public.churches_public TO anon, authenticated, service_role;
+
+-- BEGIN 022-CONVERGED (kept in step with migrations/022_hide_church_credential_columns.sql;
+-- tests/sql/church_column_privileges.test.mjs asserts the two agree, because a fresh
+-- install must not be born able to read its own usher credential out of the row)
+--
+-- RLS hides rows, never columns: `id = church.my_tenant_id()` lets any signed-in account
+-- of a church read every column of its own row, including `passkey` — the shared usher
+-- code, which the attendance screen shows to the pastor. Give the browser roles a
+-- column-level read instead: everything the tenant-facing screens select, and none of the
+-- four credential columns. Reads of those four in this application go through a
+-- service-role connection (attendance page, usher-passkey issue/rotate, requireTenant),
+-- so service_role keeps the table-level privilege and nothing here breaks the app.
+DO $$
+DECLARE
+  v_secret text[] := ARRAY['passkey', 'passkey_hash', 'passkey_version', 'passkey_updated_at'];
+  v_list   text;
+  v_count  integer;
+BEGIN
+  SELECT string_agg(quote_ident(c.column_name), ', ' ORDER BY c.ordinal_position), count(*)
+    INTO v_list, v_count
+    FROM information_schema.columns c
+   WHERE c.table_schema = 'church' AND c.table_name = 'churches'
+     AND NOT (c.column_name = ANY (v_secret));
+
+  IF v_list IS NULL OR v_count = 0 THEN
+    RAISE EXCEPTION 'supabase-schema: church.churches has no non-credential columns to grant';
+  END IF;
+
+  EXECUTE format('REVOKE SELECT (%s) ON church.churches FROM anon, authenticated',
+    (SELECT string_agg(quote_ident(x), ', ')
+       FROM unnest(v_secret) x
+      WHERE exists (SELECT 1 FROM information_schema.columns c
+                     WHERE c.table_schema = 'church' AND c.table_name = 'churches'
+                       AND c.column_name = x)));
+
+  EXECUTE 'REVOKE SELECT ON church.churches FROM anon, authenticated';
+  EXECUTE format('GRANT SELECT (%s) ON church.churches TO anon, authenticated', v_list);
+END
+$$;
+-- END 022-CONVERGED
 
 -- RPC Functions for Attendance
 CREATE OR REPLACE FUNCTION church.get_or_create_event(

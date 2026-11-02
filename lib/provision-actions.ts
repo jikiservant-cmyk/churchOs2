@@ -4,6 +4,7 @@ import { createAdminClient, createClient } from '@/lib/supabase/server';
 import { headers } from 'next/headers';
 import { canProvisionChurch } from '@/lib/provisioning-security';
 import { checkRateLimit, getRateLimitIp } from '@/lib/security/rate-limit';
+import { ensureChurchUsherPasskey } from '@/lib/usher-passkey';
 
 export type ProvisionState = {
   error?: string;
@@ -11,6 +12,8 @@ export type ProvisionState = {
   tenantId?: string;
   slug?: string;
   appType?: 'church';
+  /** Usher portal code for the new workspace. Absent when it could not be issued. */
+  usherPasskey?: string;
 };
 
 export async function provisionTenant(prevState: ProvisionState, formData: FormData): Promise<ProvisionState> {
@@ -160,13 +163,33 @@ export async function provisionTenant(prevState: ProvisionState, formData: FormD
     }
 
     console.log('[Provisioning] Success!', { tenantId, slug: sanitizedSlug });
-    
+
+    // The usher portal is useless without a code, and `provision_church_v3` is a
+    // database function this repository does not own — on a project where
+    // migration 014 has not run, the column has no DEFAULT and the new row is
+    // created with none. Issue the code here instead of relying on whichever
+    // migrations happen to have been applied, so a church is usable the moment it
+    // exists. A failure to write is never fatal to provisioning: the church is
+    // created, and the attendance screen issues the code on first visit.
+    let usherPasskey: string | undefined;
+    try {
+      const ensured = await ensureChurchUsherPasskey(await createAdminClient(), String(tenantId));
+      if (ensured.status === 'generated' || ensured.status === 'present') {
+        usherPasskey = ensured.passkey;
+      } else {
+        console.warn(`[Provisioning] usher passkey not issued for ${sanitizedSlug}: ${ensured.reason}`);
+      }
+    } catch (passkeyError) {
+      console.warn('[Provisioning] usher passkey step failed:', passkeyError instanceof Error ? passkeyError.message : passkeyError);
+    }
+
     // We navigate on the client side to avoid Next.js action redirect issues
     return { 
       success: true, 
       tenantId, 
       slug: sanitizedSlug,
-      appType 
+      appType,
+      ...(usherPasskey ? { usherPasskey } : {}),
     };
 
   } catch (err: any) {

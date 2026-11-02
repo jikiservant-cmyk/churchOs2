@@ -1,4 +1,5 @@
 import type {NextConfig} from 'next';
+import { resolveFrameAncestors } from './lib/security/frame-ancestors';
 
 // Next.js normally accepts same-origin Server Actions. Only add an exact
 // configured application host for reverse-proxy deployments; broad provider
@@ -30,6 +31,20 @@ const allowedOrigins = [
   ...(vercelHost ? [vercelHost] : []),
 ];
 
+// Which parent pages may embed churchOs in an iframe, and why that has to be an
+// explicit answer: the session cookies are SameSite=None (see proxy.ts and the
+// lib/security/frame-ancestors.ts header) so an embedded workspace keeps them —
+// which also means nothing else in the app currently refuses to be framed. The
+// reasoning and the production-only rule live in lib/security/frame-ancestors.ts;
+// the tests for both branches are in tests/security-controls.test.ts.
+const embedHostsRaw = process.env.EMBED_HOSTS;
+const frameAncestors = resolveFrameAncestors({
+  isProduction: process.env.NODE_ENV === 'production',
+  appHosts: allowedOrigins,
+  embedHostsRaw,
+  allowAnyHost: (embedHostsRaw ?? '').trim() === '*',
+});
+
 const nextConfig: NextConfig = {
   // Vercel handles output automatically — don't set 'standalone' (breaks Netlify & Vercel edge)
   reactStrictMode: true,
@@ -53,9 +68,11 @@ const nextConfig: NextConfig = {
     ],
   },
   async headers() {
-    // Low-risk baseline headers. A Content-Security-Policy is deliberately not
-    // set here: Next.js injects inline bootstrap scripts, so a CSP must be
-    // introduced with nonces and tested against every page before deploying.
+    // Low-risk baseline headers. A full Content-Security-Policy is deliberately not
+    // set here: Next.js injects inline bootstrap scripts, so that must be introduced
+    // with nonces and tested against every page before deploying. frame-ancestors is
+    // the one CSP directive that carries no such risk, and it is the one that closes
+    // the framing hole left open by SameSite=None cookies.
     const baseline = [
       { key: 'X-Content-Type-Options', value: 'nosniff' },
       { key: 'Referrer-Policy', value: 'strict-origin-when-cross-origin' },
@@ -64,6 +81,9 @@ const nextConfig: NextConfig = {
     // HSTS only over HTTPS; enabling it on a plain-HTTP host would poison it.
     if (process.env.NODE_ENV === 'production') {
       baseline.push({ key: 'Strict-Transport-Security', value: 'max-age=63072000; includeSubDomains' });
+    }
+    if (frameAncestors) {
+      baseline.push({ key: 'Content-Security-Policy', value: `frame-ancestors ${frameAncestors}` });
     }
     return [{ source: '/:path*', headers: baseline }];
   },

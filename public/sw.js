@@ -13,7 +13,7 @@
  * cheap Android phones over metered connections, so the offline shell is worth
  * having; stale data is not.
  *
- *   navigations      network-first, cached copy as offline fallback
+ *   navigations      network-first; only PUBLIC pages keep a cached copy
  *   build output     cache-first (/_next/static is content-hashed, immutable)
  *   icons/fonts      stale-while-revalidate
  *   everything else  untouched — no interception at all
@@ -22,7 +22,10 @@
  * management data must be live or fail visibly.
  */
 
-const VERSION = 'v2';
+// v3: private navigations are no longer cached at all (see isPublicPage), and the
+// version bump is what makes every previously installed v2 shell cache — which may
+// hold a member roster someone else can open offline — get deleted on activate.
+const VERSION = 'v3';
 const SHELL_CACHE = `churchos-shell-${VERSION}`;
 const ASSET_CACHE = `churchos-assets-${VERSION}`;
 const OFFLINE_URL = '/offline';
@@ -80,14 +83,64 @@ function isCacheableAsset(pathname) {
   );
 }
 
+/**
+ * The only pages allowed into the offline shell cache.
+ *
+ * Default-deny, because Cache Storage is not a secret store: anything written here
+ * stays readable from devtools, and stays readable after logout, on the shared church
+ * tablet (sign-out clears the cookie, not this cache). Everything the app actually
+ * holds under app/ that is not listed here belongs to somebody — /c/<slug>/**,
+ * /admin/**, /applet/app/**, /overseer/**, /super-admin/**, /messages/**, and every
+ * /api/** response — so a page has to be *known* public to be kept.
+ *
+ * A new public marketing page is therefore not cached offline until it is added
+ * here, and the fallback for it is /offline. That is the smaller wrong: the cost of
+ * forgetting one is a duller offline page, the cost of forgetting to exclude a
+ * private one is someone else's member roster.
+ *
+ * tests/pwa.test.ts asserts every top-level route in app/ is either listed here
+ * or refused, so this list cannot drift away from the app silently.
+ */
+const PUBLIC_OFFLINE_PATHS = new Set([
+  OFFLINE_URL,
+  '/',
+  '/login',
+  '/signup',
+  '/denominations',
+  '/d',
+]);
+
+function isPublicPage(request) {
+  let path = '/';
+  try {
+    path = new URL(request.url).pathname || '/';
+  } catch {
+    return false;
+  }
+  // Normalise the trailing slash so /login/ is the same page as /login, but treat
+  // anything deeper than one segment as not-public: there is no public route here
+  // with a sub-path, and /c/ekero must never match a hypothetical '/c/'.
+  const normalised = path.length > 1 ? path.replace(/\/+$/, '') : path;
+  return PUBLIC_OFFLINE_PATHS.has(normalised === '' ? '/' : normalised);
+}
+
 async function networkFirstNavigation(request) {
   const cache = await caches.open(SHELL_CACHE);
   try {
     const response = await fetch(request);
     // Only keep a successful, same-origin HTML response. Caching a redirect to
     // /login would strand the user on it offline.
-    if (response.ok && response.type === 'basic') {
+    //
+    // And only for public pages. Everything under a church workspace is per-user
+    // data, and Cache Storage is not a secret store: a roster page put there stays
+    // readable from DevTools, and stays readable after logout, on the shared church
+    // tablet — logout clears the cookie, not this cache. Offline access to member
+    // data was never a requirement; serving the offline shell instead is the point.
+    if (response.ok && response.type === 'basic' && isPublicPage(request)) {
       cache.put(request, response.clone());
+    } else if (response.ok && !isPublicPage(request)) {
+      // Drop anything a pre-v3 worker left behind for this URL.
+      cache.delete(request);
     }
     return response;
   } catch {
