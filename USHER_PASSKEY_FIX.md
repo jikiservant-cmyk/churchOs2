@@ -266,3 +266,58 @@ dashboard; wrong passkeys are rejected with no cookie; a forged `passkey_check`
 is bounced (307); logout still clears the session (303 + expired Set-Cookie, 307
 afterwards, cross-origin 403). `tsc` 0 errors · `eslint` clean · 281/281 tests ·
 `next build` OK.
+
+## Correction (2026-11-04): the live schema reportedly HAS the 011 columns — the fallbacks above are a compatibility path, not the established production root cause
+
+A fresh inspection of the Supabase project (2026-11-04) found `passkey_hash`,
+`passkey_version` and `passkey_updated_at` all present on `church.churches`.
+That conflicts with the 2026-10-30 live check recorded at the top of this file,
+which found them absent. Both observations can be true only if 011 (or
+equivalent DDL) was applied in between, or if the earlier check and the current
+inspection looked at different projects. Until the deployed app's connection is
+confirmed, **do not treat 42703 as the established production root cause.** What
+stands regardless:
+
+* The degraded paths ship as a compatibility layer for databases without 011,
+  and change nothing on a fully migrated one — every degraded branch engages
+  only on `42703`/`PGRST204`.
+* The readable `passkey` column is a credential and stays protected as one:
+  column-level `REVOKE` for `anon`/`authenticated` on all four credential
+  columns (022, mirrored in `supabase-schema.sql`, pinned by
+  `tests/sql/church_column_privileges.test.mjs`), `churches_public` without
+  secrets, and every application read behind the service-role connection.
+
+### Production verification checklist (things this repo cannot see)
+
+1. **Which project is the deployed app actually connected to?** Compare
+   `NEXT_PUBLIC_SUPABASE_URL` in the deployment's environment (Vercel →
+   Settings → Environment Variables, for Production *and* Preview) with the
+   project reference of the database that was inspected. A mismatch produces
+   "Invalid passkey" or "Church not found." with a code that is correct
+   somewhere else.
+2. **`USHER_JWT_SECRET`** — must exist in the deployment environment, must not
+   be the `REPLACE_ME_WITH_A_STRONG_RANDOM_SECRET` placeholder from
+   `.env.example`, and must be 32+ bytes. Any of those three fails **every**
+   login with "Usher login is misconfigured…" regardless of the passkey or the
+   schema. This is the most likely cause when the schema is complete.
+3. **Postgres/PostgREST logs** — on the project the app really points at, search
+   the logs for `42703` around login attempts. Present → the migration is
+   genuinely missing there and the fallback engages. Absent → the failure is
+   above, or the credential itself (see 4).
+4. **The credential row** — `SELECT slug, passkey, passkey_hash, passkey_version
+   FROM church.churches WHERE slug = '<the-slug-tested>';` (run it in the SQL
+   editor of the connected project). If `passkey` is NULL/empty while
+   `passkey_hash` is set, no typed code can ever match — open the admin
+   Attendance screen once so `ensureChurchUsherPasskey` issues a code.
+5. **The URL scheme the portal is opened on** — over plain `http://` (LAN
+   tablet), the previously hardcoded `Secure` flag made the browser discard the
+   session cookie: the toast said "Access granted" and the dashboard bounced
+   back to the passkey screen. The cookie flag is now protocol-aware (secure on
+   every HTTPS host and whenever the proxy does not explicitly say `http`), so
+   this path works; HTTPS deployments are unchanged.
+
+### Deploy-note for this correction
+
+No migration accompanies it. If verification (2) shows the secret missing or
+placeholder, set it in the deployment environment and redeploy — nothing in the
+database changes, and existing churches keep their codes.

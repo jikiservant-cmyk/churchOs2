@@ -64,6 +64,24 @@ export function readableUsherPasskeyMatches(stored: unknown, provided: string): 
 }
 
 /**
+ * Whether the usher session cookie may carry the `Secure` flag for this request.
+ *
+ * The flag was hardcoded `true`, which is right on every HTTPS host (Vercel
+ * included — it always sends `x-forwarded-proto: https`) but silently breaks
+ * a portal reached over plain HTTP: the browser drops the cookie, the login
+ * toast says "Access granted", and the dashboard bounces straight back to the
+ * passkey screen — the portal "doesn't open even with the correct passkey".
+ * A church running check-in on a local-network tablet hits exactly this.
+ *
+ * Fail secure: only an explicit `http` from the proxy relaxes the flag; a
+ * missing or ambiguous header stays `Secure`.
+ */
+export function usherCookieIsSecure(xForwardedProto: string | null | undefined): boolean {
+  const first = (xForwardedProto ?? '').split(',')[0]?.trim().toLowerCase();
+  return first !== 'http';
+}
+
+/**
  * Re-bind a session whose database has no `passkey_version` column yet.
  * The token carries `passkey_check` — the HMAC of the code that authenticated
  * it, upper-cased exactly like `readableUsherPasskeyMatches` compares — and the

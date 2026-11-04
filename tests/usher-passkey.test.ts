@@ -14,6 +14,7 @@ import {
   readableUsherPasskeyMatches,
   readUsableUsherPasskey,
   usherSecretProblem,
+  usherCookieIsSecure,
   usherSessionFingerprintValid,
 } from '../lib/usher-passkey.ts';
 
@@ -338,6 +339,20 @@ describe('Usher passkey — where the guarantee is enforced', () => {
     );
     assert.match(migration, /ALTER COLUMN passkey SET DEFAULT/);
     assert.match(migration, /SELECT column_default INTO v_default/);
+  });
+});
+
+describe('usherCookieIsSecure — the flag that decides whether the session survives the login', () => {
+  test('Secure everywhere HTTPS can reach, relaxed only by an explicit plain-HTTP proxy hop', () => {
+    assert.equal(usherCookieIsSecure('https'), true, 'Vercel always reports https');
+    assert.equal(usherCookieIsSecure('https,http'), true, 'the client-facing hop decides');
+    assert.equal(usherCookieIsSecure('HTTP'), false, 'the comparison is case-insensitive');
+    assert.equal(usherCookieIsSecure(null), true, 'no header fails secure');
+    assert.equal(usherCookieIsSecure(undefined), true, 'missing header fails secure');
+    assert.equal(usherCookieIsSecure(''), true, 'empty header fails secure');
+    assert.equal(usherCookieIsSecure('ftp'), true, 'anything unrecognised fails secure');
+    assert.equal(usherCookieIsSecure('http'), false, 'an explicit plain-HTTP hop may drop the flag');
+    assert.equal(usherCookieIsSecure(' http , https '), false, 'trimming happens before the comparison');
   });
 });
 

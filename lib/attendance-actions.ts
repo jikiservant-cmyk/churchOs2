@@ -209,7 +209,10 @@ export async function validateUsherPasskey(churchSlug: string, passkey: string) 
     
     cookieStore.set(cookieName, token, {
       httpOnly: true,
-      secure: true,
+      // Secure on every HTTPS host (Vercel always reports https). Only an
+      // explicit plain-HTTP proxy hop drops the flag — otherwise the browser
+      // discards the cookie and the portal bounces back after a valid login.
+      secure: usherPasskey.usherCookieIsSecure(requestHeaders.get('x-forwarded-proto')),
       sameSite: 'lax',
       path: '/',
       maxAge: 60 * 60 * 24 // 24 hours
