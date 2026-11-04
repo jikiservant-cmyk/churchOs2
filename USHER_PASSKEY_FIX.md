@@ -214,3 +214,55 @@ Two details worth knowing before changing this again:
 
 `tests/pwa.test.ts` pins the matcher, the swallowing listener, and the fact that the
 component is still mounted globally, so "the app must ask" elsewhere stays true.
+
+## Follow-up (2026-11-04): the portal now works without migration 011 — the door no longer depends on a migration that has not run
+
+The portal was still reporting "Usher login is misconfigured: this database is
+missing required columns" on the live database, because migration 011 has to be
+applied by hand and had not been. Every login selected
+`passkey_hash, passkey_version`; PostgREST answered `42703`; the correct passkey
+was rejected with a misconfiguration error. Four code paths had the same
+dependency, so the whole feature was gated on that one SQL file:
+
+| Path | What 42703 did before | What it does now |
+|---|---|---|
+| `validateUsherPasskey` (login) | refused every attempt | retries with `id, name, passkey` and validates the readable code |
+| `getUsherSession` (re-bind) | returned null → login bounced straight back | retries with `id, slug, passkey` and re-binds to the code |
+| `ensureChurchUsherPasskey` (issue) | "lookup-failed" — admin screen showed no code at all | retries the read, writes the readable code alone |
+| `updateChurchPasskey` (rotate) | the whole write failed | retries writing only the readable code |
+
+Nothing about the credential model changed — this is the same readable-`passkey`
+comparison the login path has always accepted alongside the hash, under the same
+rate limits, format validation, `timingSafeEqual` compares and fail-closed secret
+check. What did change:
+
+* **Case.** The portal input upper-cases every keystroke, so a code stored with
+  lowercase letters could never be typed correctly. The readable comparison (and
+  only that one) is now case-insensitive, matched on both sides. Generated codes
+  are upper-case only, so this costs nothing there.
+* **Rotation still revokes.** Without `passkey_version` there is no version
+  counter to bind sessions to, so the token now carries `passkey_check` — the
+  HMAC of the code that logged in — and the degraded re-bind recomputes it from
+  the CURRENT code. Rotate the passkey and every outstanding session dies
+  immediately, exactly like the version check. Tokens without the claim fail
+  closed.
+* **The servers log one line** (`passkey_hash/passkey_version are missing — run
+  migrations/011…`) each time the degradation engages. Running 011 + 012 is still
+  the right thing to do: it restores hash-at-rest, the version counter and the
+  timestamp. Nothing needs to be re-issued afterwards — a degraded login already
+  self-heals the hash once the column exists.
+
+Also fixed while re-testing: `tests/helpers/mock-postgrest.mjs`'s
+`missing-columns` scenario now carries a readable passkey, which is what a real
+church in that state has (the admin screen reads only `passkey`) — before, the
+scenario modelled a church nobody could log into even with correct code and
+migrations.
+
+Verified end-to-end against every documented database state, through the real
+Server Action on a live server: `missing-columns` (this fix), `ok` (hash login),
+`backfilled` (011 + 012, readable code + NULL hash) and `provisioned` (readable
+code shadowing an unknowable legacy hash) all mint a session and render the
+dashboard; wrong passkeys are rejected with no cookie; a forged `passkey_check`
+is bounced (307); logout still clears the session (303 + expired Set-Cookie, 307
+afterwards, cross-origin 403). `tsc` 0 errors · `eslint` clean · 281/281 tests ·
+`next build` OK.

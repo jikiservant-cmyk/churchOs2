@@ -70,6 +70,12 @@ const server = http.createServer((req, res) => {
             });
           }
         }
+        // The state this scenario exists for: migration 011 was never applied,
+        // but the readable code IS there — the admin attendance screen reads
+        // only `passkey`, so the church has a code to type. Login must degrade
+        // to this column and still admit the usher.
+        const row = { ...CHURCH, passkey: process.env.MOCK_PASSKEY ?? 'TEST1234' };
+        return wantsObject ? send(200, row) : send(200, [row]);
       }
       if (SCENARIO === 'backfilled') {
         // 011 applied (columns exist, hashes empty) + 012 applied (10-hex code).

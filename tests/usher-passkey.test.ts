@@ -10,8 +10,11 @@ import {
   getUsherJwtSecret,
   hashUsherPasskey,
   isPortalAcceptedPasskey,
+  isUndefinedColumnError,
+  readableUsherPasskeyMatches,
   readUsableUsherPasskey,
   usherSecretProblem,
+  usherSessionFingerprintValid,
 } from '../lib/usher-passkey.ts';
 
 const source = (relative: string) =>
@@ -335,5 +338,91 @@ describe('Usher passkey — where the guarantee is enforced', () => {
     );
     assert.match(migration, /ALTER COLUMN passkey SET DEFAULT/);
     assert.match(migration, /SELECT column_default INTO v_default/);
+  });
+});
+
+describe('Usher portal on a database without migration 011 — degrade, never lock out', () => {
+  const undefinedColumn = (column: string) => ({
+    code: '42703',
+    message: `column church.churches.${column} does not exist`,
+  });
+
+  test('42703 and PGRST204 are recognised as "migration 011 pending", nothing else is', () => {
+    assert.equal(isUndefinedColumnError(undefinedColumn('passkey_hash')), true);
+    assert.equal(isUndefinedColumnError({ code: 'PGRST204', message: "Could not find the 'passkey_hash' column" }), true);
+    assert.equal(isUndefinedColumnError({ code: '23505', message: 'duplicate key' }), false);
+    assert.equal(isUndefinedColumnError({ message: 'no code field at all' }), false);
+    assert.equal(isUndefinedColumnError(null), false);
+    assert.equal(isUndefinedColumnError('42703'), false, 'a bare string is not an error object');
+  });
+
+  test('the readable code matches regardless of letter case, in constant time', () => {
+    assert.equal(readableUsherPasskeyMatches('GRACE24', 'grace24'), true, 'the portal input upper-cases every keystroke');
+    assert.equal(readableUsherPasskeyMatches('grace24', 'GRACE24'), true, 'older custom codes were stored lowercase');
+    assert.equal(readableUsherPasskeyMatches('  GRACE24  ', ' GRACE24 '), true, 'both sides are trimmed');
+    assert.equal(readableUsherPasskeyMatches('GRACE24', 'GRACE25'), false);
+    assert.equal(readableUsherPasskeyMatches('GRACE24', 'GRACE24X'), false, 'length differences never reach the comparison');
+    assert.equal(readableUsherPasskeyMatches(null, 'GRACE24'), false, 'no stored code admits nobody');
+    assert.equal(readableUsherPasskeyMatches('   ', 'GRACE24'), false);
+    assert.equal(readableUsherPasskeyMatches('GRACE24', ''), false);
+    assert.equal(readableUsherPasskeyMatches('GRACE24', undefined as unknown as string), false);
+  });
+
+  test('the session fingerprint binds a degraded session to the current code', () => {
+    return runWithTestSecret(async () => {
+      const fingerprint = hashUsherPasskey('AB23CD45');
+      assert.equal(usherSessionFingerprintValid(fingerprint, 'AB23CD45'), true);
+      assert.equal(usherSessionFingerprintValid(fingerprint, '  ab23cd45 '), true, 'the code is matched as login matches it');
+      assert.equal(usherSessionFingerprintValid(fingerprint, 'XY89ZW12'), false, 'rotation revokes the session immediately');
+      assert.equal(usherSessionFingerprintValid(null, 'AB23CD45'), false, 'tokens without the claim fail closed');
+      assert.equal(usherSessionFingerprintValid(undefined, 'AB23CD45'), false);
+      assert.equal(usherSessionFingerprintValid('', 'AB23CD45'), false);
+      assert.equal(usherSessionFingerprintValid('not-even-hex', 'AB23CD45'), false);
+      assert.equal(usherSessionFingerprintValid(fingerprint, null), false, 'a church without a code holds no sessions');
+    });
+  });
+
+  test('issuing a code on a pre-011 database writes the readable code alone', () => {
+    const { client, calls } = fakeClient({
+      read: (_columns, attempt) =>
+        attempt === 1
+          ? { data: null, error: undefinedColumn('passkey_hash') }
+          : { data: { passkey: null }, error: null },
+      write: () => ({ data: [{ passkey: 'ISSUED1' }], error: null }),
+    });
+    return runWithTestSecret(async () => {
+      const result = await ensureChurchUsherPasskey(client, CHURCH_ID);
+      assert.equal(result.status, 'generated');
+      assert.equal((result as { degraded?: boolean }).degraded, true, 'the caller must be able to log the degradation');
+      assert.equal((result as { hashed: boolean }).hashed, false, 'no column existed to store the hash in');
+      const writes = calls.filter((call) => call.op === 'write');
+      assert.equal(writes.length, 1, 'one write, not a retry storm');
+      const patch = writes[0].patch as Record<string, unknown>;
+      assert.deepEqual(Object.keys(patch), ['passkey'], 'passkey_updated_at/passkey_hash would 42703 the whole write');
+      assert.match(String(patch.passkey), /^[A-Z2-9]{8}$/);
+    });
+  });
+
+  test('a half-migrated table (read fine, write 42703s) falls back to the readable code under the same guard', () => {
+    const { client, calls } = fakeClient({
+      read: () => ({ data: { passkey: null, passkey_hash: null, passkey_version: 1 }, error: null }),
+      write: (patch) =>
+        'passkey_hash' in patch
+          ? { data: null, error: { code: 'PGRST204', message: "Could not find the 'passkey_hash' column" } }
+          : { data: [{ passkey: 'ISSUED2' }], error: null },
+    });
+    return runWithTestSecret(async () => {
+      const result = await ensureChurchUsherPasskey(client, CHURCH_ID);
+      assert.equal(result.status, 'generated');
+      const writes = calls.filter((call) => call.op === 'write');
+      assert.equal(writes.length, 2);
+      assert.ok('passkey_hash' in (writes[0].patch as Record<string, unknown>), 'the first attempt is the full credential');
+      assert.deepEqual(Object.keys(writes[1].patch as Record<string, unknown>), ['passkey'], 'the fallback writes only what exists');
+      assert.deepEqual(
+        (writes[1].filters as Array<[string, unknown]>).filter(([column]) => column === 'passkey'),
+        [['passkey', null]],
+        'the concurrency guard survives the fallback',
+      );
+    });
   });
 });
