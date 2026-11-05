@@ -321,3 +321,62 @@ stands regardless:
 No migration accompanies it. If verification (2) shows the secret missing or
 placeholder, set it in the deployment environment and redeploy — nothing in the
 database changes, and existing churches keep their codes.
+
+## Live inspection (2026-11-06, read-only connector): the production database is exonerated — the failure is the deployed build, not the schema
+
+The Supabase project the deployed app talks to was inspected through a
+read-only connection (SELECT against `information_schema` and aggregate columns
+only — no credential values read, nothing written; the same database also hosts
+unrelated hospital/sacco/school/business schemas, which is why it stayed
+read-only). Findings on `church.churches`:
+
+* All four passkey columns exist: `passkey text` (with the schema's UUID-based
+  DEFAULT), `passkey_hash text NULL`, `passkey_version integer NOT NULL DEFAULT 1`,
+  `passkey_updated_at timestamptz NULL`. **Migration 011 is effectively applied.**
+  The project's migration history is empty, so the DDL arrived via manual SQL —
+  which is why the 2026-10-30 check (against a pre-DDL snapshot) reported the
+  columns missing. That diagnosis is retired for this project.
+* **24 of 24 churches have a readable, portal-valid `passkey`** (6 or 10 chars,
+  every one matching `^[A-Za-z0-9_-]{6,32}$`). No church is locked out by a
+  missing credential; migration 012 is unnecessary — it would find no blanks.
+* `passkey_hash` is **NULL on every row** and `passkey_version` is 1 everywhere:
+  the whole table sits in the "readable code, no hash" state.
+* `church.usher_sessions` holds **0 rows** — no usher login has ever completed.
+* All project services are ACTIVE_HEALTHY and the REST API exposes the `church`
+  schema, so the deployed app can reach everything it needs.
+
+### What this proves
+
+Since every other part of the deployed site reads and writes this same database
+successfully, the deployment is connected here and the service-role path works.
+The usher portal fails for exactly one reason this database permits: **the
+deployed build predates the readable-passkey login path.** A hash-only login
+comparison — what the older code did — meets `passkey_hash IS NULL` on every
+row and answers "Invalid passkey" to a perfectly correct code, every time, for
+every church. Zero successful logins ever recorded. The fix already in this
+repository (accept the readable code, case-insensitively, and self-heal the
+hash on first success) changes the outcome on this exact data: every church can
+log in with the code its pastor sees on the Attendance screen, and after each
+church's first successful login the app itself writes the hash — no manual SQL,
+no migration, no data changes by hand.
+
+### The remaining variable outside the database
+
+`USHER_JWT_SECRET` in the deployment environment (Vercel → Settings →
+Environment Variables, for Production *and* Preview) must exist, not be the
+`REPLACE_ME_WITH_A_STRONG_RANDOM_SECRET` placeholder, and be 32+ bytes. The
+database cannot show this; if it is missing, logins fail with the
+"misconfigured" message even on the new build. Check it once, set it once, done.
+
+### Verification after deploy (no SQL required)
+
+Open `/<slug>/usher`, enter the church's code from the Attendance screen. First
+success writes `passkey_hash` for that church (app-side self-heal); subsequent
+logins take the hash path. To watch it land:
+
+```sql
+SELECT slug, (passkey_hash IS NULL) AS hash_still_null, passkey_updated_at
+FROM church.churches WHERE slug = '<slug>';
+```
+
+`hash_still_null` flips to false after that church's first successful login.
