@@ -21,6 +21,7 @@ import crypto from 'crypto';
 const usherSecretProblem = usherPasskey.usherSecretProblem;
 const getJwtSecret = usherPasskey.getUsherJwtSecret;
 const computePasskeyHash = usherPasskey.hashUsherPasskey;
+const readableUsherPasskeyMatches = usherPasskey.readableUsherPasskeyMatches;
 
 /** Retained for existing callers: the same CSPRNG code the admin button offers. */
 export async function generateSecurePasskey(): Promise<string> {
@@ -54,30 +55,46 @@ export async function validateUsherPasskey(churchSlug: string, passkey: string) 
     console.log('[validateUsherPasskey] Validating for slug:', canonicalSlug);
     const supabase = await createAdminClient();
     
-    // Use strict equality (.eq) instead of ilike so % and _ cannot act as wildcards
-    const { data: church, error: churchQueryError } = await supabase
+    // Use strict equality (.eq) instead of ilike so % and _ cannot act as wildcards.
+    // On a database where migration 011 has not been applied, selecting
+    // passkey_hash / passkey_version fails with 42703 and — before the fallback
+    // below — refused EVERY login, even a correct passkey. Retry against the
+    // base `passkey` column (present in every deployment) and validate against
+    // the code the admin screen actually shows, instead of locking the door.
+    const readFull = await supabase
       .schema('church')
       .from('churches')
       .select('id, name, passkey, passkey_hash, passkey_version')
       .eq('slug', canonicalSlug)
       .maybeSingle();
 
+    let church = (readFull.data ?? null) as
+      | { id: string; name: string; passkey: string | null; passkey_hash?: string | null; passkey_version?: number | null }
+      | null;
+    let passkeyColumnsMissing = false;
+    const churchQueryError = readFull.error;
+
     if (churchQueryError) {
-      // 42703 = undefined_column. The portal would otherwise report
-      // "Church not found." for a church that plainly exists, which sends
-      // operators hunting for a typo instead of a missing migration.
-      if ((churchQueryError as any).code === '42703') {
-        console.error(
-          '[validateUsherPasskey] church.churches is missing passkey columns — run migrations/011_usher_passkey_columns.sql',
-          churchQueryError.message,
-        );
-        return {
-          success: false,
-          error: 'Usher login is misconfigured: this database is missing required columns. Ask an administrator to run migration 011.',
-        };
+      if (!usherPasskey.isUndefinedColumnError(churchQueryError)) {
+        console.error('[validateUsherPasskey] Church lookup failed:', churchQueryError.message);
+        return { success: false, error: 'Could not verify the church. Please try again.' };
       }
-      console.error('[validateUsherPasskey] Church lookup failed:', churchQueryError.message);
-      return { success: false, error: 'Could not verify the church. Please try again.' };
+      passkeyColumnsMissing = true;
+      console.warn(
+        '[validateUsherPasskey] passkey_hash/passkey_version are missing — run migrations/011_usher_passkey_columns.sql.',
+        'Validating against the readable passkey only until then.',
+      );
+      const readMinimal = await supabase
+        .schema('church')
+        .from('churches')
+        .select('id, name, passkey')
+        .eq('slug', canonicalSlug)
+        .maybeSingle();
+      if (readMinimal.error) {
+        console.error('[validateUsherPasskey] Church lookup failed:', readMinimal.error.message);
+        return { success: false, error: 'Could not verify the church. Please try again.' };
+      }
+      church = (readMinimal.data ?? null) as typeof church;
     }
 
     if (!church) {
@@ -103,8 +120,9 @@ export async function validateUsherPasskey(churchSlug: string, passkey: string) 
       return { success: false, error: 'Invalid passkey format.' };
     }
 
-    // Now that the passkey columns exist, this is the most likely next failure
-    // on a fresh deployment. Name it rather than reporting a generic error.
+    // This is the most likely failure on a fresh deployment: the code may be
+    // perfect, but sessions cannot be signed without the dedicated secret.
+    // Name it rather than reporting a generic error.
     const secretProblem = usherSecretProblem();
     if (secretProblem) {
       console.error('[validateUsherPasskey] Usher secret unusable:', secretProblem);
@@ -136,20 +154,19 @@ export async function validateUsherPasskey(churchSlug: string, passkey: string) 
     // before migration 011 carry a hash derived from `slug:uuid` — a value
     // nobody was ever shown — which previously shadowed the readable code and
     // made the portal impossible to enter. Accepting the plaintext repairs those
-    // rows, and the hash is then rewritten to match.
-    if (!isMatch && typeof church.passkey === 'string' && church.passkey.trim()) {
-      const expectedBuf = Buffer.from(church.passkey.trim());
-      const actualBuf = Buffer.from(providedPasskey);
-      if (expectedBuf.length === actualBuf.length && crypto.timingSafeEqual(expectedBuf, actualBuf)) {
-        isMatch = true;
-        matchedVia = 'plaintext';
-      }
+    // rows, and the hash is then rewritten to match. On a database without the
+    // 011 columns this path is the ONLY credential — which is exactly the code
+    // the church was given.
+    if (!isMatch && readableUsherPasskeyMatches(church.passkey, providedPasskey)) {
+      isMatch = true;
+      matchedVia = 'plaintext';
     }
 
     // Self-heal: keep `passkey_hash` in step with the code that just worked, so
     // subsequent logins take the hash path. The readable passkey is retained —
-    // the admin UI and the portal link both display it.
-    if (isMatch && matchedVia === 'plaintext' && church.passkey_hash !== providedHash) {
+    // the admin UI and the portal link both display it. Skipped while the hash
+    // column does not exist; the next login after migration 011 heals it.
+    if (isMatch && matchedVia === 'plaintext' && !passkeyColumnsMissing && church.passkey_hash !== providedHash) {
       const { error: healError } = await supabase
         .schema('church')
         .from('churches')
@@ -174,7 +191,13 @@ export async function validateUsherPasskey(churchSlug: string, passkey: string) 
       church_name: churchName,
       church_slug: canonicalSlug,
       role: 'usher',
-      passkey_version: currentVersion
+      passkey_version: currentVersion,
+      // HMAC of the code that authenticated this login, upper-cased the same
+      // way readableUsherPasskeyMatches compares, so the degraded re-bind in
+      // getUsherSession recomputes it identically from the stored code. Only
+      // checked on databases without passkey_version, where it is what makes
+      // rotation revoke outstanding sessions.
+      passkey_check: computePasskeyHash(providedPasskey.toUpperCase())
     })
       .setProtectedHeader({ alg: 'HS256' })
       .setIssuedAt()
@@ -186,7 +209,10 @@ export async function validateUsherPasskey(churchSlug: string, passkey: string) 
     
     cookieStore.set(cookieName, token, {
       httpOnly: true,
-      secure: true,
+      // Secure on every HTTPS host (Vercel always reports https). Only an
+      // explicit plain-HTTP proxy hop drops the flag — otherwise the browser
+      // discards the cookie and the portal bounces back after a valid login.
+      secure: usherPasskey.usherCookieIsSecure(requestHeaders.get('x-forwarded-proto')),
       sameSite: 'lax',
       path: '/',
       maxAge: 60 * 60 * 24 // 24 hours
@@ -223,12 +249,34 @@ export async function getUsherSession(churchSlug: string) {
 
     // MT-01 & MT-02 remediation: Re-bind session to database record to ensure passkey has not been rotated
     const adminClient = await createAdminClient();
-    const { data: church } = await adminClient
+    const rebind = await adminClient
       .schema('church')
       .from('churches')
       .select('id, slug, passkey_version')
       .eq('id', payload.church_id as string)
       .maybeSingle();
+
+    if (rebind.error && usherPasskey.isUndefinedColumnError(rebind.error)) {
+      // Migration 011 has not run on this database: there is no passkey_version
+      // column to bind to. Bind to the readable code instead — the token's
+      // passkey_check is the HMAC of the code that logged in, recomputed here
+      // against the CURRENT code, so rotating the passkey still revokes every
+      // outstanding session immediately. Anything else fails closed.
+      const minimal = await adminClient
+        .schema('church')
+        .from('churches')
+        .select('id, slug, passkey')
+        .eq('id', payload.church_id as string)
+        .maybeSingle();
+      if (minimal.error || !minimal.data) return null;
+      if (minimal.data.slug !== canonicalSlug) return null;
+      if (!usherPasskey.usherSessionFingerprintValid(payload.passkey_check, minimal.data.passkey)) {
+        return null;
+      }
+      return payload as any;
+    }
+
+    const church = rebind.data;
 
     if (!church || church.slug !== canonicalSlug) {
       return null;
@@ -444,7 +492,7 @@ export async function updateChurchPasskey(churchId: string, newPasskey: string, 
     //
     // This must never write `passkey: null`. Once the column is NOT NULL, an
     // explicit NULL fails with 23502 — a DEFAULT does not apply to it.
-    const { error } = await adminSupabase
+    const write = await adminSupabase
       .schema('church')
       .from('churches')
       .update({
@@ -457,6 +505,25 @@ export async function updateChurchPasskey(churchId: string, newPasskey: string, 
         passkey_updated_at: new Date().toISOString()
       })
       .eq('id', churchId);
+
+    let error = write.error;
+
+    // Databases that predate migration 011 cannot store the hash, the version
+    // or the timestamp — the write above fails with 42703/PGRST204 as a whole.
+    // Write the readable code alone instead of refusing to rotate: sessions are
+    // still revoked, because they are bound to the code via passkey_check.
+    if (error && usherPasskey.isUndefinedColumnError(error)) {
+      console.warn(
+        '[updateChurchPasskey] passkey_hash/passkey_version are missing — run migrations/011_usher_passkey_columns.sql.',
+        'Rotating the readable code only; sessions stay revoked via their passkey_check binding.',
+      );
+      const retry = await adminSupabase
+        .schema('church')
+        .from('churches')
+        .update({ passkey: trimmedKey })
+        .eq('id', churchId);
+      error = retry.error;
+    }
 
     if (error) {
       console.error('[updateChurchPasskey] Error:', error);

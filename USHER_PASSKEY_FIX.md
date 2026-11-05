@@ -214,3 +214,169 @@ Two details worth knowing before changing this again:
 
 `tests/pwa.test.ts` pins the matcher, the swallowing listener, and the fact that the
 component is still mounted globally, so "the app must ask" elsewhere stays true.
+
+## Follow-up (2026-11-04): the portal now works without migration 011 — the door no longer depends on a migration that has not run
+
+The portal was still reporting "Usher login is misconfigured: this database is
+missing required columns" on the live database, because migration 011 has to be
+applied by hand and had not been. Every login selected
+`passkey_hash, passkey_version`; PostgREST answered `42703`; the correct passkey
+was rejected with a misconfiguration error. Four code paths had the same
+dependency, so the whole feature was gated on that one SQL file:
+
+| Path | What 42703 did before | What it does now |
+|---|---|---|
+| `validateUsherPasskey` (login) | refused every attempt | retries with `id, name, passkey` and validates the readable code |
+| `getUsherSession` (re-bind) | returned null → login bounced straight back | retries with `id, slug, passkey` and re-binds to the code |
+| `ensureChurchUsherPasskey` (issue) | "lookup-failed" — admin screen showed no code at all | retries the read, writes the readable code alone |
+| `updateChurchPasskey` (rotate) | the whole write failed | retries writing only the readable code |
+
+Nothing about the credential model changed — this is the same readable-`passkey`
+comparison the login path has always accepted alongside the hash, under the same
+rate limits, format validation, `timingSafeEqual` compares and fail-closed secret
+check. What did change:
+
+* **Case.** The portal input upper-cases every keystroke, so a code stored with
+  lowercase letters could never be typed correctly. The readable comparison (and
+  only that one) is now case-insensitive, matched on both sides. Generated codes
+  are upper-case only, so this costs nothing there.
+* **Rotation still revokes.** Without `passkey_version` there is no version
+  counter to bind sessions to, so the token now carries `passkey_check` — the
+  HMAC of the code that logged in — and the degraded re-bind recomputes it from
+  the CURRENT code. Rotate the passkey and every outstanding session dies
+  immediately, exactly like the version check. Tokens without the claim fail
+  closed.
+* **The servers log one line** (`passkey_hash/passkey_version are missing — run
+  migrations/011…`) each time the degradation engages. Running 011 + 012 is still
+  the right thing to do: it restores hash-at-rest, the version counter and the
+  timestamp. Nothing needs to be re-issued afterwards — a degraded login already
+  self-heals the hash once the column exists.
+
+Also fixed while re-testing: `tests/helpers/mock-postgrest.mjs`'s
+`missing-columns` scenario now carries a readable passkey, which is what a real
+church in that state has (the admin screen reads only `passkey`) — before, the
+scenario modelled a church nobody could log into even with correct code and
+migrations.
+
+Verified end-to-end against every documented database state, through the real
+Server Action on a live server: `missing-columns` (this fix), `ok` (hash login),
+`backfilled` (011 + 012, readable code + NULL hash) and `provisioned` (readable
+code shadowing an unknowable legacy hash) all mint a session and render the
+dashboard; wrong passkeys are rejected with no cookie; a forged `passkey_check`
+is bounced (307); logout still clears the session (303 + expired Set-Cookie, 307
+afterwards, cross-origin 403). `tsc` 0 errors · `eslint` clean · 281/281 tests ·
+`next build` OK.
+
+## Correction (2026-11-04): the live schema reportedly HAS the 011 columns — the fallbacks above are a compatibility path, not the established production root cause
+
+A fresh inspection of the Supabase project (2026-11-04) found `passkey_hash`,
+`passkey_version` and `passkey_updated_at` all present on `church.churches`.
+That conflicts with the 2026-10-30 live check recorded at the top of this file,
+which found them absent. Both observations can be true only if 011 (or
+equivalent DDL) was applied in between, or if the earlier check and the current
+inspection looked at different projects. Until the deployed app's connection is
+confirmed, **do not treat 42703 as the established production root cause.** What
+stands regardless:
+
+* The degraded paths ship as a compatibility layer for databases without 011,
+  and change nothing on a fully migrated one — every degraded branch engages
+  only on `42703`/`PGRST204`.
+* The readable `passkey` column is a credential and stays protected as one:
+  column-level `REVOKE` for `anon`/`authenticated` on all four credential
+  columns (022, mirrored in `supabase-schema.sql`, pinned by
+  `tests/sql/church_column_privileges.test.mjs`), `churches_public` without
+  secrets, and every application read behind the service-role connection.
+
+### Production verification checklist (things this repo cannot see)
+
+1. **Which project is the deployed app actually connected to?** Compare
+   `NEXT_PUBLIC_SUPABASE_URL` in the deployment's environment (Vercel →
+   Settings → Environment Variables, for Production *and* Preview) with the
+   project reference of the database that was inspected. A mismatch produces
+   "Invalid passkey" or "Church not found." with a code that is correct
+   somewhere else.
+2. **`USHER_JWT_SECRET`** — must exist in the deployment environment, must not
+   be the `REPLACE_ME_WITH_A_STRONG_RANDOM_SECRET` placeholder from
+   `.env.example`, and must be 32+ bytes. Any of those three fails **every**
+   login with "Usher login is misconfigured…" regardless of the passkey or the
+   schema. This is the most likely cause when the schema is complete.
+3. **Postgres/PostgREST logs** — on the project the app really points at, search
+   the logs for `42703` around login attempts. Present → the migration is
+   genuinely missing there and the fallback engages. Absent → the failure is
+   above, or the credential itself (see 4).
+4. **The credential row** — `SELECT slug, passkey, passkey_hash, passkey_version
+   FROM church.churches WHERE slug = '<the-slug-tested>';` (run it in the SQL
+   editor of the connected project). If `passkey` is NULL/empty while
+   `passkey_hash` is set, no typed code can ever match — open the admin
+   Attendance screen once so `ensureChurchUsherPasskey` issues a code.
+5. **The URL scheme the portal is opened on** — over plain `http://` (LAN
+   tablet), the previously hardcoded `Secure` flag made the browser discard the
+   session cookie: the toast said "Access granted" and the dashboard bounced
+   back to the passkey screen. The cookie flag is now protocol-aware (secure on
+   every HTTPS host and whenever the proxy does not explicitly say `http`), so
+   this path works; HTTPS deployments are unchanged.
+
+### Deploy-note for this correction
+
+No migration accompanies it. If verification (2) shows the secret missing or
+placeholder, set it in the deployment environment and redeploy — nothing in the
+database changes, and existing churches keep their codes.
+
+## Live inspection (2026-11-06, read-only connector): the production database is exonerated — the failure is the deployed build, not the schema
+
+The Supabase project the deployed app talks to was inspected through a
+read-only connection (SELECT against `information_schema` and aggregate columns
+only — no credential values read, nothing written; the same database also hosts
+unrelated hospital/sacco/school/business schemas, which is why it stayed
+read-only). Findings on `church.churches`:
+
+* All four passkey columns exist: `passkey text` (with the schema's UUID-based
+  DEFAULT), `passkey_hash text NULL`, `passkey_version integer NOT NULL DEFAULT 1`,
+  `passkey_updated_at timestamptz NULL`. **Migration 011 is effectively applied.**
+  The project's migration history is empty, so the DDL arrived via manual SQL —
+  which is why the 2026-10-30 check (against a pre-DDL snapshot) reported the
+  columns missing. That diagnosis is retired for this project.
+* **24 of 24 churches have a readable, portal-valid `passkey`** (6 or 10 chars,
+  every one matching `^[A-Za-z0-9_-]{6,32}$`). No church is locked out by a
+  missing credential; migration 012 is unnecessary — it would find no blanks.
+* `passkey_hash` is **NULL on every row** and `passkey_version` is 1 everywhere:
+  the whole table sits in the "readable code, no hash" state.
+* `church.usher_sessions` holds **0 rows** — no usher login has ever completed.
+* All project services are ACTIVE_HEALTHY and the REST API exposes the `church`
+  schema, so the deployed app can reach everything it needs.
+
+### What this proves
+
+Since every other part of the deployed site reads and writes this same database
+successfully, the deployment is connected here and the service-role path works.
+The usher portal fails for exactly one reason this database permits: **the
+deployed build predates the readable-passkey login path.** A hash-only login
+comparison — what the older code did — meets `passkey_hash IS NULL` on every
+row and answers "Invalid passkey" to a perfectly correct code, every time, for
+every church. Zero successful logins ever recorded. The fix already in this
+repository (accept the readable code, case-insensitively, and self-heal the
+hash on first success) changes the outcome on this exact data: every church can
+log in with the code its pastor sees on the Attendance screen, and after each
+church's first successful login the app itself writes the hash — no manual SQL,
+no migration, no data changes by hand.
+
+### The remaining variable outside the database
+
+`USHER_JWT_SECRET` in the deployment environment (Vercel → Settings →
+Environment Variables, for Production *and* Preview) must exist, not be the
+`REPLACE_ME_WITH_A_STRONG_RANDOM_SECRET` placeholder, and be 32+ bytes. The
+database cannot show this; if it is missing, logins fail with the
+"misconfigured" message even on the new build. Check it once, set it once, done.
+
+### Verification after deploy (no SQL required)
+
+Open `/<slug>/usher`, enter the church's code from the Attendance screen. First
+success writes `passkey_hash` for that church (app-side self-heal); subsequent
+logins take the hash path. To watch it land:
+
+```sql
+SELECT slug, (passkey_hash IS NULL) AS hash_still_null, passkey_updated_at
+FROM church.churches WHERE slug = '<slug>';
+```
+
+`hash_still_null` flips to false after that church's first successful login.

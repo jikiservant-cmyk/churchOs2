@@ -30,6 +30,77 @@ export const USHER_PASSKEY_LENGTH = 8;
 /** The shape `validateUsherPasskey` accepts on login. */
 const PORTAL_ACCEPTED = /^[A-Za-z0-9_-]{6,32}$/;
 
+/**
+ * PostgREST answers 42703 when a SELECT names a column the table does not
+ * have, and PGRST204 when an INSERT/UPDATE carries one. Both mean the same
+ * thing here: migration 011 has not been applied to this database yet, so
+ * `passkey_hash` / `passkey_version` / `passkey_updated_at` are missing while
+ * the base `passkey` column — present in every deployment — still works.
+ * The usher flow degrades to that column instead of locking the door.
+ */
+export function isUndefinedColumnError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const code = (error as { code?: unknown }).code;
+  return code === '42703' || code === 'PGRST204';
+}
+
+/**
+ * Compare a typed passkey against the readable `passkey` column, in constant
+ * time. Case-insensitive on purpose: the portal input upper-cases everything
+ * an usher types, so a code stored with lowercase letters (older custom codes)
+ * was impossible to enter correctly — the door rejected its own credential.
+ * Codes this app generates are upper-case only, so nothing is weakened there;
+ * a mixed-case attacker guess space at most doubles, under per-IP and
+ * per-church rate limits that already bound every attempt.
+ */
+export function readableUsherPasskeyMatches(stored: unknown, provided: string): boolean {
+  const code = readUsableUsherPasskey(stored);
+  if (!code) return false;
+  const trimmed = typeof provided === 'string' ? provided.trim() : '';
+  if (!trimmed) return false;
+  const expected = Buffer.from(code.toUpperCase(), 'utf8');
+  const actual = Buffer.from(trimmed.toUpperCase(), 'utf8');
+  return expected.length === actual.length && crypto.timingSafeEqual(expected, actual);
+}
+
+/**
+ * Whether the usher session cookie may carry the `Secure` flag for this request.
+ *
+ * The flag was hardcoded `true`, which is right on every HTTPS host (Vercel
+ * included — it always sends `x-forwarded-proto: https`) but silently breaks
+ * a portal reached over plain HTTP: the browser drops the cookie, the login
+ * toast says "Access granted", and the dashboard bounces straight back to the
+ * passkey screen — the portal "doesn't open even with the correct passkey".
+ * A church running check-in on a local-network tablet hits exactly this.
+ *
+ * Fail secure: only an explicit `http` from the proxy relaxes the flag; a
+ * missing or ambiguous header stays `Secure`.
+ */
+export function usherCookieIsSecure(xForwardedProto: string | null | undefined): boolean {
+  const first = (xForwardedProto ?? '').split(',')[0]?.trim().toLowerCase();
+  return first !== 'http';
+}
+
+/**
+ * Re-bind a session whose database has no `passkey_version` column yet.
+ * The token carries `passkey_check` — the HMAC of the code that authenticated
+ * it, upper-cased exactly like `readableUsherPasskeyMatches` compares — and the
+ * re-bind recomputes that HMAC from the CURRENT readable code, so rotating the
+ * code still revokes every outstanding session immediately, even before
+ * migration 011 installs the version counter. Both sides normalise case the
+ * same way, so a session never dies because the stored code differs from the
+ * typed one by letter case alone. A token without the claim (or a church whose
+ * code has since changed) fails closed.
+ */
+export function usherSessionFingerprintValid(claimFingerprint: unknown, storedPasskey: unknown): boolean {
+  if (typeof claimFingerprint !== 'string' || claimFingerprint.length === 0) return false;
+  const code = readUsableUsherPasskey(storedPasskey);
+  if (!code) return false;
+  const expected = Buffer.from(hashUsherPasskey(code.toUpperCase()), 'hex');
+  const actual = Buffer.from(claimFingerprint, 'hex');
+  return expected.length === actual.length && crypto.timingSafeEqual(expected, actual);
+}
+
 export function usherSecretProblem(): string | null {
   const jwtSecretValue = process.env.USHER_JWT_SECRET;
   if (!jwtSecretValue) {
@@ -90,8 +161,12 @@ export function isPortalAcceptedPasskey(value: unknown): boolean {
 export type EnsurePasskeyResult =
   /** A readable code already exists. Nothing was written. */
   | { status: 'present'; passkey: string }
-  /** A code was issued by this call. `hashed` is false when the secret is unusable. */
-  | { status: 'generated'; passkey: string; hashed: boolean; secretProblem: string | null }
+  /**
+   * A code was issued by this call. `hashed` is false when the secret is unusable
+   * *or* when the database predates migration 011 (no `passkey_hash` column yet —
+   * `degraded` says which). In both cases login still accepts the readable code.
+   */
+  | { status: 'generated'; passkey: string; hashed: boolean; secretProblem: string | null; degraded?: boolean }
   /** Nothing could be done. The caller decides what to show; no credential was changed. */
   | { status: 'unavailable'; reason: string };
 
@@ -122,14 +197,37 @@ export async function ensureChurchUsherPasskey(
 
   const table = () => adminClient.schema('church').from('churches') as any;
 
-  const { data: church, error: readError } = await table()
+  // Read with the full column set first. On a database where migration 011 has
+  // not run, that SELECT itself fails with 42703 — retry against the base
+  // `passkey` column alone rather than refusing to issue a code at all. A
+  // church whose admins cannot run SQL still gets a working portal.
+  const readFull = await table()
     .select('passkey, passkey_hash, passkey_version')
     .eq('id', churchId)
     .maybeSingle();
 
-  if (readError) {
-    return { status: 'unavailable', reason: `lookup-failed: ${readError.message ?? 'unknown'}` };
+  let church: Record<string, unknown> | null = readFull.data ?? null;
+  let passkeyColumnsMissing = false;
+
+  if (readFull.error) {
+    if (!isUndefinedColumnError(readFull.error)) {
+      return { status: 'unavailable', reason: `lookup-failed: ${readFull.error.message ?? 'unknown'}` };
+    }
+    passkeyColumnsMissing = true;
+    console.warn(
+      '[ensureChurchUsherPasskey] passkey_hash/passkey_version are missing — run migrations/011_usher_passkey_columns.sql.',
+      'Issuing the readable code only until then.',
+    );
+    const readMinimal = await table()
+      .select('passkey')
+      .eq('id', churchId)
+      .maybeSingle();
+    if (readMinimal.error) {
+      return { status: 'unavailable', reason: `lookup-failed: ${readMinimal.error.message ?? 'unknown'}` };
+    }
+    church = (readMinimal.data as Record<string, unknown> | null) ?? null;
   }
+
   if (!church) {
     return { status: 'unavailable', reason: 'church-not-found' };
   }
@@ -146,25 +244,47 @@ export async function ensureChurchUsherPasskey(
   // admin screen shows and what an usher is told. Both are written together so
   // a church created from now on never has one without the other. When the
   // secret is missing, the readable code is still issued — login accepts it and
-  // self-heals the hash on first use (see validateUsherPasskey).
-  const patch: Record<string, unknown> = {
-    passkey: code,
-    passkey_updated_at: new Date().toISOString(),
-  };
-  if (!secretProblem) {
-    patch.passkey_hash = hashUsherPasskey(code);
+  // self-heals the hash on first use (see validateUsherPasskey). On a database
+  // without the 011 columns, only the readable code can be written at all; the
+  // hash self-heals after 011 lands.
+  const patch: Record<string, unknown> = { passkey: code };
+  if (!passkeyColumnsMissing) {
+    patch.passkey_updated_at = new Date().toISOString();
+    if (!secretProblem) {
+      patch.passkey_hash = hashUsherPasskey(code);
+    }
   }
 
   // Re-state the value we read, so a concurrent writer wins once and this write
   // becomes a no-op instead of clobbering it.
-  const guarded = church.passkey === null
+  let guarded = church.passkey === null
     ? table().update(patch).eq('id', churchId).is('passkey', null)
     : table().update(patch).eq('id', churchId).eq('passkey', church.passkey);
 
-  const { data: written, error: writeError } = await guarded.select('passkey');
+  let writeResult = await guarded.select('passkey');
+  let writeError: { message?: string } | null = writeResult.error ?? null;
+
+  // A half-migrated database (read succeeded, write carries a column the table
+  // does not have — e.g. another admin dropped one mid-flight) falls back to
+  // the readable code alone, under the same guard.
+  if (writeError && isUndefinedColumnError(writeError)) {
+    passkeyColumnsMissing = true;
+    console.warn(
+      '[ensureChurchUsherPasskey] the write named a column this table does not have —',
+      'writing the readable code only. Run migrations/011_usher_passkey_columns.sql.',
+    );
+    const retry = church.passkey === null
+      ? table().update({ passkey: code }).eq('id', churchId).is('passkey', null)
+      : table().update({ passkey: code }).eq('id', churchId).eq('passkey', church.passkey);
+    writeResult = await retry.select('passkey');
+    writeError = writeResult.error ?? null;
+  }
+
   if (writeError) {
     return { status: 'unavailable', reason: `write-failed: ${writeError.message ?? 'unknown'}` };
   }
+
+  const written = writeResult.data;
 
   const rows = Array.isArray(written) ? written : written ? [written] : [];
   if (rows.length === 0) {
@@ -175,5 +295,11 @@ export async function ensureChurchUsherPasskey(
       : { status: 'unavailable', reason: 'write-lost-race' };
   }
 
-  return { status: 'generated', passkey: code, hashed: !secretProblem, secretProblem };
+  return {
+    status: 'generated',
+    passkey: code,
+    hashed: !secretProblem && !passkeyColumnsMissing,
+    secretProblem,
+    ...(passkeyColumnsMissing ? { degraded: true } : {}),
+  };
 }
