@@ -2,6 +2,7 @@ import { createClient } from '@/lib/supabase/server';
 import { notFound } from 'next/navigation';
 import { editVisitor } from '../../actions';
 import SubmitButton from '@/components/SubmitButton';
+import BirthdayPicker from '@/components/BirthdayPicker';
 
 export default async function EditVisitorPage(props: {
   params: Promise<{ church_slug: string; id: string }>;
@@ -75,13 +76,8 @@ export default async function EditVisitorPage(props: {
               </select>
             </div>
             <div className="space-y-1.5">
-              <label className="text-[10px] font-bold text-[#C8B89A] uppercase tracking-widest">Birthday</label>
-              <input 
-                type="date" 
-                name="birthday"
-                defaultValue={visitor.birthday || ''}
-                className="w-full px-4 py-2.5 bg-[rgba(255,220,170,0.05)] border border-[rgba(90,55,20,0.1)] rounded-xl text-sm focus:border-[#B5622A] outline-none transition-colors font-medium text-[#1E1208]"
-              />
+              <label className="text-[10px] font-bold text-[#C8B89A] uppercase tracking-widest">Birthday (day &amp; month only)</label>
+              <BirthdayPicker defaultValue={visitor.birthday || ''} />
             </div>
           </div>
 

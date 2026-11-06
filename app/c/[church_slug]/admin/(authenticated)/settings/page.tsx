@@ -4,6 +4,7 @@ import { notFound } from 'next/navigation';
 import Link from 'next/link';
 import JoinDenominationCard from '@/components/settings/JoinDenominationCard';
 import MeetingDaysSettings from '@/components/settings/MeetingDaysSettings';
+import BirthdayWishesCard from '@/components/settings/BirthdayWishesCard';
 import { ISO_WEEKDAYS } from '@/lib/meeting-days';
 import { Church as ChurchIcon, ExternalLink, Settings, Shield } from 'lucide-react';
 
@@ -20,6 +21,7 @@ export default async function SettingsPage({
   const [
     { data: churchRow },
     { data: scheduleRow, error: scheduleError },
+    { data: birthdayRow, error: birthdayError },
     { data: { user } },
   ] = await Promise.all([
     adminDb
@@ -33,6 +35,14 @@ export default async function SettingsPage({
       .from('churches')
       .select('meeting_days, attendance_flag_threshold')
       .eq('id', church.id)
+      .maybeSingle(),
+    // Missing table (migration 025 not applied) reads as an error, not a crash —
+    // the card then renders its "schema not available" notice.
+    adminDb
+      .schema('church')
+      .from('birthday_automation')
+      .select('enabled, custom_template')
+      .eq('church_id', church.id)
       .maybeSingle(),
     supabase.auth.getUser(),
   ]);
@@ -65,6 +75,13 @@ export default async function SettingsPage({
   }
 
   const meetingDaysSchemaAvailable = !scheduleError;
+  const birthdaySchemaAvailable = !birthdayError;
+  const birthdayAutomation = birthdaySchemaAvailable
+    ? {
+        enabled: Boolean(birthdayRow?.enabled),
+        custom_template: typeof birthdayRow?.custom_template === 'string' ? birthdayRow.custom_template : null,
+      }
+    : null;
   const hasNoStoredSchedule = meetingDaysSchemaAvailable && scheduleRow?.meeting_days == null;
   // NULL means there is no weekday filter in attendance monitoring, so show
   // every ISO weekday as eligible rather than misleadingly displaying Sunday.
@@ -165,6 +182,15 @@ export default async function SettingsPage({
             hasNoStoredSchedule={hasNoStoredSchedule}
             canEdit={canEditMeetingDays}
             schemaAvailable={meetingDaysSchemaAvailable}
+          />
+
+          <BirthdayWishesCard
+            churchSlug={church_slug}
+            churchName={church.name}
+            initialEnabled={birthdayAutomation?.enabled ?? false}
+            initialTemplate={birthdayAutomation?.custom_template ?? null}
+            canEdit={canEditMeetingDays}
+            schemaAvailable={birthdaySchemaAvailable}
           />
         </div>
 
