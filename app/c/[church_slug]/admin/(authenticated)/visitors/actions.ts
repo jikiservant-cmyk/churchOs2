@@ -1,6 +1,7 @@
 'use server';
 
 import { createClient, createAdminClient } from '@/lib/supabase/server';
+import { normalizeBirthdayInput } from '@/lib/birthday';
 import { assertChurchAdminAuth } from '@/lib/tenant';
 import { revalidatePath } from 'next/cache';
 import { redirect } from 'next/navigation';
@@ -19,7 +20,9 @@ export async function addVisitor(formData: FormData) {
     const phoneNumber = formData.get('phoneNumber') as string;
     const email = formData.get('email') as string;
     const gender = formData.get('gender') as string;
-    const birthday = formData.get('birthday') as string;
+    // Year-blind on purpose: whatever date arrives, only its month/day is kept
+    // under a fixed placeholder year (see lib/birthday.ts).
+    const birthday = normalizeBirthdayInput(formData.get('birthday')) ?? '';
     const visitorType = formData.get('visitorType') as string;
     const source = formData.get('source') as string;
     const homeChurchName = formData.get('homeChurchName') as string;
@@ -88,7 +91,9 @@ export async function editVisitor(formData: FormData) {
     const phoneNumber = formData.get('phoneNumber') as string;
     const email = formData.get('email') as string;
     const gender = formData.get('gender') as string;
-    const birthday = formData.get('birthday') as string;
+    // Year-blind on purpose: whatever date arrives, only its month/day is kept
+    // under a fixed placeholder year (see lib/birthday.ts).
+    const birthday = normalizeBirthdayInput(formData.get('birthday')) ?? '';
     const visitorType = formData.get('visitorType') as string;
     const source = formData.get('source') as string;
     const homeChurchName = formData.get('homeChurchName') as string;
@@ -175,7 +180,7 @@ export async function bulkAddVisitors(churchSlug: string, visitorsData: any[]) {
         phone_number: formattedPhone,
         email: visitor.email || null,
         gender,
-        birthday: visitor.birthday || null,
+        birthday: normalizeBirthdayInput(visitor.birthday ?? '') || null,
         visitor_type: visitor.visitorType || visitor.visitor_type || 'first_time',
         source: visitor.source || null,
         home_church_name: visitor.homeChurchName || visitor.home_church_name || null,

@@ -1,6 +1,7 @@
 'use server';
 
 import { createClient, createAdminClient } from '@/lib/supabase/server';
+import { normalizeBirthdayInput } from '@/lib/birthday';
 import { assertChurchAdminAuth } from '@/lib/tenant';
 import { revalidatePath } from 'next/cache';
 import { redirect } from 'next/navigation';
@@ -21,7 +22,9 @@ export async function addMember(formData: FormData) {
     const phone = formData.get('phone') as string;
     const email = formData.get('email') as string;
     const gender = formData.get('gender') as string;
-    const birthday = formData.get('birthday') as string;
+    // Year-blind on purpose: whatever date arrives, only its month/day is kept
+    // under a fixed placeholder year (see lib/birthday.ts).
+    const birthday = normalizeBirthdayInput(formData.get('birthday')) ?? '';
     const isYouth = formData.get('isYouth') === 'true';
       let formattedPhone = null;
       if (phone) {
@@ -119,7 +122,9 @@ export async function editMember(formData: FormData) {
     const fullName = `${firstName} ${lastName}`.trim();
     const phone = formData.get('phone') as string;
     const gender = formData.get('gender') as string;
-    const birthday = formData.get('birthday') as string;
+    // Year-blind on purpose: whatever date arrives, only its month/day is kept
+    // under a fixed placeholder year (see lib/birthday.ts).
+    const birthday = normalizeBirthdayInput(formData.get('birthday')) ?? '';
     const isYouth = formData.get('isYouth') === 'true';
 
     let formattedPhone = phone || '';
@@ -205,7 +210,7 @@ export async function bulkAddMembers(churchSlug: string, membersData: any[]) {
          phone_number: formattedPhone,
          email: member.email || null,
          gender,
-         birthday: member.birthday || member.dob || null,
+         birthday: normalizeBirthdayInput(member.birthday ?? member.dob ?? '') || null,
          is_youth: !!isYouth,
          status: 'active'
        };
