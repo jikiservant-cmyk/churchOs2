@@ -184,3 +184,9 @@ npm install -g k6
 # k6 run --vus 100 --duration 30s your-test-script.js
 ```
 Start at 100 VUs, then 500, then 1000. Watch for p95 > 300ms on admin routes.
+
+## Operations & documentation
+- [`docs/OPERATIONS.md`](docs/OPERATIONS.md) — cron schedule (Kampala time), SMS delivery window, billing chain, birthday automation, runbook.
+- [`docs/DENOMINATIONS.md`](docs/DENOMINATIONS.md) — the diocese layer: invite flows, overseer scoping, RPC reference, known issues.
+- `migrations/026_live_alignment.sql` — brings pre-alignment databases to the canonical state (streak engine, 09:00 Kampala birthday cron, enqueue fix).
+- `migrations/027_denomination_layer.sql` — the full denomination layer, captured from production.
