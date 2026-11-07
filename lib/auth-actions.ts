@@ -240,6 +240,14 @@ export async function login(prevState: AuthState, formData: FormData): Promise<A
 }
 
 export async function signup(prevState: AuthState, formData: FormData): Promise<AuthState> {
+  // Consent gate: no account is created unless the applicant explicitly ticked
+  // the Terms & Conditions / Privacy Policy box. Enforced server-side so a
+  // crafted request cannot bypass the browser's `required` checkbox — the
+  // messaging prohibitions in the Terms are part of the platform's abuse controls.
+  if (formData.get('accept_terms') !== 'on') {
+    return { error: 'Please tick the box to accept the Terms & Conditions and Privacy Policy.' };
+  }
+
   const credentials = validateSignupCredentials(formData.get('email'), formData.get('password'));
   if (!credentials.ok) {
     return {

@@ -81,6 +81,28 @@ export default function SignupPage() {
             />
           </div>
 
+          <div className="flex items-start gap-3 rounded-xl border border-[rgba(90,55,20,0.12)] bg-[rgba(255,220,170,0.05)] p-4">
+            <input
+              type="checkbox"
+              id="accept_terms"
+              name="accept_terms"
+              required
+              className="mt-0.5 h-4 w-4 shrink-0 accent-[#B5622A]"
+            />
+            <label htmlFor="accept_terms" className="text-[12px] leading-relaxed text-[#9A7E65]">
+              I agree to the{' '}
+              <Link href="/terms" target="_blank" className="font-bold text-[#B5622A] hover:underline">
+                Terms &amp; Conditions
+              </Link>{' '}
+              and{' '}
+              <Link href="/privacy" target="_blank" className="font-bold text-[#B5622A] hover:underline">
+                Privacy Policy
+              </Link>
+              , including the rule that churchOs messaging must never carry political, abusive, or
+              otherwise prohibited content.
+            </label>
+          </div>
+
           <button
             type="submit"
             disabled={isPending}
