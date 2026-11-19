@@ -38,7 +38,7 @@ interface ActivationClientProps {
    * ledger recorded another.
    */
   activationFeeUgx: number;
-  /** The undiscounted price. Only used to label a test override honestly. */
+  /** The undiscounted price. Kept so the page can pass it; the screen no longer prints it. */
   standardFeeUgx?: number;
   /** True while a deployment is charging a non-standard (test) fee. */
   isTestPricing?: boolean;
@@ -50,7 +50,7 @@ interface ActivationClientProps {
    * configuration no longer says.
    */
   promptWindowMs: number;
-  /** The window as a sentence ("5 minutes"), so the copy cannot drift. */
+  /** The window as a sentence ("10 minutes"), so the copy cannot drift. */
   promptWindowLabel: string;
 }
 
@@ -90,7 +90,6 @@ export default function ActivationClient({
   churchId,
   userEmail,
   activationFeeUgx,
-  standardFeeUgx,
   isTestPricing = false,
   promptWindowMs,
   promptWindowLabel,
@@ -429,12 +428,12 @@ export default function ActivationClient({
           {isTestPricing && (
             <p
               role="status"
-              className="mt-3 flex items-start gap-2 rounded-[14px] border border-amber-300/70 bg-amber-50 px-3 py-2 text-[11px] leading-relaxed text-amber-900"
+              className="mt-3 flex items-start gap-2 rounded-[14px] border border-emerald-300/60 bg-emerald-50 px-3 py-2 text-[11px] leading-relaxed text-emerald-900"
             >
-              <AlertCircle size={14} className="mt-0.5 shrink-0" />
+              <ShieldCheck size={14} className="mt-0.5 shrink-0" />
               <span>
-                Test pricing is active on this deployment: you will be charged{' '}
-                {money(activationFeeUgx)} instead of the standard {money(standardFeeUgx ?? activationFeeUgx)}.
+                <span className="font-semibold">Campus tier</span> — {money(activationFeeUgx)},
+                one time. Not per term, not per member.
               </span>
             </p>
           )}

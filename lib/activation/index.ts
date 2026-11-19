@@ -44,7 +44,7 @@ if (resolvedPromptWindow.rejected !== null) {
 }
 /** Milliseconds the handset prompt is presented as still being live. */
 export const ACTIVATION_PROMPT_WINDOW_MS = resolvedPromptWindow.windowMs;
-/** The same number as a sentence ("5 minutes"), so no copy can drift from the setting. */
+/** The same number as a sentence ("10 minutes"), so no copy can drift from the setting. */
 export const ACTIVATION_PROMPT_WINDOW_LABEL = describeActivationPromptWindow(resolvedPromptWindow.windowMs);
 
 export const ACTIVATION_CURRENCY = 'UGX';

@@ -103,3 +103,50 @@ Flags open, reopen, auto-resolve on return, and never overwrite
    production DB; the ghost super_admin profile (`261d9539…`, no auth user)
    should be deleted.
 5. **Denomination layer**: see `docs/DENOMINATIONS.md` (incl. its known issue).
+
+---
+
+## Registration and activation limits (from the code, 17 Nov 2026)
+
+Three different throttles, in the order a church meets them.
+
+### 1. Creating the workspace — `lib/provision-actions.ts`
+
+| Limit | Allowance | Window | Keyed on |
+|---|---|---|---|
+| Account | 7 | 1 hour | the signed-in user |
+| Network | 7 | 1 hour | client IP |
+
+**And a hard rule that is not a rate limit at all:**
+
+> `Only one church registration is allowed per network/location to prevent scams.`
+
+`church.churches.ip_address` is checked for the client IP before registration, for **all time** — not
+per hour. So a second church cannot be created from an IP that has ever created one (loopback and
+unknown IPs are exempt).
+
+**Why this matters for a network sale:** a bishops' meeting, a convention table, or a church office
+where ten pastors register on one WiFi will let **one** through and refuse nine. Mobile data is no
+safe haven either — carrier-grade NAT puts many subscribers behind one public IP, so collisions can
+happen to people in different buildings.
+
+### 2. Starting the activation payment — `app/api/church/activation/start/route.ts`
+
+| Limit | Allowance | Window | Keyed on |
+|---|---|---|---|
+| Account | 5 | 1 hour | the signed-in user |
+| Workspace | 10 | 24 hours | the tenant |
+| Phone number | 3 | 1 hour | `tenantId:phone` |
+
+429 with `Retry-After`. Once the church is active, `startActivationPayment` returns `alreadyActive`
+and charges nothing.
+
+### 3. The handset prompt
+
+10 minutes to approve the MoMo prompt (`ACTIVATION_PROMPT_WINDOW_MS` — announcement only; the webhook's own 5-minute replay window is separate and unchanged).
+
+### The path that meets none of these
+
+`joinDenominationWithInvite` (`lib/denomination-actions.ts`) — a church that **already exists** joins
+the network with the invite code. No provisioning, no IP check, no rate limit. For a multi-branch
+network, that is the route: provision once, then join by code.

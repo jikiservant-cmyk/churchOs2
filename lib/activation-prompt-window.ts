@@ -22,13 +22,20 @@
  * WHY A VARIABLE AND NOT A LITERAL
  * Same reasoning as the fee: the window that matters in production is a Vercel
  * setting, so changing it back to "no announced deadline" is a delete, not a
- * deploy. The default is 5 minutes, which is also the freshness window the
- * inbound webhook signature is accepted for (see NAJIKI_INTEGRATION.md), so the
- * number the pastor sees matches the number the provider is working to.
+ * deploy.
+ *
+ * WHY IT IS 10 MINUTES AND NOT THE WEBHOOK'S 5
+ * This number is an announcement to a person, not a provider timeout, and the
+ * two measure different things. `NAJIKI_WEBHOOK_MAX_SKEW_MS` (5 minutes,
+ * Na'jiki's own replay rule) bounds how old a *notification* may be; this bounds
+ * how long a *pastor* is told to wait before the screen admits nothing arrived.
+ * A pastor who takes nine minutes to find his phone still produces a fresh
+ * notification the moment he approves, so widening this does not weaken the
+ * webhook, and the webhook's 5 minutes is deliberately left untouched.
  */
 
-/** The announced window: 5 minutes. */
-export const ACTIVATION_PROMPT_WINDOW_DEFAULT_MS = 5 * 60 * 1000;
+/** The announced window: 10 minutes. */
+export const ACTIVATION_PROMPT_WINDOW_DEFAULT_MS = 10 * 60 * 1000;
 
 /**
  * Anything below half a minute is a stopwatch, not a deadline, and anything above
@@ -113,7 +120,7 @@ export function formatDuration(ms: number): string {
 }
 
 /**
- * "5 minutes" / "90 seconds" / "1 hour" — the sentence the UI quotes, built from
+ * "10 minutes" / "90 seconds" / "1 hour" — the sentence the UI quotes, built from
  * the window instead of hardcoded, so the copy cannot drift from the setting the
  * way the fee used to drift from the ledger.
  */

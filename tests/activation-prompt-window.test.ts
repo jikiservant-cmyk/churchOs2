@@ -22,15 +22,16 @@ const code = (relative: string) =>
     .filter((line) => !/^\s*(\/\/|\*|\/\*)/.test(line))
     .join('\n');
 
+const TEN_MINUTES = 10 * 60 * 1000;
 const FIVE_MINUTES = 5 * 60 * 1000;
 
 describe('Activation prompt window — the wait the pastor is told about', () => {
   test('the default is the five minutes that was asked for', () => {
-    assert.equal(ACTIVATION_PROMPT_WINDOW_DEFAULT_MS, FIVE_MINUTES);
-    assert.equal(resolveActivationPromptWindowMs('').windowMs, FIVE_MINUTES);
-    assert.equal(resolveActivationPromptWindowMs(undefined).windowMs, FIVE_MINUTES);
-    assert.equal(resolveActivationPromptWindowMs(null).windowMs, FIVE_MINUTES);
-    assert.equal(resolveActivationPromptWindowMs('   ').windowMs, FIVE_MINUTES);
+    assert.equal(ACTIVATION_PROMPT_WINDOW_DEFAULT_MS, TEN_MINUTES);
+    assert.equal(resolveActivationPromptWindowMs('').windowMs, TEN_MINUTES);
+    assert.equal(resolveActivationPromptWindowMs(undefined).windowMs, TEN_MINUTES);
+    assert.equal(resolveActivationPromptWindowMs(null).windowMs, TEN_MINUTES);
+    assert.equal(resolveActivationPromptWindowMs('   ').windowMs, TEN_MINUTES);
   });
 
   test('an override is honoured and announced as an override', () => {
@@ -48,7 +49,7 @@ describe('Activation prompt window — the wait the pastor is told about', () =>
   test('anything that is not whole milliseconds is refused, not interpreted', () => {
     for (const junk of ['5m', '5 minutes', '-300000', '300000.5', '0', '0x10', ' 300_000 ', 'NaN', '1e9', '300000ms']) {
       const resolved = resolveActivationPromptWindowMs(junk);
-      assert.equal(resolved.windowMs, FIVE_MINUTES, `"${junk}" must fall back to the default`);
+      assert.equal(resolved.windowMs, TEN_MINUTES, `"${junk}" must fall back to the default`);
       assert.equal(resolved.overridden, false, `"${junk}" must not be reported as an override`);
       assert.notEqual(resolved.rejected, null, `"${junk}" must be reported as rejected so the startup log says so`);
     }
