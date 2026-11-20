@@ -1,16 +1,14 @@
-# SMS economics — what 5,000 UGX a week per church actually is
+# SMS economics — 50 cost, 70 retail, 5,000 a week
 
-**The numbers in code**
+**Confirmed by the founder (17 Nov 2026): every message costs you 50 UGX.**
+So the margin is **20**, not the 25 this file previously assumed. Every number below is recomputed.
 
 | | |
 |---|---|
-| Retail rate a church pays | **70 UGX per SMS** (`DEFAULT_SMS_RATE` in `lib/wallet-read.ts`, per-wallet `sms_rate`) |
-| Documented margin | **25 UGX per SMS** (`docs/ACTIVATION_SPRINT_KAMPALA.md`) → implied cost ~45 |
-| Minimum top-up | **1,000 UGX** (`lib/money.ts`) |
-| Maximum top-up | 2,000,000 UGX |
-
-⚠️ The 70 is in the code. The **25 is from the plan, not the code** — the code has no cost field.
-Confirm the real Africa's Talking price on the invoice; if they charge 55, the margin is 15, not 25.
+| Your cost | **50 UGX per SMS** |
+| Retail rate a church pays | **70 UGX per SMS** (`DEFAULT_SMS_RATE`, `lib/wallet-read.ts`, per-wallet `sms_rate`) |
+| **Your margin** | **20 UGX per SMS = 28.6% of what the church spends** |
+| Minimum top-up | 1,000 UGX (`lib/money.ts`) · Maximum 2,000,000 |
 
 ---
 
@@ -18,84 +16,86 @@ Confirm the real Africa's Talking price on the invoice; if they charge 55, the m
 
 | | |
 |---|---|
-| SMS bought | **71** (71 × 70 = 4,970, 30 left over) |
-| Your margin | **1,775/week** |
-| Per month (×52/12) | **7,692** |
-| Per year | **92,300** |
+| SMS bought | **71** (71 × 70 = 4,970; 30 left over) |
+| Your margin | **1,420/week** |
+| Per month (×52/12) | **6,153** |
+| Per year | **73,840** |
 
-**The number that matters:** the activation fee is 17,000 once. At 5,000/week the SMS margin
-overtakes it in **9.6 weeks** — about two and a half months. From month three, every shilling on that
-church is recurring, and by year one the SMS line has earned **5.4× the activation fee** from the same
-customer.
-
-That is the whole argument for the SMS line: the activation buys the customer, the wallet pays for
-the customer.
+**Break-even against the 17,000 activation: 12 weeks.** So the wallet overtakes the activation fee in
+about three months, and by year one it has earned **4.3× the activation fee** from the same church.
+That is still the argument — it is just a month slower than the old 25-margin arithmetic implied.
 
 ---
 
-## 2. What 5,000 a week means to the church
+## 2. What 5,000 buys the church
 
-5,000 buys 71 messages. So **5,000 a week ≈ one message a week to 70 people**, and no more. Against
-real congregation sizes:
+5,000 = 71 messages = **one weekly message to 70 people**, no more.
 
-| Church size | One weekly message to everyone | Cost/week | Cost/year | Your margin/week | Margin/year |
-|---|---|---|---|---|---|
-| 60 | 60 SMS | 4,200 | 218,400 | 1,500 | 78,000 |
-| 100 | 100 SMS | 7,000 | 364,000 | 2,500 | 130,000 |
-| 150 | 150 SMS | 10,500 | 546,000 | 3,750 | 195,000 |
-| 400 | 400 SMS | 28,000 | 1,456,000 | 10,000 | 520,000 |
+| Church size | One weekly message to all | Cost/week | Your margin/week |
+|---|---|---|---|
+| 60 | 60 SMS | 4,200 | 1,200 |
+| 100 | 100 SMS | 7,000 | 2,000 |
+| 150 | 150 SMS | 10,500 | 3,000 |
+| 400 | 400 SMS | 28,000 | 8,000 |
 
-Two consequences:
-
-1. **A 5,000-a-week church is a small church, or a large church sending rarely.** Set the expectation
-   at that level and nobody is disappointed.
-2. **The big churches self-select upward.** A 400-member church that actually messages weekly is worth
-   **28,000 a week** to the wallet and 10,000 to you. That is where the SMS business is, and it is why
-   the large congregation matters more than the branch count.
+A 5,000-a-week church is a small church, or a big church sending rarely. The big churches that
+actually message weekly are worth 5–6× that, and they cost you nothing extra to serve.
 
 ---
 
-## 3. Scale — at 5,000/week each
+## 3. Scale at 5,000/week each
 
 | Churches | Wallet inflow/week | SMS/week | Margin/week | Margin/month | Margin/year |
 |---|---|---|---|---|---|
-| 4 (Worship House) | 20,000 | 284 | 7,100 | 30,767 | 369,200 |
-| 8 (fellowships) | 40,000 | 568 | 14,200 | 61,533 | 738,400 |
-| 32 (TJM) | 160,000 | 2,272 | 56,800 | 246,133 | 2,953,600 |
-| 67 (10% of Phaneroo) | 335,000 | 4,757 | 118,925 | 515,342 | 6,184,100 |
-| 100 | 500,000 | 7,100 | 177,500 | 769,167 | 9,230,000 |
-| **195** | 975,000 | 13,845 | 346,125 | **1,499,875** | 17,998,500 |
-| 670 (all Phaneroo) | 3,350,000 | 47,570 | 1,189,250 | 5,153,417 | 61,841,000 |
+| 4 (Worship House) | 20,000 | 284 | 5,680 | 24,613 | 295,360 |
+| 8 (fellowships) | 40,000 | 568 | 11,360 | 49,227 | 590,720 |
+| 32 (TJM) | 160,000 | 2,272 | 45,440 | 196,907 | 2,362,880 |
+| 67 (10% of Phaneroo) | 335,000 | 4,757 | 95,140 | 412,273 | 4,947,280 |
+| 100 | 500,000 | 7,100 | 142,000 | 615,333 | 7,384,000 |
+| **244** | 1,220,000 | 17,324 | 346,480 | **1,501,440** | 18,017,280 |
+| 670 (all Phaneroo) | 3,350,000 | 47,570 | 951,400 | 4,122,667 | 49,472,000 |
 
-**Read the bottom line of the middle:** it takes **195 churches at 5,000/week to replace 1.5M a
-month**. That is not next week — that is next year's business. Which is exactly why the SMS margin is
-the compounding line and the activation is the Friday line. Do not confuse the two.
+**244 churches at 5,000/week to replace 1.5M a month.** That is next year, not Friday — the wallet is
+the compounding line, the activation is the Friday line.
 
-But note what TJM alone does: **32 branches = 246,133 a month, every month, for nothing** — no new
-sale, no new visit, no fare. That is the argument to make to yourself when a pastor haggles over
-17,000.
+But TJM alone is **196,907 a month, forever, with no new sale**. That is the sentence to hold onto when
+a pastor haggles over 17,000.
 
 ---
 
-## 4. Three practical adjustments
+## 4. The lever you have not used: the rate, not the volume
 
-**Sell it monthly, not weekly.** 5,000 × 52 is 52 mobile-money transactions and 52 chances for the
-wallet to run dry mid-month. Offer **20,000 for the month** instead — 285 SMS, margin 7,125, and one
-prompt on the handset instead of four. Same money, a quarter of the friction.
+Your margin per shilling a church spends is fixed by the rate:
 
-**Watch the actual send rate, not the top-up rate.** A church that tops up 5,000 and sends 200 SMS
-moves the money through in 18 days. The metric that predicts churn is *wallet empty before month
-end*, not top-up size.
+| Retail rate | Margin/SMS | Margin as % of church spend | Per 5,000 spent |
+|---|---|---|---|
+| 60 | 10 | 16.7% | 833 |
+| **70 (now)** | **20** | **28.6%** | **1,429** |
+| 80 | 30 | 37.5% | 1,875 |
+| 90 | 40 | 44.4% | 2,222 |
+| 100 | 50 | 50.0% | 2,500 |
 
-**Don't discount the rate to win the bundle.** `sms_rate` is per-wallet, so you *can* drop a church to
-60/SMS — and at a 45 cost that leaves 15. Margin halves while the support burden stays the same. If a
-church needs cheaper messages, give it **more messages at the same rate** (a bonus balance), never a
-lower rate: a rate is permanent and travels.
+**28.6% is thin** for a business that also carries support, failed sends and refunds. Moving the rate
+from 70 to 80 raises margin per shilling by **31%** at the same volume — and it is one number in
+`wallets.sms_rate`, not a re-sale.
+
+Before you move it: check what the other Kampala bulk-SMS resellers charge a church. If they are at
+65–70, 80 is a hard sell; if they are at 90, you are already underpriced.
 
 ---
 
-## 5. The one number to remember
+## 5. Three practical rules, unchanged
 
-**5,000 a week = 1,775 to you, 71 messages to them, and in ten weeks it has beaten the activation fee.**
+1. **Sell the month, not the week.** 20,000 for the month = 285 SMS = 5,700 margin, and one prompt on
+   the handset instead of four. Weekly top-ups mean 52 prompts and 52 chances to run dry.
+2. **Watch the empty wallet, not the top-up size.** The churn predictor is "balance dies before month
+   end", not "topped up small".
+3. **Never discount the rate.** At a cost of 50, a church on 60 leaves you 10 — a third of your margin,
+   permanently, and that rate travels to every pastor in the district. Give **bonus messages**, never a
+   cheaper message.
 
-Everything else on this page is that sentence multiplied.
+---
+
+## 6. The one sentence
+
+**5,000 a week = 71 messages for them, 1,420 for you, and it beats the activation fee in twelve weeks.**
