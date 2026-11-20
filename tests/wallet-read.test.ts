@@ -88,6 +88,11 @@ describe('drift-tolerant wallet read', () => {
     assert.equal(walletSmsRate({ sms_rate: 0 }), DEFAULT_SMS_RATE);
     assert.equal(walletSmsRate({ sms_rate: null }), DEFAULT_SMS_RATE);
     assert.equal(walletSmsRate({ sms_rate: 105 }), 105);
-    assert.equal(Math.floor(walletDerivedBalanceUgx({ balance: '350000' }) / walletSmsRate({ sms_rate: 0 })), 5000);
+    // Intent: a 0 rate falls back to the default. Express the arithmetic in terms
+    // of that default, so a pricing decision does not fail a behaviour test.
+    assert.equal(
+      Math.floor(walletDerivedBalanceUgx({ balance: '350000' }) / walletSmsRate({ sms_rate: 0 })),
+      Math.floor(350000 / DEFAULT_SMS_RATE),
+    );
   });
 });

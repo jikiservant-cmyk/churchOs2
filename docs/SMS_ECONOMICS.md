@@ -1,17 +1,30 @@
-# SMS economics — 25 margin, 70 retail, 5,000 a week
+# SMS economics — buy 25, sell 50
 
-**Founder's figure (17 Nov 2026): the margin is 25 UGX per message.**
-At a 70 retail rate that implies a cost of **45**.
-
-> ⚠️ One inconsistency to settle: a 50 cost was also stated the same day. If **50** is the real
-> Africa's Talking price, the margin is **20**, and every number on this page drops by 20%
-> (1,420/week, 6,153/month, 244 churches for 1.5M). Check the invoice once and pick one.
+**Founder's model (17 Nov 2026): buy at 25, sell at 50. Margin 25 — half of what the church spends.**
 
 | | |
 |---|---|
-| Retail rate a church pays | **70 UGX per SMS** (`DEFAULT_SMS_RATE`, `lib/wallet-read.ts`, per-wallet `sms_rate`) |
-| **Your margin** | **25 UGX per SMS = 35.7% of what the church spends** (implied cost 45) |
+| Your cost | **25 UGX per SMS** |
+| Retail rate a church pays | **50 UGX per SMS** |
+| **Margin** | **25 UGX = 50% of the church's spend** |
 | Minimum top-up | 1,000 UGX (`lib/money.ts`) · Maximum 2,000,000 |
+
+**The app was set to 70.** `DEFAULT_SMS_RATE` in `lib/wallet-read.ts` was `70`, and both wallet
+creation paths in `lib/wallet-actions.ts` wrote `sms_rate: 70`. At a 25 cost that was a 45 margin — 64%
+— on every church that never had a rate set. **Changed to 50 in code on 17 Nov 2026.**
+
+> **Still to check in the database:** the rate is stored per wallet, so wallets that already exist keep
+> whatever `sms_rate` they were created with. Read (do not yet update):
+>
+> ```sql
+> select tenant_id, sms_rate, balance
+> from public.wallets
+> where sms_rate is distinct from 50
+> order by tenant_id;
+> ```
+>
+> If that list is churches you have already been billing at 70, decide deliberately: leave them
+> (they agreed to 70) or move them to 50 with a note. Do not mass-update silently.
 
 ---
 
@@ -19,30 +32,33 @@ At a 70 retail rate that implies a cost of **45**.
 
 | | |
 |---|---|
-| SMS bought | **71** (71 × 70 = 4,970; 30 left over) |
-| Your margin | **1,775/week** |
-| Per month (×52/12) | **7,692** |
-| Per year | **92,300** |
+| SMS bought | **100** (100 × 50 = exactly 5,000) |
+| Your margin | **2,500/week** |
+| Per month (×52/12) | **10,833** |
+| Per year | **130,000** |
 
-**Break-even against the 17,000 activation: 9.6 weeks.** The wallet overtakes the activation fee in
-about two and a half months, and by year one it has earned **5.4× the activation fee** from the same
-church, at no extra cost to serve.
+**Break-even against the 17,000 activation: 6.8 weeks.** Under seven weeks and the wallet has paid back
+the activation fee; by year one it has earned **7.6× the activation fee** from the same church, with no
+second sale.
+
+That is why 50 is a better price than 70 for you, not just for them: at 70 a church gets 71 messages for
+its 5,000 and feels the cost; at 50 it gets 100 and stops thinking about it. Same money in, half the
+friction out.
 
 ---
 
 ## 2. What 5,000 buys the church
 
-5,000 = 71 messages = **one weekly message to 70 people**, no more.
-
 | Church size | One weekly message to all | Cost/week | Your margin/week |
 |---|---|---|---|
-| 60 | 60 SMS | 4,200 | 1,500 |
-| 100 | 100 SMS | 7,000 | 2,500 |
-| 150 | 150 SMS | 10,500 | 3,750 |
-| 400 | 400 SMS | 28,000 | 10,000 |
+| 60 | 60 SMS | 3,000 | 1,500 |
+| 100 | 100 SMS | 5,000 | 2,500 |
+| 150 | 150 SMS | 7,500 | 3,750 |
+| 400 | 400 SMS | 20,000 | 10,000 |
 
-A 5,000-a-week church is a small church, or a big church sending rarely. The big churches that
-actually message weekly are worth 5–6× that, and they cost you nothing extra to serve.
+**5,000 a week = one message a week to 100 people.** That is a real congregation, not a token, and it is
+the sentence to use in the room: *"five thousand a week and you can message everyone in your church
+once a week, every week."*
 
 ---
 
@@ -50,54 +66,50 @@ actually message weekly are worth 5–6× that, and they cost you nothing extra 
 
 | Churches | Wallet inflow/week | SMS/week | Margin/week | Margin/month | Margin/year |
 |---|---|---|---|---|---|
-| 4 (Worship House) | 20,000 | 284 | 7,100 | 30,767 | 369,200 |
-| 8 (fellowships) | 40,000 | 568 | 14,200 | 61,533 | 738,400 |
-| 32 (TJM) | 160,000 | 2,272 | 56,800 | 246,133 | 2,953,600 |
-| 67 (10% of Phaneroo) | 335,000 | 4,757 | 118,925 | 515,342 | 6,184,100 |
-| 100 | 500,000 | 7,100 | 177,500 | 769,167 | 9,230,000 |
-| **195** | 975,000 | 13,845 | 346,125 | **1,499,875** | 17,998,500 |
-| 670 (all Phaneroo) | 3,350,000 | 47,570 | 1,189,250 | 5,153,417 | 61,841,000 |
+| 4 (Worship House) | 20,000 | 400 | 10,000 | 43,333 | 520,000 |
+| 8 (fellowships) | 40,000 | 800 | 20,000 | 86,667 | 1,040,000 |
+| 32 (TJM) | 160,000 | 1,600 | 80,000 | **346,667** | 4,160,000 |
+| 67 (10% of Phaneroo) | 335,000 | 3,350 | 167,500 | 725,833 | 8,710,000 |
+| 100 | 500,000 | 5,000 | 250,000 | 1,083,333 | 13,000,000 |
+| **139** | 695,000 | 6,950 | 347,500 | **1,505,833** | 18,070,000 |
+| 670 (all Phaneroo) | 3,350,000 | 33,500 | 1,675,000 | 7,258,333 | 87,100,000 |
 
-**195 churches at 5,000/week to replace 1.5M a month.** That is next year, not Friday — the wallet is
-the compounding line, the activation is the Friday line.
-
-But TJM alone is **246,133 a month, forever, with no new sale**. That is the sentence to hold onto when
-a pastor haggles over 17,000.
+**139 churches at 5,000/week replaces 1.5M a month** — down from 244 at the old numbers, because the
+margin per shilling doubled. TJM alone is **346,667 a month, recurring, with no new sale.**
 
 ---
 
-## 4. The lever you have not used: the rate, not the volume
+## 4. Don't cut the rate — it is the whole margin
 
-Your margin per shilling a church spends is fixed by the rate:
+At a 25 cost:
 
 | Retail rate | Margin/SMS | Margin as % of church spend | Per 5,000 spent |
 |---|---|---|---|
-| 60 | 15 | 25.0% | 1,250 |
-| **70 (now)** | **25** | **35.7%** | **1,786** |
-| 80 | 35 | 43.8% | 2,188 |
-| 90 | 45 | 50.0% | 2,500 |
+| 40 | 15 | 37.5% | 1,875 |
+| **50 (now)** | **25** | **50.0%** | **2,500** |
+| 60 | 35 | 58.3% | 2,917 |
+| 70 (what the code used to charge) | 45 | 64.3% | 3,214 |
 
-**35.7% is workable but not generous** — it carries support, failed sends and refunds. Moving the rate
-from 70 to 80 raises margin per shilling by **22%** at the same volume, and it is one number in
-`wallets.sms_rate`, not a re-sale.
+A "small discount to 40" costs you **40% of the margin, permanently**, on every message that church will
+ever send. Give **bonus messages** instead — a one-off balance credit leaves the rate intact.
 
-Before you move it: check what the other Kampala bulk-SMS resellers charge a church. If they are at
-65–70, 80 is a hard sell; if they are at 90, you are already underpriced.
+The reverse is also true: 70 was not a ripoff, it was 64%. But 50 buys something 70 cannot — a church
+that messages weekly instead of monthly, and a referral without an argument.
 
 ---
 
-## 5. Three practical rules, unchanged
+## 5. Three rules
 
-1. **Sell the month, not the week.** 20,000 for the month = 285 SMS = 7,125 margin, and one prompt on
-   the handset instead of four. Weekly top-ups mean 52 prompts and 52 chances to run dry.
-2. **Watch the empty wallet, not the top-up size.** The churn predictor is "balance dies before month
-   end", not "topped up small".
-3. **Never discount the rate.** On a 45 cost, a church at 60 leaves you 15 — 40% of your margin, gone
-   permanently, and that rate travels to every pastor in the district. Give **bonus messages**, never a
-   cheaper message.
+1. **Sell the month, not the week.** 20,000 for the month = 400 SMS = 10,000 margin, and one handset
+   prompt instead of four.
+2. **Watch the empty wallet, not the top-up size.** At 50, a church of 500 that messages weekly burns 25,000 a
+   week, so a 20,000 top-up is gone in under a month. Churn is predicted by the
+   balance dying before month end, not by the top-up amount.
+3. **Never discount the rate.** Bonus messages, never a cheaper message.
 
 ---
 
 ## 6. The one sentence
 
-**5,000 a week = 71 messages for them, 1,775 for you, and it beats the activation fee in ten weeks.**
+**Buy 25, sell 50: 5,000 a week is 100 messages for them, 2,500 for you, and the wallet has repaid the
+activation fee in seven weeks.**
