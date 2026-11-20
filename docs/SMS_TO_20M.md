@@ -106,3 +106,68 @@ same size. Not 1,846 churches — one more conversation like the first one.
 - **The life = 7.8M/month for five months**, then 1.4M/month. That is **720 churches at the minimum**,
   or 240 at 15,000/week, or **144 if TJM and one more network land.**
 - **The realistic semester target is 144 churches**, and the realistic prayer is one more TJM.
+
+---
+
+## 7. Mixed usage — the model that is actually true
+
+You are right: not every church sits at 5,000. Some will run 15,000, some 20,000. So the number that
+drives everything is the **blended weekly spend**, not the minimum.
+
+### What each level actually means
+
+At 50/SMS, weekly spend = messages per week:
+
+| Weekly spend | Messages | What that church is |
+|---|---|---|
+| 5,000 | 100 | 100 members, everyone once a week |
+| 10,000 | 200 | 200 members weekly, or 100 members twice weekly |
+| 15,000 | 300 | 300 members weekly, or 150 twice weekly |
+| 20,000 | 400 | 400 members weekly, or 200 twice weekly |
+| 30,000 | 600 | 600 members weekly, or 300 twice weekly |
+
+So 20,000/week is not a small church being generous — it is a **200-member church messaging everyone
+twice a week**, or a 400-member church once. That is the upper half of the market, and it is where the
+money is: one 20,000/week church is **520,000 a year**, one 15,000/week church is 390,000.
+
+### Four blends, and what each does to the target
+
+| Mix | Blend/week | Margin/church/month | Churches for 20M | For the semester (7.8M) | For 1.5M |
+|---|---|---|---|---|---|
+| A — everyone at the minimum | 5,000 | 10,833 | 1,846 | 720 | 138 |
+| **B — realistic branch network** | **9,250** | **20,042** | **998** | **389** | **75** |
+| C — growing adoption, year 1 | 11,000 | 23,833 | 839 | 327 | 63 |
+| D — big congregations | 15,500 | 33,583 | 596 | 232 | 45 |
+
+Mix B = 50% at 5,000, 30% at 10,000, 15% at 15,000, 5% at 30,000.
+
+**So your instinct halves the church count: 1,846 → ~1,000 for 20M, 720 → ~390 for the semester,
+138 → 75 for 1.5M/month.**
+
+### What it does to the one network you already have
+
+| TJM's 32 branches at | Margin/month |
+|---|---|
+| 5,000/wk each | 346,667 |
+| **9,250/wk blended** | **641,333** |
+| 15,000/wk each | 1,040,000 |
+| 20,000/wk each | 1,386,667 |
+
+Same 32 churches. Almost double the income, purely from whether the big branches actually message their
+people.
+
+### The rule
+
+**Plan the pipeline at 5,000. Book the revenue at the earned average.**
+
+You cannot promise a blend — it is measured after six weeks of real sending. What you can do is make the
+average rise on purpose:
+
+1. **Onboard at the minimum** (easy yes, no haggling).
+2. **Six weeks later, read the send log** — a church that used 90% of its wallet is a 10,000/week church
+   being throttled by its own top-up.
+3. **Offer the higher amount as convenience, not as a price rise:** *"Pastor, you used your 5,000 in nine
+   days and half your list went out late. Put 20,000 for the month and nothing ever stops."*
+
+That conversation is how 5,000 churches become 20,000 churches — and it is the single cheapest revenue
+move in this whole document.
