@@ -9,12 +9,15 @@
 | **Margin** | **25 UGX = 50% of the church's spend** |
 | Minimum top-up | 1,000 UGX (`lib/money.ts`) · Maximum 2,000,000 |
 
-**The app was set to 70.** `DEFAULT_SMS_RATE` in `lib/wallet-read.ts` was `70`, and both wallet
-creation paths in `lib/wallet-actions.ts` wrote `sms_rate: 70`. At a 25 cost that was a 45 margin — 64%
-— on every church that never had a rate set. **Changed to 50 in code on 17 Nov 2026.**
+**What the database says, and what the code said.** The live wallets carry `sms_rate = 50`, so churches
+are already being charged 50 — that was always the effective price. The *fallback* in
+`lib/wallet-read.ts` (`DEFAULT_SMS_RATE`) was 70, and it is used only when a wallet row is missing, has
+`sms_rate` null, or the column does not exist; both wallet-creation paths in `lib/wallet-actions.ts`
+also wrote 70. That fallback is now **50**, so the code and the database finally agree. No church's
+price changed by this — the rows already said 50.
 
-> **Still to check in the database:** the rate is stored per wallet, so wallets that already exist keep
-> whatever `sms_rate` they were created with. Read (do not yet update):
+> **Optional audit — nothing is broken.** The rate is stored per wallet, and yours are already 50. Run
+> this only to confirm there is no stray row (null, 0, or an old 70) that would be quoted differently:
 >
 > ```sql
 > select tenant_id, sms_rate, balance
