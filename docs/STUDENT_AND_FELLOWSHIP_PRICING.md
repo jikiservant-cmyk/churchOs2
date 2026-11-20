@@ -196,7 +196,8 @@ One variable, server-side, read once at boot in `lib/activation/index.ts`.
 
 ### What that means in practice
 
-- **Selling this week: leave it empty.** Churches pay 17,000 and the app records 17,000.
+- **Selling this week: leave it empty.** Churches pay 17,000, the app records 17,000, and the green
+  campus panel stays off the screen — it only renders when the fee differs from 17,000.
 - **Do not put 9,500 in it.** It would charge *every church* 9,500 and label your live selling as
   test pricing — and the screen prints the campus line instead of a warning, so it will not read as a
   test, but the scope is still every church.
@@ -210,7 +211,7 @@ One variable, server-side, read once at boot in `lib/activation/index.ts`.
 ### The related variable
 
 `ACTIVATION_PROMPT_WINDOW_MS` — how long the screen tells a pastor they have to approve the prompt on
-the handset. Default **5 minutes**; the copy is generated from the value, so the screen cannot
+the handset. Default **10 minutes** (600000 ms); the copy is generated from the value, so the screen cannot
 disagree with the setting. Same rules: whole milliseconds, invalid values fall back to the default.
 
 ---
@@ -221,14 +222,15 @@ Don't. Three things happen, and the second one is fatal.
 
 **1. Every church pays 9,500** — it is one global number, not a fellowship switch.
 
-**2. The activation screen tells the pastor, in an amber box, verbatim:**
+**2. The activation screen shows every church a green panel reading, verbatim:**
 
-> *"Test pricing is active on this deployment: you will be charged UGX 9,500 instead of the standard
-> UGX 17,000."*
+> *"**Campus tier** — UGX 9,500, one time. Not per term, not per member."*
 
-So the buyer reads the word **test**, the discount, **and** your real price, on the screen, before he
-pays. In one sentence he learns the price is negotiable, that the thing might not be ready, and what
-everyone else is supposed to pay.
+The panel renders whenever the override is active (`isTestPricing` in
+`components/activation/ActivationClient.tsx:428`), so a **church branch** — a 17,000 customer — is told
+on screen that it is on the campus tier at the campus price. It no longer says "test", which is worse,
+not better: there is no warning left, only a tier and a price that are both wrong for that buyer. And
+it spreads — the first pastor who screenshots it sets your church price at 9,500 for the district.
 
 **3. It lands on the exact days you are closing.** Friday to Monday is the whole close window:
 
