@@ -154,7 +154,7 @@ export async function initiateNajikiPayment(formData: FormData) {
 
       const { data: newWallet, error: walletCreateError } = await supabaseAdmin
         .from('wallets')
-        .upsert({ tenant_id: churchId, balance: 0, sms_rate: 70, app_type: 'church' })
+        .upsert({ tenant_id: churchId, balance: 0, sms_rate: 50, app_type: 'church' })
         .select('id')
         .single();
       if (walletCreateError) return { error: 'Unable to initialize church wallet' };
@@ -395,7 +395,7 @@ export async function initiateDonationPayment(params: {
       if (tenantCreateError) return { error: 'Unable to initialize church payment account' };
       const { data: newWallet, error: walletCreateError } = await supabaseAdmin
         .from('wallets')
-        .upsert({ tenant_id: churchId, balance: 0, sms_rate: 70, app_type: 'church' })
+        .upsert({ tenant_id: churchId, balance: 0, sms_rate: 50, app_type: 'church' })
         .select('id')
         .single();
       if (walletCreateError) return { error: 'Unable to initialize church wallet' };

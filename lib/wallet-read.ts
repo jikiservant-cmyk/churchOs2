@@ -18,7 +18,7 @@
 /** Postgres: column does not exist (42703) / field selection does not exist (42704). */
 const MISSING_COLUMN_CODES = new Set(['42703', '42704']);
 
-export const DEFAULT_SMS_RATE = 70;
+export const DEFAULT_SMS_RATE = 50;
 
 export type WalletRecord = {
   balance?: number | string | null;
