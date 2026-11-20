@@ -116,3 +116,41 @@ that messages weekly instead of monthly, and a referral without an argument.
 
 **Buy 25, sell 50: 5,000 a week is 100 messages for them, 2,500 for you, and the wallet has repaid the
 activation fee in seven weeks.**
+
+---
+
+## 7. The full grid — buy 25, sell 50, 5,000/week per church
+
+| Churches | Inflow/week | SMS/week | Margin/week | Margin/month | Margin/year | Year 1 (incl. activation) |
+|---|---|---|---|---|---|---|
+| 4 | 20,000 | 400 | 10,000 | 43,333 | 520,000 | 588,000 |
+| 8 | 40,000 | 800 | 20,000 | 86,667 | 1,040,000 | 1,176,000 |
+| 10 | 50,000 | 1,000 | 25,000 | 108,333 | 1,300,000 | 1,470,000 |
+| 20 | 100,000 | 2,000 | 50,000 | 216,667 | 2,600,000 | 2,940,000 |
+| 28 | 140,000 | 2,800 | 70,000 | 303,333 | 3,640,000 | 4,116,000 |
+| **32 (TJM)** | 160,000 | 3,200 | 80,000 | **346,667** | 4,160,000 | 4,704,000 |
+| 47 | 235,000 | 4,700 | 117,500 | 509,167 | 6,110,000 | 6,909,000 |
+| 67 | 335,000 | 6,700 | 167,500 | 725,833 | 8,710,000 | 9,849,000 |
+| 93 | 465,000 | 9,300 | 232,500 | 1,007,500 | 12,090,000 | 13,671,000 |
+| 100 | 500,000 | 10,000 | 250,000 | 1,083,333 | 13,000,000 | 14,700,000 |
+| **139** | 695,000 | 13,900 | 347,500 | **1,505,833** | 18,070,000 | 20,433,000 |
+| 200 | 1,000,000 | 20,000 | 500,000 | 2,166,667 | 26,000,000 | 29,400,000 |
+| 670 (all Phaneroo) | 3,350,000 | 67,000 | 1,675,000 | 7,258,333 | 87,100,000 | 98,490,000 |
+
+**Year 1** = the 17,000 activation (once) + a full year of SMS margin at 5,000/week. It assumes every
+church stays topped up for 52 weeks, which none of them will do perfectly — treat it as a ceiling, and
+the "margin/month" column as the honest number.
+
+### How many churches to clear a monthly number
+
+| Monthly target | Churches at 5,000/week |
+|---|---|
+| 100,000 | 10 |
+| 300,000 | 28 |
+| 500,000 | 47 |
+| 1,000,000 | 93 |
+| 1,500,000 | 139 |
+| 3,000,000 | 277 |
+
+**TJM is 28 churches.** One network conversation, landed properly, clears 300,000 a month — which is
+more than most of these targets and needs no new customer for the rest of the year.
