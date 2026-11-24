@@ -118,9 +118,13 @@ export default function OverseerDashboardClient({
 
   const handleCopyInviteLink = (code: string) => {
     const origin = typeof window !== 'undefined' ? window.location.origin : '';
-    const link = `${origin}/signup/provision?code=${code}`;
+    // /join/<code> is the universal link: visitors without an account flow
+    // into signup with the code attached, pastors of existing churches get a
+    // one-tap join confirmation. The bare /signup/provision?code= link keeps
+    // working for links shared before this existed.
+    const link = `${origin}/join/${encodeURIComponent(code)}`;
     navigator.clipboard.writeText(link);
-    toast.success('Registration invite link copied to clipboard!');
+    toast.success('Church join link copied — works for new signups and existing churches!');
   };
 
   const handleCreateInviteSubmit = async (e: React.FormEvent) => {
@@ -676,7 +680,7 @@ export default function OverseerDashboardClient({
                         <button
                           onClick={() => inv.code && handleCopyInviteLink(inv.code)}
                           disabled={!inv.code}
-                          title={inv.code ? 'Copy Direct Signup Link' : 'Code is only available when the invite is created'}
+                          title={inv.code ? 'Copy church join link (signup + one-click join)' : 'Code is only available when the invite is created'}
                           className="px-2.5 py-1.5 bg-white/70 hover:bg-white rounded-lg text-xs font-bold text-[#B5622A] flex items-center gap-1 transition-colors shadow-xs disabled:cursor-not-allowed disabled:opacity-50"
                         >
                           <Link2 className="w-3.5 h-3.5" />

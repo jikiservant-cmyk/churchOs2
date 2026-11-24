@@ -17,7 +17,10 @@ export default async function AdminLoginPage({
   let targetSlug = Array.isArray(resolvedSearchParams.slug) ? resolvedSearchParams.slug[0] : resolvedSearchParams.slug;
   let loginError = Array.isArray(resolvedSearchParams.error) ? resolvedSearchParams.error[0] : resolvedSearchParams.error;
   const requestedReturnTo = Array.isArray(resolvedSearchParams.returnTo) ? resolvedSearchParams.returnTo[0] : resolvedSearchParams.returnTo;
-  const safeReturnTo = requestedReturnTo && /^\/overseer\/invite\/[A-Za-z0-9_-]{1,128}$/.test(requestedReturnTo)
+  // /overseer/invite/<code> redeems an overseer invite after login;
+  // /join/<code> resumes the one-click church join after login. Both are
+  // fixed, narrowly-scoped destinations — never accept arbitrary return URLs.
+  const safeReturnTo = requestedReturnTo && /^\/(?:overseer\/invite|join)\/[A-Za-z0-9_-]{1,128}$/.test(requestedReturnTo)
     ? requestedReturnTo
     : undefined;
 

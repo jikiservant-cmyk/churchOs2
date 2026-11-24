@@ -5,6 +5,7 @@ import { headers } from 'next/headers';
 import { canProvisionChurch } from '@/lib/provisioning-security';
 import { checkRateLimit, getRateLimitIp } from '@/lib/security/rate-limit';
 import { ensureChurchUsherPasskey } from '@/lib/usher-passkey';
+import { hashChurchInviteCode } from '@/lib/invite-code';
 
 export type ProvisionState = {
   error?: string;
@@ -14,6 +15,12 @@ export type ProvisionState = {
   appType?: 'church';
   /** Usher portal code for the new workspace. Absent when it could not be issued. */
   usherPasskey?: string;
+  /**
+   * Denomination name when the signup carried a join-link invite — the church
+   * was born linked, and the confirmation screen names it. Purely cosmetic:
+   * the link itself happens inside the provisioning RPC regardless.
+   */
+  joinedDenomination?: string;
 };
 
 export async function provisionTenant(prevState: ProvisionState, formData: FormData): Promise<ProvisionState> {
@@ -183,6 +190,34 @@ export async function provisionTenant(prevState: ProvisionState, formData: FormD
       console.warn('[Provisioning] usher passkey step failed:', passkeyError instanceof Error ? passkeyError.message : passkeyError);
     }
 
+    // Best-effort cosmetic lookup: name the denomination for the success
+    // screen when a join-link invite was attached. The link itself was already
+    // applied atomically inside `provision_church_v3` — a failure here changes
+    // nothing except the confirmation copy.
+    let joinedDenomination: string | undefined;
+    if (inviteCode) {
+      try {
+        const { data: inviteRow } = await adminSupabase
+          .schema('church')
+          .from('denomination_invites')
+          .select('denomination_id')
+          .eq('code_hash', hashChurchInviteCode(inviteCode))
+          .eq('invite_type', 'church')
+          .maybeSingle();
+        if (inviteRow?.denomination_id) {
+          const { data: denomRow } = await adminSupabase
+            .schema('church')
+            .from('denominations')
+            .select('name')
+            .eq('id', inviteRow.denomination_id)
+            .maybeSingle();
+          if (denomRow?.name) joinedDenomination = denomRow.name;
+        }
+      } catch (denomLookupError) {
+        console.warn('[Provisioning] denomination name lookup failed (non-fatal):', denomLookupError);
+      }
+    }
+
     // We navigate on the client side to avoid Next.js action redirect issues
     return { 
       success: true, 
@@ -190,6 +225,7 @@ export async function provisionTenant(prevState: ProvisionState, formData: FormD
       slug: sanitizedSlug,
       appType,
       ...(usherPasskey ? { usherPasskey } : {}),
+      ...(joinedDenomination ? { joinedDenomination } : {}),
     };
 
   } catch (err: any) {
