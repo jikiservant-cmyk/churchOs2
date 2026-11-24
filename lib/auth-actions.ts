@@ -61,10 +61,11 @@ export async function login(prevState: AuthState, formData: FormData): Promise<A
       return { error: authError?.message || 'Login failed' };
     }
 
-    // Invite redemption is a safe, narrowly-scoped post-login destination. Do
-    // not accept arbitrary return URLs from the browser.
+    // Invite redemption and one-click church joins are safe, narrowly-scoped
+    // post-login destinations. Do not accept arbitrary return URLs from the
+    // browser.
     const returnTo = String(formData.get('returnTo') || '').trim();
-    if (/^\/overseer\/invite\/[A-Za-z0-9_-]{1,128}$/.test(returnTo)) {
+    if (/^\/(?:overseer\/invite|join)\/[A-Za-z0-9_-]{1,128}$/.test(returnTo)) {
       return { success: true, redirectTo: returnTo };
     }
 

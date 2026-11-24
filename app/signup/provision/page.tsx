@@ -13,6 +13,9 @@ function ProvisionForm() {
   const [name, setName] = useState('');
   const [slug, setSlug] = useState('');
   const [inviteCode, setInviteCode] = useState('');
+  // True when the code arrived via the share link (?invite= / ?code=) — the
+  // field is then hidden and submitted invisibly; the visitor never sees it.
+  const [autoCode, setAutoCode] = useState(false);
   const router = useRouter();
   const searchParams = useSearchParams();
 
@@ -20,11 +23,14 @@ function ProvisionForm() {
     const codeParam = searchParams.get('invite') || searchParams.get('code') || searchParams.get('invite_code');
     if (codeParam) {
       setInviteCode(codeParam.toUpperCase());
+      setAutoCode(true);
     }
   }, [searchParams]);
 
   useEffect(() => {
-    if (state.success && state.slug) {
+    // With a denomination link the join is celebrated on this screen first;
+    // otherwise keep the original straight-to-dashboard behaviour.
+    if (state.success && state.slug && !state.joinedDenomination) {
       router.push(`/${state.slug}/admin`);
     }
   }, [state, router]);
@@ -49,6 +55,25 @@ function ProvisionForm() {
       {state.error && (
         <div className="mb-6 p-4 bg-[#B5622A]/10 border border-[#B5622A]/20 rounded-xl text-[#B5622A] text-xs font-bold leading-relaxed uppercase tracking-wider">
           {state.error}
+        </div>
+      )}
+
+      {state.success && state.joinedDenomination && state.slug && (
+        <div className="mb-6 rounded-xl border border-emerald-700/20 bg-emerald-700/[0.07] p-5 text-center">
+          <p className="text-sm font-bold text-emerald-800">
+            🎉 Your church is live — you&apos;re now part of {state.joinedDenomination} ✅
+          </p>
+          <p className="mt-1 text-xs text-[#6B513E]">
+            Your workspace <span className="font-mono">/{state.slug}</span> was created and linked to the denomination automatically.
+          </p>
+          <button
+            type="button"
+            onClick={() => router.push(`/${state.slug}/admin`)}
+            className="mt-4 inline-flex w-full items-center justify-center gap-2 rounded-xl bg-[#2B1A0E] px-5 py-3 text-xs font-bold uppercase tracking-wider text-[#F5E6CE] transition hover:bg-[#3d2517]"
+          >
+            Go to my dashboard
+            <ArrowRight className="h-4 w-4" />
+          </button>
         </div>
       )}
 
@@ -85,6 +110,18 @@ function ProvisionForm() {
             <p className="text-[10px] text-[#9A7E65] italic tracking-wide">This will be your workspace address</p>
           </div>
 
+          {autoCode ? (
+            <div className="space-y-1.5 pt-2 border-t border-[rgba(90,55,20,0.08)]">
+              <input type="hidden" name="invite_code" value={inviteCode} />
+              <div className="flex items-center gap-2 rounded-xl border border-emerald-700/15 bg-emerald-700/[0.06] px-4 py-3">
+                <Tag className="h-4 w-4 shrink-0 text-emerald-700" />
+                <p className="text-[11px] leading-relaxed text-emerald-800">
+                  <span className="font-bold">Denomination link attached.</span>{' '}
+                  Your church will join the denomination from your invite link automatically — nothing to type.
+                </p>
+              </div>
+            </div>
+          ) : (
           <div className="space-y-1.5 pt-2 border-t border-[rgba(90,55,20,0.08)]">
             <div className="flex items-center justify-between">
               <label className="block text-[10px] font-bold text-[#C8B89A] uppercase tracking-widest">
@@ -106,6 +143,7 @@ function ProvisionForm() {
               If your church is joining a denomination, enter your invite code. Otherwise leave blank for an independent church.
             </p>
           </div>
+          )}
         </div>
 
         <button
