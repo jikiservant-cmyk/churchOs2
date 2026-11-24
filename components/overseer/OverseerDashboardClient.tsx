@@ -53,7 +53,7 @@ export default function OverseerDashboardClient({
   initialChurches,
   initialInvites,
   userEmail,
-  denominationName = 'Diocese Governance',
+  denominationName = 'Your denomination',
   denominationSlug,
 }: OverseerDashboardClientProps) {
   const [activeTab, setActiveTab] = useState<'churches' | 'invites' | 'governance'>('churches');
@@ -239,10 +239,10 @@ export default function OverseerDashboardClient({
               </span>
             </div>
             <h2 style={{ fontFamily: "'Playfair Display', serif" }} className="text-2xl md:text-3xl font-bold text-[#1E1208]">
-              {timeGreeting}, Bishop
+              {timeGreeting}
             </h2>
             <p className="text-xs md:text-sm text-[#6B513E] mt-1 max-w-xl leading-relaxed">
-              Oversight console for <strong className="text-[#1E1208]">{denominationName}</strong>. Monitoring {totalChurchesCount} parish branches and {totalMembersCount.toLocaleString()} souls across the region.
+              You oversee <strong className="text-[#1E1208]">{denominationName}</strong> — {totalChurchesCount} {totalChurchesCount === 1 ? 'church' : 'churches'}, {totalMembersCount.toLocaleString()} {totalMembersCount === 1 ? 'member' : 'members'}.
             </p>
           </div>
         </div>
@@ -278,7 +278,7 @@ export default function OverseerDashboardClient({
         {/* Tile 1: Total Churches */}
         <div className="bg-[#F0E6D3] rounded-2xl p-4 border border-[rgba(90,55,20,0.13)] shadow-sm flex flex-col justify-between">
           <div className="flex items-center justify-between mb-2">
-            <span className="text-[10px] font-bold text-[#9A7E65] uppercase tracking-wider">Parishes</span>
+            <span className="text-[10px] font-bold text-[#9A7E65] uppercase tracking-wider">Churches</span>
             <div className="p-1.5 bg-[#2B1A0E] text-[#F5E6CE] rounded-lg">
               <Church className="w-3.5 h-3.5 text-[#B5622A]" />
             </div>
@@ -326,7 +326,7 @@ export default function OverseerDashboardClient({
         {/* Tile 4: Average Attendance */}
         <div className="bg-[#F0E6D3] rounded-2xl p-4 border border-[rgba(90,55,20,0.13)] shadow-sm flex flex-col justify-between">
           <div className="flex items-center justify-between mb-2">
-            <span className="text-[10px] font-bold text-[#9A7E65] uppercase tracking-wider">Avg / Parish</span>
+            <span className="text-[10px] font-bold text-[#9A7E65] uppercase tracking-wider">Avg / Church</span>
             <div className="p-1.5 bg-[#2B1A0E] text-[#F5E6CE] rounded-lg">
               <UserCheck className="w-3.5 h-3.5 text-[#B5622A]" />
             </div>
@@ -415,18 +415,17 @@ export default function OverseerDashboardClient({
             }`}
           >
             <Shield className="w-4 h-4" />
-            <span>Governance & Privacy</span>
+            <span>Privacy</span>
           </button>
         </div>
 
         {/* Search & Filters */}
         {activeTab === 'churches' && (
           <div className="flex items-center gap-2">
-            <div className="relative flex-1 sm:w-64">
-              <Search className="w-4 h-4 text-[#9A7E65] absolute left-3.5 top-1/2 -translate-y-1/2" />
+            <div className="relative flex-1 sm:w-64">              <Search className="w-4 h-4 text-[#9A7E65] absolute left-3.5 top-1/2 -translate-y-1/2" />
               <input
                 type="text"
-                placeholder="Search parishes or pastors..."
+                placeholder="Search churches or pastors..."
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 className="w-full pl-9 pr-3.5 py-2 bg-white/70 border border-[rgba(90,55,20,0.12)] rounded-xl text-xs text-[#1E1208] outline-none focus:border-[#B5622A]"
@@ -481,7 +480,7 @@ export default function OverseerDashboardClient({
                 <table className="w-full text-left text-xs">
                   <thead className="bg-[#2B1A0E] text-[#F5E6CE] uppercase text-[10px] tracking-wider">
                     <tr>
-                      <th className="py-3.5 px-4 font-bold">Parish Congregation</th>
+                      <th className="py-3.5 px-4 font-bold">Members</th>
                       <th className="py-3.5 px-4 font-bold">Senior Pastor</th>
                       <th className="py-3.5 px-4 font-bold">Total Members</th>
                       <th className="py-3.5 px-4 font-bold">Recent Attendance</th>
@@ -718,20 +717,20 @@ export default function OverseerDashboardClient({
                   <ShieldCheck className="w-5 h-5 text-[#B5622A]" />
                 </div>
                 <div>
-                  <h3 className="font-bold text-base text-[#1E1208]">Ecclesiastical Privacy Architecture</h3>
-                  <p className="text-xs text-[#9A7E65]">Strict separation between diocese reporting and pastoral confidence</p>
+                  <h3 className="font-bold text-base text-[#1E1208]">Privacy by design</h3>
+                  <p className="text-xs text-[#9A7E65]">What the overseer sees — and what stays private</p>
                 </div>
               </div>
 
               <div className="space-y-4 text-xs text-[#6B513E] leading-relaxed">
                 <p>
-                  pastorOs is engineered with cryptographic multi-tenant isolation. When pastors link their church to your denomination network, the database enforces privacy rules at the PostgreSQL schema layer:
+                  pastorOs keeps every church in its own private workspace. When a pastor links their church to your denomination network, the database enforces these privacy rules at the PostgreSQL layer:
                 </p>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-2">
                   <div className="p-3.5 bg-white/60 rounded-xl border border-[rgba(90,55,20,0.08)]">
                     <span className="font-bold text-[#1E1208] block mb-1">Visible to Overseer:</span>
                     <ul className="list-disc list-inside space-y-1 text-[#6B513E] text-[11px]">
-                      <li>Parish name, slug & senior pastor contact</li>
+                      <li>Church name, slug & senior pastor contact</li>
                       <li>Total active registered member counts</li>
                       <li>Recent Sunday / midweek attendance totals</li>
                       <li>Total Mobile Money giving volume</li>

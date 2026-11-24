@@ -49,7 +49,9 @@ export default function AdminSidebar({ church, churchSlug, hasOverseerAccess = f
     { href: `/${churchSlug}/admin/new-converts`, icon: UserPlus, label: 'New Converts' },
     { href: `/${churchSlug}/admin/messages`, icon: MessageSquare, label: 'Messages' },
     { href: `/${churchSlug}/admin/settings`, icon: Settings, label: 'Settings' },
-    ...(hasOverseerAccess ? [{ href: '/overseer', icon: ShieldCheck, label: 'Overseer Portal' }] : []),
+    // Dual-role (pastor + overseer) users keep oversight inside their own app
+    // shell — same sidebar, same skin — instead of a standalone console.
+    ...(hasOverseerAccess ? [{ href: `/${churchSlug}/admin/overseer`, icon: ShieldCheck, label: 'Overseer' }] : []),
   ];
 
   return (
